@@ -17,6 +17,7 @@ from carigma_api.auth.jwt_verifier import JWTVerifier
 from carigma_api.config import get_settings
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import health as health_routes
+from carigma_api.routes import score as score_routes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,10 +29,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Fail loudly on a misconfigured auth setup rather than starting an API
     # that cannot verify anybody — in production that would be an open door.
-    if settings.is_production and not (settings.supabase_jwt_secret or settings.jwks_url):
+    if settings.is_production and not settings.jwks_url:
         raise RuntimeError(
-            "No JWT verification method configured. Set SUPABASE_JWT_SECRET "
-            "(legacy HS256) or SUPABASE_URL/SUPABASE_JWKS_URL (asymmetric)."
+            "No JWKS endpoint configured. Set SUPABASE_URL (the JWKS URL is "
+            "derived from it) or SUPABASE_JWKS_URL explicitly."
         )
 
     app.state.jwt_verifier = JWTVerifier(settings)
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_routes.router)
     app.include_router(auth_routes.router)
+    app.include_router(score_routes.router)
     return app
 
 

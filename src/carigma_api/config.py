@@ -2,8 +2,8 @@
 
 Every value is read from the environment (or a local .env that is never
 committed). Nothing here has a production default that would silently "work"
-with a missing secret — a misconfigured auth secret must fail loudly at
-startup, not degrade into an open door.
+with a missing secret — a misconfigured auth setup must fail loudly at startup,
+not degrade into an open door.
 """
 
 from __future__ import annotations
@@ -26,26 +26,37 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False)
 
     # ── Supabase ───────────────────────────────────────────────────────────
-    # SUPABASE_URL is the project URL; the JWKS endpoint is derived from it.
     supabase_url: str = Field(default="")
-    # Legacy HS256 projects sign with the shared JWT secret. Newer projects use
-    # asymmetric keys (RS256/ES256) served from JWKS. Both are supported; see
-    # auth/jwt_verifier.py. Leave the secret empty when using JWKS.
-    supabase_jwt_secret: str = Field(default="")
+    supabase_anon_key: str = Field(default="")
+
+    # Auth verification is ASYMMETRIC ONLY (JWKS / ES256). There is deliberately
+    # no HS256 shared-secret setting: an HMAC secret both verifies and MINTS
+    # tokens, so holding one would let this service forge a session for any
+    # user. See auth/jwt_verifier.py.
     supabase_jwks_url: str = Field(default="")
-    # Expected `aud` claim. Supabase issues "authenticated" for signed-in users.
     supabase_jwt_audience: str = Field(default="authenticated")
+    jwks_cache_ttl_seconds: int = Field(default=600)
 
     # ── Service role (server-only — NEVER exposed to a browser) ─────────────
     supabase_service_key: str = Field(default="")
 
+    # ── Anthropic ──────────────────────────────────────────────────────────
+    anthropic_api_key: str = Field(default="")
+
     # ── Admin gate ─────────────────────────────────────────────────────────
-    # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default,
-    # matching V1 config.is_admin).
+    # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
 
     # ── CORS ───────────────────────────────────────────────────────────────
     cors_origins: str = Field(default="http://localhost:5173")
+
+    # ── Rate limits (contract §1; three distinct limiters — see §21 Q7) ────
+    # 1. Authenticated agent runs, per user per agent.
+    agent_run_limit_per_hour: int = Field(default=20)
+    # 2. Unauthenticated public endpoints, per IP.
+    public_limit_per_minute: int = Field(default=5)
+    # 3. The JSearch quota is a SHARED resource handled by the jobs cache +
+    #    daily cap, NOT by a per-user limiter. Do not duplicate it here.
 
     @property
     def admin_email_list(self) -> list[str]:

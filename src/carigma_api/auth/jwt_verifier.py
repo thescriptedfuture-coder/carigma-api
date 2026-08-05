@@ -2,17 +2,19 @@
 
 This is the door to users' career data. The rules it enforces:
 
-- The signature is **always** verified. There is no code path that decodes a
-  token without checking it, and no "trust the client" fallback.
+- **Asymmetric verification only.** Supabase signs with an ECC P-256 key
+  (ES256); we fetch the *public* key from JWKS. The legacy HS256 shared secret
+  is deliberately unsupported: an HMAC secret verifies **and mints**, so holding
+  one would mean this service could forge a token for any user. A verifier
+  should only be able to verify.
+- The signature is always checked. There is no code path that decodes a token
+  without verifying it, and no "trust the client" fallback.
 - `exp`, `aud` and `iss` are validated, not merely parsed.
 - `alg` is pinned to an allow-list, so a token cannot talk us into `none` or
-  downgrade an asymmetric project to a symmetric secret we happen to hold.
+  downgrade us to a symmetric algorithm.
 - Every failure returns the *same* generic message to the caller. Telling an
   attacker whether a token was expired vs. malformed vs. wrongly signed is free
   reconnaissance; the specific reason is logged server-side only.
-
-Two Supabase generations are supported: legacy projects that sign with a shared
-HS256 secret, and current projects that publish asymmetric keys via JWKS.
 """
 
 from __future__ import annotations
@@ -31,8 +33,10 @@ from carigma_api.config import Settings
 
 logger = logging.getLogger(__name__)
 
-_SYMMETRIC_ALGS = ["HS256"]
-_ASYMMETRIC_ALGS = ["RS256", "ES256"]
+# Supabase signs with ECC P-256. RS256 is accepted because Supabase's own key
+# rotation can move a project to RSA; HS256 and friends are NOT accepted — see
+# the module docstring.
+ALLOWED_ALGORITHMS = ("ES256", "RS256")
 
 
 class InvalidTokenError(Exception):
@@ -52,16 +56,12 @@ class AuthenticatedUser:
     role: str
     claims: dict[str, Any]
 
-    @property
-    def is_anonymous(self) -> bool:
-        return self.role == "anon"
-
 
 class _JWKSCache:
-    """Thread-safe wrapper around PyJWKClient.
+    """Thread-safe JWKS client with an explicit TTL.
 
-    PyJWKClient caches keys itself, but we add an explicit TTL so a rotated
-    signing key is picked up without a redeploy.
+    PyJWKClient caches keys itself; the TTL on top means a rotated signing key
+    is picked up without a redeploy.
     """
 
     def __init__(self, url: str, ttl_seconds: int = 600) -> None:
@@ -79,15 +79,22 @@ class _JWKSCache:
                 self._fetched_at = time.monotonic()
             return self._client
 
+    def invalidate(self) -> None:
+        """Force a refetch — used once on a verification miss, so a key rotated
+        inside the TTL window doesn't cause a wave of spurious 401s."""
+        with self._lock:
+            self._client = None
+            self._fetched_at = 0.0
+
 
 class JWTVerifier:
-    """Verifies Supabase-issued access tokens."""
+    """Verifies Supabase-issued access tokens against the project's JWKS."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._jwks: _JWKSCache | None = None
         if settings.jwks_url:
-            self._jwks = _JWKSCache(settings.jwks_url)
+            self._jwks = _JWKSCache(settings.jwks_url, settings.jwks_cache_ttl_seconds)
 
     @property
     def _issuer(self) -> str | None:
@@ -103,55 +110,60 @@ class JWTVerifier:
         if not token or not token.strip():
             raise InvalidTokenError
 
+        if self._jwks is None:
+            logger.error("JWT rejected: no JWKS URL configured")
+            raise InvalidTokenError
+
         try:
             header = jwt.get_unverified_header(token)
         except jwt.PyJWTError as exc:
             logger.warning("JWT rejected: unreadable header (%s)", exc)
             raise InvalidTokenError from exc
 
+        # Pin the algorithm from OUR allow-list, never from the token. An
+        # attacker who controls `alg` would otherwise try `none`, or present an
+        # HS256 token hoping we verify it with a public key as the HMAC secret.
         alg = header.get("alg")
-        # Pin the algorithm. An attacker who controls `alg` can otherwise try
-        # `none`, or coax an RS256 project into verifying with a public key
-        # treated as an HMAC secret.
-        if alg in _ASYMMETRIC_ALGS:
-            claims = self._decode_asymmetric(token, alg)
-        elif alg in _SYMMETRIC_ALGS:
-            claims = self._decode_symmetric(token)
-        else:
+        if alg not in ALLOWED_ALGORITHMS:
             logger.warning("JWT rejected: disallowed alg %r", alg)
             raise InvalidTokenError
 
+        claims = self._decode_with_retry(token, alg)
         return self._build_user(claims)
 
-    # ── decoders ───────────────────────────────────────────────────────────
+    def _decode_with_retry(self, token: str, alg: str) -> dict[str, Any]:
+        """Decode, refetching JWKS once if the key isn't known yet.
 
-    def _decode_asymmetric(self, token: str, alg: str) -> dict[str, Any]:
-        if self._jwks is None:
-            logger.error("JWT rejected: asymmetric token but no JWKS URL configured")
+        A key rotated inside the cache TTL would otherwise 401 every request
+        until the TTL expired.
+        """
+        if self._jwks is None:  # pragma: no cover — verify() guards this
             raise InvalidTokenError
         try:
-            signing_key = self._jwks.get().get_signing_key_from_jwt(token)
-            return self._decode(token, signing_key.key, [alg])
+            return self._decode(token, alg)
+        except (jwt.PyJWKClientError, jwt.exceptions.InvalidKeyError):
+            logger.info("Signing key not found in cached JWKS; refetching once")
+            self._jwks.invalidate()
         except (jwt.PyJWTError, httpx.HTTPError) as exc:
-            logger.warning("JWT rejected: asymmetric verification failed (%s)", exc)
+            logger.warning("JWT rejected: verification failed (%s)", exc)
             raise InvalidTokenError from exc
 
-    def _decode_symmetric(self, token: str) -> dict[str, Any]:
-        secret = self._settings.supabase_jwt_secret
-        if not secret:
-            logger.error("JWT rejected: HS256 token but SUPABASE_JWT_SECRET is unset")
-            raise InvalidTokenError
         try:
-            return self._decode(token, secret, _SYMMETRIC_ALGS)
-        except jwt.PyJWTError as exc:
-            logger.warning("JWT rejected: symmetric verification failed (%s)", exc)
+            return self._decode(token, alg)
+        except (jwt.PyJWTError, httpx.HTTPError) as exc:
+            logger.warning("JWT rejected after JWKS refetch (%s)", exc)
             raise InvalidTokenError from exc
 
-    def _decode(self, token: str, key: Any, algorithms: list[str]) -> dict[str, Any]:
+    def _decode(self, token: str, alg: str) -> dict[str, Any]:
+        # A real check, not an assert: asserts are stripped under `python -O`,
+        # and this is a security path.
+        if self._jwks is None:  # pragma: no cover — verify() guards this
+            raise InvalidTokenError
+        signing_key = self._jwks.get().get_signing_key_from_jwt(token)
         decoded: dict[str, Any] = jwt.decode(
             token,
-            key=key,
-            algorithms=algorithms,
+            key=signing_key.key,
+            algorithms=[alg],
             audience=self._settings.supabase_jwt_audience or None,
             issuer=self._issuer,
             options={
@@ -164,8 +176,6 @@ class JWTVerifier:
         )
         return decoded
 
-    # ── claim mapping ──────────────────────────────────────────────────────
-
     def _build_user(self, claims: dict[str, Any]) -> AuthenticatedUser:
         user_id = claims.get("sub")
         if not user_id or not isinstance(user_id, str):
@@ -174,8 +184,7 @@ class JWTVerifier:
 
         role = claims.get("role") or "authenticated"
         # An anon-key token is not a signed-in user. Supabase issues these for
-        # unauthenticated clients; accepting one as a user would let anybody
-        # through the front door.
+        # unauthenticated clients; accepting one would open the front door.
         if role == "anon":
             logger.warning("JWT rejected: anon role presented as a user token")
             raise InvalidTokenError

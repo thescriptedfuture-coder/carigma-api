@@ -1,8 +1,7 @@
 """Auth layer tests.
 
-The brief calls this security-critical, so the failure paths get at least as
-much attention as the happy path. Each test names the attack or mistake it
-prevents.
+Security-critical, so failure paths get at least as much attention as the happy
+path. Each test names the attack or mistake it prevents.
 """
 
 from __future__ import annotations
@@ -11,13 +10,15 @@ import time
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+
 from tests.conftest import (
     ADMIN_EMAIL,
     SERVICE_KEY,
-    TEST_AUDIENCE,
-    TEST_ISSUER,
-    TEST_SECRET,
+    TEST_KID,
+    USER_ID,
+    attacker_token,
     auth,
     make_token,
 )
@@ -31,11 +32,11 @@ def test_health_needs_no_auth(client: TestClient) -> None:
     assert r.json()["status"] == "ok"
 
 
-def test_valid_token_is_accepted(client: TestClient) -> None:
+def test_valid_es256_token_is_accepted(client: TestClient) -> None:
     r = client.post("/auth/session", headers=auth(make_token()))
     assert r.status_code == 200
     body = r.json()
-    assert body["user_id"] == "11111111-1111-1111-1111-111111111111"
+    assert body["user_id"] == USER_ID
     assert body["email"] == "user@example.com"
     assert body["is_admin"] is False
 
@@ -66,17 +67,15 @@ def test_wrong_scheme_is_rejected(client: TestClient) -> None:
 
 
 def test_garbage_token_is_rejected(client: TestClient) -> None:
-    r = client.post("/auth/session", headers=auth("not-a-jwt"))
-    assert r.status_code == 401
+    assert client.post("/auth/session", headers=auth("not-a-jwt")).status_code == 401
 
 
 # ── Signature and algorithm attacks ────────────────────────────────────────
 
 
-def test_token_signed_with_wrong_secret_is_rejected(client: TestClient) -> None:
-    """The core check: a well-formed token we did not sign is worthless."""
-    r = client.post("/auth/session", headers=auth(make_token(secret="attacker-secret")))
-    assert r.status_code == 401
+def test_token_signed_with_untrusted_key_is_rejected(client: TestClient) -> None:
+    """The core check: a well-formed ES256 token we did not sign is worthless."""
+    assert client.post("/auth/session", headers=auth(attacker_token())).status_code == 401
 
 
 def test_alg_none_is_rejected(client: TestClient) -> None:
@@ -85,30 +84,69 @@ def test_alg_none_is_rejected(client: TestClient) -> None:
     assert client.post("/auth/session", headers=auth(token)).status_code == 401
 
 
-def test_unlisted_algorithm_is_rejected(client: TestClient) -> None:
-    """alg must come from the allow-list, not from the token."""
-    token = make_token(algorithm="HS512")
+def test_hs256_is_rejected_even_though_it_is_a_real_supabase_algorithm(
+    client: TestClient,
+) -> None:
+    """HS256 is deliberately unsupported.
+
+    An HMAC secret both verifies AND mints, so accepting HS256 would mean this
+    service could forge a session for any user. Symmetric tokens must never
+    authenticate here, regardless of the secret presented.
+    """
+    token = jwt.encode(
+        {"sub": USER_ID, "exp": int(time.time()) + 3600, "role": "authenticated"},
+        "any-shared-secret-at-all",
+        algorithm="HS256",
+    )
     assert client.post("/auth/session", headers=auth(token)).status_code == 401
 
 
-def test_tampered_payload_is_rejected(client: TestClient) -> None:
-    """Editing a claim invalidates the signature."""
-    token = make_token()
-    head, payload, sig = token.split(".")
-    forged = make_token(sub="99999999-9999-9999-9999-999999999999", secret="other")
-    _, forged_payload, _ = forged.split(".")
-    assert (
-        client.post("/auth/session", headers=auth(f"{head}.{forged_payload}.{sig}")).status_code
-        == 401
+def test_algorithm_confusion_downgrade_is_rejected(client: TestClient) -> None:
+    """Presenting the public key as an HMAC secret must not verify."""
+    from tests.conftest import JWKS
+
+    token = jwt.encode(
+        {"sub": USER_ID, "exp": int(time.time()) + 3600},
+        json_dumps_key(JWKS),
+        algorithm="HS256",
     )
+    assert client.post("/auth/session", headers=auth(token)).status_code == 401
+
+
+def json_dumps_key(jwks: dict[str, object]) -> str:
+    import json
+
+    return json.dumps(jwks)
+
+
+def test_unlisted_algorithm_is_rejected(client: TestClient) -> None:
+    """alg must come from our allow-list, not from the token."""
+    key = ec.generate_private_key(ec.SECP521R1())
+    token = jwt.encode({"sub": USER_ID, "exp": int(time.time()) + 3600}, key, algorithm="ES512")
+    assert client.post("/auth/session", headers=auth(token)).status_code == 401
+
+
+def test_unknown_kid_is_rejected(client: TestClient) -> None:
+    """A token naming a signing key that isn't in our JWKS must not verify."""
+    r = client.post("/auth/session", headers=auth(make_token(kid="some-other-key")))
+    assert r.status_code == 401
+
+
+def test_tampered_payload_is_rejected(client: TestClient) -> None:
+    """Swapping in a different payload invalidates the signature."""
+    good = make_token()
+    forged = attacker_token(sub="99999999-9999-9999-9999-999999999999")
+    head, _, sig = good.split(".")
+    _, forged_payload, _ = forged.split(".")
+    r = client.post("/auth/session", headers=auth(f"{head}.{forged_payload}.{sig}"))
+    assert r.status_code == 401
 
 
 # ── Claim validation ───────────────────────────────────────────────────────
 
 
 def test_expired_token_is_rejected(client: TestClient) -> None:
-    r = client.post("/auth/session", headers=auth(make_token(exp_delta=-60)))
-    assert r.status_code == 401
+    assert client.post("/auth/session", headers=auth(make_token(exp_delta=-60))).status_code == 401
 
 
 def test_wrong_audience_is_rejected(client: TestClient) -> None:
@@ -125,40 +163,37 @@ def test_wrong_issuer_is_rejected(client: TestClient) -> None:
 
 
 def test_missing_sub_is_rejected(client: TestClient) -> None:
-    r = client.post("/auth/session", headers=auth(make_token(omit=("sub",))))
-    assert r.status_code == 401
+    assert client.post("/auth/session", headers=auth(make_token(omit=("sub",)))).status_code == 401
 
 
 def test_missing_exp_is_rejected(client: TestClient) -> None:
     """A token without an expiry would be valid forever."""
-    r = client.post("/auth/session", headers=auth(make_token(omit=("exp",))))
-    assert r.status_code == 401
+    assert client.post("/auth/session", headers=auth(make_token(omit=("exp",)))).status_code == 401
 
 
 def test_anon_role_is_rejected(client: TestClient) -> None:
     """The Supabase anon key is not a user. Accepting it opens the front door."""
-    r = client.post("/auth/session", headers=auth(make_token(role="anon")))
-    assert r.status_code == 401
+    assert client.post("/auth/session", headers=auth(make_token(role="anon"))).status_code == 401
 
 
 # ── Failures leak nothing ──────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "token",
-    [
-        make_token(exp_delta=-60),
-        make_token(secret="attacker-secret"),
-        make_token(audience="wrong"),
-        "not-a-jwt",
-    ],
-    ids=["expired", "bad-signature", "wrong-audience", "malformed"],
-)
-def test_all_failures_return_identical_body(client: TestClient, token: str) -> None:
+def test_all_failures_return_identical_body(client: TestClient) -> None:
     """Distinguishable errors tell an attacker which knob to turn next."""
-    r = client.post("/auth/session", headers=auth(token))
-    assert r.status_code == 401
-    assert r.json()["detail"] == "Not authenticated."
+    tokens = [
+        make_token(exp_delta=-60),
+        attacker_token(),
+        make_token(audience="wrong"),
+        make_token(kid="unknown"),
+        "not-a-jwt",
+    ]
+    bodies = set()
+    for token in tokens:
+        r = client.post("/auth/session", headers=auth(token))
+        assert r.status_code == 401
+        bodies.add(r.text)
+    assert len(bodies) == 1, "401 bodies differ between failure modes"
 
 
 # ── Admin gate ─────────────────────────────────────────────────────────────
@@ -176,8 +211,7 @@ def test_admin_flag_reported_for_admin(client: TestClient) -> None:
 
 def test_non_admin_gets_403_not_401(client: TestClient) -> None:
     """Authenticated but unauthorized is 403 — a distinct, correct status."""
-    r = client.get("/auth/admin-probe", headers=auth(make_token()))
-    assert r.status_code == 403
+    assert client.get("/auth/admin-probe", headers=auth(make_token())).status_code == 403
 
 
 def test_admin_route_still_requires_a_token(client: TestClient) -> None:
@@ -209,8 +243,7 @@ def test_service_role_accepts_correct_key(client: TestClient) -> None:
 
 
 def test_service_role_rejects_wrong_key(client: TestClient) -> None:
-    r = client.get("/auth/service-probe", headers={"X-Service-Key": "wrong"})
-    assert r.status_code == 401
+    assert client.get("/auth/service-probe", headers={"X-Service-Key": "wrong"}).status_code == 401
 
 
 def test_service_role_rejects_missing_key(client: TestClient) -> None:
@@ -250,14 +283,14 @@ def test_assert_owns_blocks_other_users_resource() -> None:
 # ── Verifier configuration ─────────────────────────────────────────────────
 
 
-def test_hs256_rejected_when_no_secret_configured() -> None:
-    """Without a secret there is nothing to verify against — reject, never allow."""
+def test_no_jwks_configured_rejects_everything() -> None:
+    """Without a JWKS URL there is nothing to verify against — reject, never allow."""
     from carigma_api.auth.jwt_verifier import InvalidTokenError, JWTVerifier
     from carigma_api.config import Settings
 
-    verifier = JWTVerifier(Settings(supabase_url="", supabase_jwt_secret=""))
+    verifier = JWTVerifier(Settings(supabase_url="", supabase_jwks_url=""))
     with pytest.raises(InvalidTokenError):
-        verifier.verify(make_token(issuer=None, audience=None))
+        verifier.verify(make_token())
 
 
 def test_jwks_url_derived_from_supabase_url() -> None:
@@ -267,13 +300,58 @@ def test_jwks_url_derived_from_supabase_url() -> None:
     assert s.jwks_url == "https://abc.supabase.co/auth/v1/.well-known/jwks.json"
 
 
-def test_audience_and_issuer_round_trip() -> None:
-    """Guards the fixture itself: these claims must match what we verify."""
-    decoded = jwt.decode(
-        make_token(),
-        TEST_SECRET,
-        algorithms=["HS256"],
-        audience=TEST_AUDIENCE,
-        issuer=TEST_ISSUER,
+def test_config_has_no_hs256_secret_field() -> None:
+    """Regression guard: re-adding a shared secret would give this service the
+    ability to MINT tokens, not just verify them."""
+    from carigma_api.config import Settings
+
+    assert not hasattr(Settings(), "supabase_jwt_secret")
+
+
+def test_allow_list_excludes_symmetric_algorithms() -> None:
+    from carigma_api.auth.jwt_verifier import ALLOWED_ALGORITHMS
+
+    assert "ES256" in ALLOWED_ALGORITHMS
+    assert not any(a.startswith("HS") for a in ALLOWED_ALGORITHMS)
+
+
+def test_rotated_key_is_picked_up_without_redeploy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key rotated inside the cache TTL must not cause a wave of 401s: the
+    verifier refetches JWKS once on a miss."""
+    import json
+
+    from jwt import PyJWKClient
+    from jwt.algorithms import ECAlgorithm
+
+    from carigma_api.auth.jwt_verifier import JWTVerifier
+    from carigma_api.config import Settings
+    from tests.conftest import TEST_AUDIENCE, TEST_SUPABASE_URL
+
+    old_key = ec.generate_private_key(ec.SECP256R1())
+    new_key = ec.generate_private_key(ec.SECP256R1())
+
+    def jwk_for(k: ec.EllipticCurvePrivateKey, kid: str) -> dict[str, object]:
+        d = json.loads(ECAlgorithm.to_jwk(k.public_key()))
+        d.update({"kid": kid, "alg": "ES256", "use": "sig"})
+        return d
+
+    state = {"keys": [jwk_for(old_key, "old")]}
+    monkeypatch.setattr(PyJWKClient, "fetch_data", lambda self: state)
+
+    verifier = JWTVerifier(
+        Settings(supabase_url=TEST_SUPABASE_URL, supabase_jwt_audience=TEST_AUDIENCE)
     )
-    assert decoded["sub"]
+    # Warm the cache with the old key.
+    verifier.verify(make_token(key=old_key, kid="old"))
+
+    # Rotate: the cache still holds only "old".
+    state["keys"] = [jwk_for(new_key, "new")]
+    user = verifier.verify(make_token(key=new_key, kid="new"))
+    assert user.id == USER_ID
+
+
+def test_kid_is_required_to_match_a_published_key() -> None:
+    """Sanity guard on the fixture itself."""
+    from tests.conftest import JWKS
+
+    assert JWKS["keys"][0]["kid"] == TEST_KID
