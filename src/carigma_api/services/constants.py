@@ -73,11 +73,23 @@ CREDIT_LABELS: Final[dict[str, str]] = {
 FREE_ACTIONS: Final = frozenset({"skip_slot", "onboarding_score", "score_fix"})
 
 # ── Score bands ────────────────────────────────────────────────────────────
+# The V2 ladder, from the LOCKED design system (Brief 2 §"Score bands — a ladder
+# of names, not colours"). This REPLACES V1's four-band
+# buried/underselling/solid/strong set.
+#
+# Two properties the design is explicit about, and that the API must not
+# undermine:
+#   1. The band is a NEUTRAL LADDER — no red shame at 35, no green medal at 80.
+#      The API therefore returns a name only; it never returns a colour, and the
+#      client colours movement (▲/▼), not position.
+#   2. There is deliberately NO combined-score band. LinkedIn and Naukri are two
+#      instruments on two ladders; nothing here may average them.
 SCORE_BANDS: Final = (
-    (0, 39, "buried"),
-    (40, 59, "underselling"),
-    (60, 79, "solid"),
-    (80, 100, "strong"),
+    (0, 39, "FAINT"),
+    (40, 59, "EMERGING"),
+    (60, 74, "CLEAR"),
+    (75, 89, "STRONG"),
+    (90, 100, "COMMANDING"),
 )
 
 
@@ -85,7 +97,9 @@ def score_band(score: int) -> str:
     for low, high, name in SCORE_BANDS:
         if low <= score <= high:
             return name
-    return "buried" if score < 0 else "strong"
+    # Out of range is a caller bug, not user data — clamp to the nearest end
+    # rather than inventing a sixth band.
+    return "FAINT" if score < 0 else "COMMANDING"
 
 
 # The honesty note that ships INSIDE the score payload. Claude reasons

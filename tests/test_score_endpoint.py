@@ -129,7 +129,8 @@ def test_compute_score_end_to_end(wired, monkeypatch: pytest.MonkeyPatch) -> Non
     assert r.status_code == 200
     body = r.json()
     assert body["result"]["profileScore"] == 71
-    assert body["result"]["band"] == "solid"
+    # V2's five-band ladder from the locked design system, not V1's four.
+    assert body["result"]["band"] == "CLEAR"
     assert body["credits"]["charged"] == 10
     assert body["credits"]["balance_after"] == 90
     assert body["provenance"]["agent_label"] == "Profile Analyst"
@@ -214,7 +215,7 @@ def test_out_of_range_score_is_clamped_not_rejected(wired, monkeypatch: pytest.M
 
     r = client.post("/score/compute", json={}, headers=auth(make_token()))
     assert r.json()["result"]["profileScore"] == 100
-    assert r.json()["result"]["band"] == "strong"
+    assert r.json()["result"]["band"] == "COMMANDING"
 
 
 # ── Insufficient credits ───────────────────────────────────────────────────
