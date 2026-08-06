@@ -38,6 +38,19 @@ logger = logging.getLogger(__name__)
 # the module docstring.
 ALLOWED_ALGORITHMS = ("ES256", "RS256")
 
+# Tolerance for clock skew between Supabase's servers and ours, in seconds.
+#
+# This is not theoretical: the first end-to-end test against the live project
+# rejected a freshly-minted, perfectly valid token with
+# `ImmatureSignatureError: The token is not yet valid (iat)` — Supabase's clock
+# was a moment ahead of ours. Without leeway that is a real availability bug:
+# every sign-in fails whenever our clock drifts behind theirs.
+#
+# 60s is the conventional allowance. It applies to `iat`/`nbf` (tolerating a
+# fast issuer) and to `exp` (tolerating a slow one). Extending a ~1-hour token's
+# life by up to a minute is a negligible cost against refusing valid users.
+CLOCK_SKEW_LEEWAY_SECONDS = 60
+
 
 class InvalidTokenError(Exception):
     """Raised for every verification failure.
@@ -166,6 +179,7 @@ class JWTVerifier:
             algorithms=[alg],
             audience=self._settings.supabase_jwt_audience or None,
             issuer=self._issuer,
+            leeway=CLOCK_SKEW_LEEWAY_SECONDS,
             options={
                 "verify_signature": True,
                 "verify_exp": True,

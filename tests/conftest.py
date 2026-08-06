@@ -64,6 +64,7 @@ def make_token(
     email: str = USER_EMAIL,
     role: str = "authenticated",
     exp_delta: int = 3600,
+    iat_delta: int = 0,
     issuer: str | None = TEST_ISSUER,
     audience: str | None = TEST_AUDIENCE,
     key: Any = None,
@@ -78,7 +79,9 @@ def make_token(
         "sub": sub,
         "email": email,
         "role": role,
-        "iat": now,
+        # iat_delta > 0 simulates an issuer whose clock runs ahead of ours —
+        # the real Supabase clock-skew case.
+        "iat": now + iat_delta,
         "exp": now + exp_delta,
     }
     if issuer is not None:

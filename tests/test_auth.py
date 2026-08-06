@@ -176,6 +176,47 @@ def test_anon_role_is_rejected(client: TestClient) -> None:
     assert client.post("/auth/session", headers=auth(make_token(role="anon"))).status_code == 401
 
 
+# ── Clock skew (a REAL bug, found against the live project) ────────────────
+
+
+def test_token_issued_slightly_in_the_future_is_accepted(client: TestClient) -> None:
+    """Regression: the first live end-to-end test failed with
+    `ImmatureSignatureError: The token is not yet valid (iat)`.
+
+    Supabase's clock was a moment ahead of ours, so a freshly-minted, perfectly
+    valid token was rejected. Without leeway this rejects every sign-in whenever
+    our server's clock drifts behind theirs — an availability bug that only a
+    real token could reveal.
+    """
+    r = client.post("/auth/session", headers=auth(make_token(iat_delta=20)))
+    assert r.status_code == 200
+
+
+def test_token_expiring_within_the_skew_window_is_accepted(client: TestClient) -> None:
+    """The same leeway must apply to `exp` — a slow issuer, not a fast one."""
+    r = client.post("/auth/session", headers=auth(make_token(exp_delta=-20)))
+    assert r.status_code == 200
+
+
+def test_leeway_is_bounded_and_does_not_excuse_a_real_expiry(client: TestClient) -> None:
+    """Tolerating skew must not become tolerating expired tokens."""
+    r = client.post("/auth/session", headers=auth(make_token(exp_delta=-3600)))
+    assert r.status_code == 401
+
+
+def test_leeway_does_not_accept_a_token_from_far_in_the_future(client: TestClient) -> None:
+    """A token issued an hour from now is not skew — it is wrong."""
+    r = client.post("/auth/session", headers=auth(make_token(iat_delta=3600)))
+    assert r.status_code == 401
+
+
+def test_skew_allowance_is_modest() -> None:
+    """A large allowance would meaningfully extend every token's life."""
+    from carigma_api.auth.jwt_verifier import CLOCK_SKEW_LEEWAY_SECONDS
+
+    assert 0 < CLOCK_SKEW_LEEWAY_SECONDS <= 120
+
+
 # ── Failures leak nothing ──────────────────────────────────────────────────
 
 
