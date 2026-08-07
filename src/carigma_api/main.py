@@ -17,6 +17,7 @@ from carigma_api.auth.jwt_verifier import JWTVerifier
 from carigma_api.config import get_settings
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import health as health_routes
+from carigma_api.routes import posts as posts_routes
 from carigma_api.routes import score as score_routes
 from carigma_api.routes import weekly as weekly_routes
 
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_routes.router)
     app.include_router(score_routes.router)
     app.include_router(weekly_routes.router)
+    app.include_router(posts_routes.router)
     return app
 
 
