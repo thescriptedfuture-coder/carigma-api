@@ -18,6 +18,7 @@ from carigma_api.config import get_settings
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import health as health_routes
 from carigma_api.routes import score as score_routes
+from carigma_api.routes import weekly as weekly_routes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(health_routes.router)
     app.include_router(auth_routes.router)
     app.include_router(score_routes.router)
+    app.include_router(weekly_routes.router)
     return app
 
 
