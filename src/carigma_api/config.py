@@ -43,6 +43,21 @@ class Settings(BaseSettings):
     # ── Anthropic ──────────────────────────────────────────────────────────
     anthropic_api_key: str = Field(default="")
 
+    # ── Job providers ──────────────────────────────────────────────────────
+    # Each is optional: an unconfigured provider is skipped, not an error, so
+    # the feed degrades to whatever sources exist rather than failing.
+    jsearch_api_key: str = Field(default="")
+    jsearch_host: str = Field(default="jsearch.p.rapidapi.com")
+    adzuna_app_id: str = Field(default="")
+    adzuna_app_key: str = Field(default="")
+
+    # V1 and V2 share ONE JSearch key during the parallel period, so V2's cap
+    # is set well below the plan limit on purpose: V2 testing must not be able
+    # to exhaust the quota out from under live V1 users. Raise this only after
+    # cutover, when V1 is no longer drawing on the same key.
+    jsearch_daily_cap: int = Field(default=25)
+    jobs_cache_ttl_hours: int = Field(default=48)
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
