@@ -87,7 +87,11 @@ class JSearchProvider:
             return None
 
         options = tuple(
-            ApplyOption(publisher=str(o.get("publisher", "")), url=str(o.get("apply_link", "")))
+            ApplyOption(
+                publisher=str(o.get("publisher", "")),
+                url=str(o.get("apply_link", "")),
+                is_direct=bool(o.get("is_direct")),
+            )
             for o in (raw.get("apply_options") or [])
             if o.get("apply_link")
         )
@@ -101,6 +105,10 @@ class JSearchProvider:
             apply_url=str(apply_url),
             apply_options=options,
             salary=_jsearch_salary(raw),
+            # Live check: 10/10 results routed through aggregators
+            # (SimplyHired, Shine, apna.co, BeBee). Surfacing the publisher is
+            # how "Apply" avoids implying the employer's own site.
+            publisher=raw.get("job_publisher"),
             job_type=raw.get("job_employment_type"),
             posted_at=_parse_ts(raw.get("job_posted_at_timestamp")),
             description=raw.get("job_description"),
@@ -172,6 +180,19 @@ class AdzunaProvider:
             location=str((raw.get("location") or {}).get("display_name", "")),
             apply_url=str(apply_url),
             salary=_adzuna_salary(raw),
+            # Adzuna's own redirect page, not the employer's site — so it is
+            # named as the publisher rather than left to look like the company.
+            publisher="Adzuna",
+            # SPARSE in the live India response: present on some rows, absent
+            # on others. (A first probe read one row, saw no contract field and
+            # wrongly concluded it was never returned — corrected by checking
+            # across rows.) When absent this stays None and the UI omits the
+            # chip; defaulting to "Full-time" would invent a term of employment.
+            #
+            # Deliberately NOT falling back to `contract_type`. That field
+            # answers a different question — permanent vs contract, not
+            # full-time vs part-time — and folding the two together would
+            # render "permanent" where the UI promises hours.
             job_type=raw.get("contract_time"),
             posted_at=_parse_ts(raw.get("created")),
             description=raw.get("description"),

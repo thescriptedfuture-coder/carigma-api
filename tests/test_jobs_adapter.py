@@ -286,6 +286,91 @@ def test_apply_options_carry_real_publisher_links() -> None:
     assert normalized.apply_options[0].publisher == "LinkedIn"
 
 
+# ── Who is on the other end of "Apply" ─────────────────────────────────────
+# The live check found job_apply_is_direct false for 10/10 real results — every
+# link went to an aggregator. Real postings, so §25 holds, but the user is
+# entitled to know they are not reaching the employer.
+
+
+def test_the_host_of_the_posting_is_named() -> None:
+    from carigma_api.services.jobs.providers import JSearchProvider
+
+    normalized = JSearchProvider("key")._normalize(
+        {
+            "job_id": "1",
+            "job_title": "Data Analyst",
+            "employer_name": "Zomato",
+            "job_apply_link": "https://simplyhired.example/apply/1",
+            "job_publisher": "SimplyHired",
+        }
+    )
+    assert normalized is not None
+    assert normalized.publisher == "SimplyHired"
+
+
+def test_directness_is_carried_not_assumed() -> None:
+    """An aggregator link must not read as a direct application, and a direct
+    one must not be understated."""
+    from carigma_api.services.jobs.providers import JSearchProvider
+
+    normalized = JSearchProvider("key")._normalize(
+        {
+            "job_id": "1",
+            "job_title": "Data Analyst",
+            "employer_name": "Zomato",
+            "job_apply_link": "https://real.example/apply/1",
+            "apply_options": [
+                {
+                    "publisher": "Zomato Careers",
+                    "apply_link": "https://zomato.example/jobs/1",
+                    "is_direct": True,
+                },
+                {"publisher": "SimplyHired", "apply_link": "https://sh.example/1"},
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.apply_options[0].is_direct is True
+    # Absent means false — never optimistically true.
+    assert normalized.apply_options[1].is_direct is False
+
+
+def test_adzuna_names_itself_rather_than_posing_as_the_employer() -> None:
+    """redirect_url is Adzuna's own interstitial, not the company's site."""
+    normalized = _adzuna_row(redirect_url="https://adzuna.in/details/123")
+    assert normalized is not None
+    assert normalized.publisher == "Adzuna"
+
+
+def test_absent_contract_time_stays_none_rather_than_full_time() -> None:
+    """Adzuna India omits `contract_time` on many rows. Inferring a term of
+    employment is the same class of fabrication as inventing a salary."""
+    assert _adzuna_row().job_type is None
+    assert _adzuna_row(contract_time="part_time").job_type == "part_time"
+
+
+def test_contract_type_is_not_substituted_for_contract_time() -> None:
+    """`contract_type` is permanent-vs-contract; `contract_time` is full-vs-part
+    time. Folding them together would render "permanent" where the UI promises
+    hours."""
+    assert _adzuna_row(contract_type="permanent").job_type is None
+
+
+def _adzuna_row(**overrides: object) -> NormalizedJob:
+    from carigma_api.services.jobs.providers import AdzunaProvider
+
+    raw: dict[str, object] = {
+        "id": "1",
+        "title": "Data Analyst",
+        "company": {"display_name": "Zomato"},
+        "redirect_url": "https://adzuna.in/details/1",
+        **overrides,
+    }
+    normalized = AdzunaProvider("id", "key")._normalize(raw)
+    assert normalized is not None
+    return normalized
+
+
 # ── The shape stays opaque to the ranking path ─────────────────────────────
 
 
