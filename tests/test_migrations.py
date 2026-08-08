@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+# Inside THIS repo, not the parent workspace. The migrations previously lived
+# at `v2/migrations/`, which the root .gitignore excludes via `v2/*` — so the
+# schema V2 depends on existed only on one laptop and had never been committed.
+# Found while committing V2_002. They belong beside the code that depends on
+# them and beside this test.
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
 
 def _sql_files() -> list[Path]:
