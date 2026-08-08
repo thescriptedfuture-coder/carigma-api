@@ -30,7 +30,7 @@ from carigma_api.services.admin import (
     apply_adjustment,
     low_credit_summary,
 )
-from carigma_api.services.repository import service_client
+from carigma_api.services.repository import emails_by_user_id, service_client
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def get_overview(
     now = datetime.now(UTC)
 
     users = _rows(db, "credits", "user_id,balance")
-    emails = {r["id"]: r.get("email", "") for r in _rows(db, "profiles", "id,email")}
+    emails = emails_by_user_id(db)
     open_requests = {
         r["user_id"]
         for r in _rows(db, "credit_requests", "user_id,resolved_at")
@@ -86,7 +86,7 @@ def get_overview(
     low = [
         LowCreditUser(
             user_id=str(r["user_id"]),
-            email=emails.get(r["user_id"], "—"),
+            email=emails.get(str(r["user_id"]), "—"),
             balance=int(r.get("balance") or 0),
             has_open_request=r["user_id"] in open_requests,
         )
@@ -150,14 +150,15 @@ def list_users(
     balances = {
         r["user_id"]: int(r.get("balance") or 0) for r in _rows(db, "credits", "user_id,balance")
     }
-    profiles = _rows(db, "profiles", "id,email,name,platforms,created_at")
+    profiles = _rows(db, "profiles", "user_id,name,platforms,created_at")
+    emails = emails_by_user_id(db)
 
     rows = [
         {
-            "user_id": p["id"],
-            "email": p.get("email", ""),
+            "user_id": p["user_id"],
+            "email": emails.get(str(p["user_id"]), ""),
             "name": p.get("name", ""),
-            "balance": balances.get(p["id"], 0),
+            "balance": balances.get(str(p["user_id"]), 0),
             "platforms": p.get("platforms") or [],
             "created_at": p.get("created_at"),
         }
@@ -183,7 +184,7 @@ def get_user(
     user_id: str, admin: AdminUser, settings: Annotated[Settings, Depends(get_settings)]
 ) -> dict[str, Any]:
     db = _db(settings)
-    profile = _one(db, "profiles", "id", user_id)
+    profile = _one(db, "profiles", "user_id", user_id)
     if profile is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -270,13 +271,13 @@ def list_credit_requests(
     is the signal, not any single ask.
     """
     rows = _rows(db := _db(settings), "credit_requests", "*")
-    emails = {r["id"]: r.get("email", "") for r in _rows(db, "profiles", "id,email")}
+    emails = emails_by_user_id(db)
     if open_only:
         rows = [r for r in rows if not r.get("resolved_at")]
     rows.sort(key=lambda r: str(r.get("asked_at") or ""), reverse=True)
 
     return {
-        "items": [{**r, "email": emails.get(r["user_id"], "—")} for r in rows],
+        "items": [{**r, "email": emails.get(str(r["user_id"]), "—")} for r in rows],
         "open_count": sum(1 for r in rows if not r.get("resolved_at")),
     }
 
@@ -309,11 +310,11 @@ def list_feedback(
     answer. Social proof — surfaced, not buried."""
     db = _db(settings)
     rows = _rows(db, "feedback", "*")
-    emails = {r["id"]: r.get("email", "") for r in _rows(db, "profiles", "id,email")}
+    emails = emails_by_user_id(db)
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
 
     return {
-        "items": [{**r, "email": emails.get(r.get("user_id"), "—")} for r in rows],
+        "items": [{**r, "email": emails.get(str(r.get("user_id")), "—")} for r in rows],
         "total": len(rows),
     }
 
@@ -428,7 +429,7 @@ def get_analytics(
     admin: AdminUser, settings: Annotated[Settings, Depends(get_settings)]
 ) -> dict[str, Any]:
     db = _db(settings)
-    profiles = _rows(db, "profiles", "id,created_at")
+    profiles = _rows(db, "profiles", "user_id,created_at")
     scored = {r.get("user_id") for r in _rows(db, "score_history", "user_id")}
     runs = _rows(db, "agent_runs", "user_id,agent,started_at")
 

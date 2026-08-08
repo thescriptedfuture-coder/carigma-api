@@ -80,10 +80,14 @@ def db(monkeypatch: pytest.MonkeyPatch) -> FakeTable:
                 {"user_id": "u2", "balance": 6},
                 {"user_id": "u3", "balance": 400},
             ],
+            # `profiles` is keyed by user_id and has NO email column — the
+            # real schema, confirmed against the live database after the first
+            # version of these fixtures invented `id` and `email` and the code
+            # built on them failed in production-shaped queries.
             "profiles": [
-                {"id": "u1", "email": "blocked@x.com", "name": "Blocked"},
-                {"id": "u2", "email": "low@x.com", "name": "Low"},
-                {"id": "u3", "email": "fine@x.com", "name": "Fine"},
+                {"user_id": "u1", "name": "Blocked"},
+                {"user_id": "u2", "name": "Low"},
+                {"user_id": "u3", "name": "Fine"},
             ],
             "credit_requests": [
                 {
@@ -123,6 +127,12 @@ def db(monkeypatch: pytest.MonkeyPatch) -> FakeTable:
         }
     )
     monkeypatch.setattr(admin_routes, "service_client", lambda settings: fake)
+    # Emails live in auth.users, reachable only with the service key.
+    monkeypatch.setattr(
+        admin_routes,
+        "emails_by_user_id",
+        lambda db: {"u1": "blocked@x.com", "u2": "low@x.com", "u3": "fine@x.com"},
+    )
     return fake
 
 

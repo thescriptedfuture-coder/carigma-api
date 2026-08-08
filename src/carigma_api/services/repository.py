@@ -201,3 +201,28 @@ class SupabaseCreditStore:
             ).execute()
         except Exception:
             logger.exception("Credit ledger write failed for %s (delta %s)", user_id, delta)
+
+
+def emails_by_user_id(service_db: Any) -> dict[str, str]:
+    """Map user id -> email, from **auth.users**.
+
+    `profiles` has no email column — it is on the auth user, reachable only
+    with the service key. Found by running the cron for real: the query
+    `profiles.select("id,email")` failed with "column profiles.email does not
+    exist", and the same mistaken assumption was in two places at once. One
+    helper now, so a third caller cannot repeat it.
+
+    Note also that `profiles` is keyed by **user_id**, not `id`.
+    """
+    try:
+        users = service_db.auth.admin.list_users()
+    except Exception:
+        logger.exception("could not list auth users")
+        return {}
+    out: dict[str, str] = {}
+    for user in users or []:
+        uid = getattr(user, "id", None)
+        email = getattr(user, "email", None)
+        if uid and email:
+            out[str(uid)] = str(email)
+    return out

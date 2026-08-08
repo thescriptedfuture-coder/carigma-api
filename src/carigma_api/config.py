@@ -82,6 +82,15 @@ class Settings(BaseSettings):
         to guess which mode a running instance is in."""
         return self.razorpay_key_id.startswith("rzp_test_")
 
+    # ── Email (P5 Part D) ──────────────────────────────────────────────────
+    # Hostinger SMTP. When unset the cron FORCES --dry-run rather than
+    # producing a wall of auth failures that look like a bug.
+    smtp_host: str = Field(default="")
+    smtp_port: int = Field(default=587)
+    smtp_user: str = Field(default="")
+    smtp_pass: str = Field(default="")
+    smtp_from: str = Field(default="Carigma <support@carigma.in>")
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
