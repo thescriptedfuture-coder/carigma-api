@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from carigma_api.auth.jwt_verifier import JWTVerifier
 from carigma_api.config import get_settings
+from carigma_api.routes import admin as admin_routes
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import health as health_routes
 from carigma_api.routes import payments as payments_routes
@@ -74,6 +75,8 @@ def create_app() -> FastAPI:
     app.include_router(posts_routes.router)
     app.include_router(settings_routes.router)
     app.include_router(payments_routes.router)
+    app.include_router(admin_routes.router)
+    app.include_router(admin_routes.request_router)
     return app
 
 
