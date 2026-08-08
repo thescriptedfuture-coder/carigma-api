@@ -58,6 +58,30 @@ class Settings(BaseSettings):
     jsearch_daily_cap: int = Field(default=25)
     jobs_cache_ttl_hours: int = Field(default=48)
 
+    # ── Payments (BUILT, DORMANT) ──────────────────────────────────────────
+    # The whole path exists and is tested against Razorpay test mode. It stays
+    # OFF until KYC clears, at which point this flips to true and the live keys
+    # replace the test ones. No code change — that is the entire point of
+    # building it now rather than in a hurry when money starts moving.
+    payments_enabled: bool = Field(default=False)
+    #: Where Razorpay sends the user back to. Must be the WEB origin, not the
+    #: API's — the callback lands on a page, not an endpoint.
+    app_url: str = Field(default="http://localhost:5173")
+    razorpay_key_id: str = Field(default="")
+    razorpay_key_secret: str = Field(default="")
+
+    @property
+    def payments_live(self) -> bool:
+        """Enabled AND configured. The flag alone is not enough — a flag on
+        with no keys would render a checkout button that cannot work."""
+        return bool(self.payments_enabled and self.razorpay_key_id and self.razorpay_key_secret)
+
+    @property
+    def razorpay_is_test_mode(self) -> bool:
+        """Test keys are prefixed `rzp_test_`. Surfaced in admin so nobody has
+        to guess which mode a running instance is in."""
+        return self.razorpay_key_id.startswith("rzp_test_")
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")

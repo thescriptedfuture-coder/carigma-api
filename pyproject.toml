@@ -11,6 +11,9 @@ dependencies = [
     "pyjwt[crypto]>=2.9",
     "httpx>=0.27",
     "python-multipart>=0.0.12",
+    # Payments are BUILT but dormant (P5). The SDK ships now so the path is
+    # real code rather than a sketch to be written under time pressure later.
+    "razorpay>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +68,12 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# The Razorpay SDK ships no type stubs. Scoped to that one module so nothing
+# else silently loses type checking.
+[[tool.mypy.overrides]]
+module = ["razorpay.*"]
+ignore_missing_imports = true
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
