@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
 from carigma_api.services.agents import profile_analyst
@@ -24,6 +25,7 @@ from carigma_api.services.repository import (
     SupabaseCreditStore,
     user_client,
 )
+from carigma_api.services.run_store import SupabaseRunStore
 from carigma_api.services.runs import RunReporter
 
 logger = logging.getLogger(__name__)
@@ -42,14 +44,20 @@ class ApplyFixRequest(BaseModel):
     rewrite: str = Field(min_length=1)
 
 
-def _deps(request: Request, user: Any, settings: Settings) -> tuple[Any, Any, Any]:
-    """Build per-request, per-user Supabase-backed collaborators."""
+def _deps(request: Request, user: Any, settings: Settings) -> tuple[Any, Any, Any, Any]:
+    """Build per-request, per-user Supabase-backed collaborators.
+
+    Everything that needs the caller's own client is built HERE, in one place,
+    so a test that substitutes this substitutes all of it. An extra
+    `user_client(...)` call elsewhere in the handler would slip past that.
+    """
     token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
     client = user_client(settings, token)
     return (
         ProfileRepository(client),
         ScoreRepository(client),
         SupabaseCreditStore(client),
+        SupabaseRunStore(client),
     )
 
 
@@ -65,7 +73,16 @@ async def compute_score(
     Synchronous because the client waits on this one (it is the decode moment).
     Longer agents use POST /agents/{agent}/run + SSE.
     """
-    profiles, scores, credit_store = _deps(request, user, settings)
+    profiles, scores, credit_store, run_store = _deps(request, user, settings)
+
+    # A repeated Idempotency-Key is answered from the original run BEFORE the
+    # rate limiter and the credit check — a retry of work already done is not a
+    # new request, and must be neither throttled nor charged again.
+    if (replayed := replay_if_seen(run_store, user.id, request, agent="profile")) is not None:
+        return replayed
+
+    # Limiter 1 (§21 Q7). The credit gate below stops cost; this stops abuse.
+    enforce_agent_rate_limit(user.id, "profile")
 
     action = "onboarding_score" if body.onboarding else "run_profile"
 
@@ -89,6 +106,8 @@ async def compute_score(
         )
 
     run = runs_service.new_run(user.id, "profile")
+    if key := idempotency_key(request):
+        run_store.remember_idempotency(user.id, key, run.id)
 
     def work(reporter: RunReporter) -> dict[str, Any]:
         reporter.step("analyse", "Reading your profile")
@@ -96,7 +115,9 @@ async def compute_score(
         reporter.complete_step()
         return result
 
-    settled = await runs_service.execute(run, work, credit_store=credit_store, action=action)
+    settled = await runs_service.execute(
+        run, work, credit_store=credit_store, action=action, run_store=run_store
+    )
 
     if settled.status is runs_service.RunStatus.FAILED:
         # No credits were charged — see services/runs.execute.
@@ -136,7 +157,7 @@ async def apply_fix(
     "score never improves" bug: a flag alone left the next run scoring stale
     data. Free — the user is accepting our suggestion, not buying anything.
     """
-    profiles, _scores, _credits = _deps(request, user, settings)
+    profiles, _scores, _credits, _runs = _deps(request, user, settings)
 
     profile = profiles.load(user.id)
     if not profile:
@@ -167,7 +188,7 @@ async def score_history(
     settings: Annotated[Settings, Depends(get_settings)],
     limit: int = 60,
 ) -> dict[str, Any]:
-    _profiles, scores, _credits = _deps(request, user, settings)
+    _profiles, scores, _credits, _runs = _deps(request, user, settings)
     return {"items": scores.history(user.id, min(max(limit, 1), 200))}
 
 

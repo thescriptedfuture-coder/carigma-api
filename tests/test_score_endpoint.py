@@ -17,6 +17,24 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import USER_ID, auth, make_token
 
+
+class _NullRunStore:
+    """Runs are persisted through this in production; these tests are about the
+    scoring path, so it records nothing and finds nothing. Notably it returns
+    None for every idempotency lookup, which means "no replay" — the replay
+    behaviour itself is covered in test_deferred.py."""
+
+    def save(self, run: object) -> None: ...
+
+    def get(self, run_id: str) -> None:
+        return None
+
+    def remember_idempotency(self, user_id: str, key: str, run_id: str) -> None: ...
+
+    def find_by_idempotency_key(self, user_id: str, key: str) -> None:
+        return None
+
+
 SAMPLE_PROFILE = {
     "name": "Ravi Kumar",
     "linkedinHeadline": "Business Analyst at DTS",
@@ -85,7 +103,9 @@ def wired(client: TestClient, monkeypatch: pytest.MonkeyPatch):  # type: ignore[
 
     profiles, scores, creds = FakeProfiles(), FakeScores(), FakeCredits()
     monkeypatch.setattr(
-        score_routes, "_deps", lambda request, user, settings: (profiles, scores, creds)
+        score_routes,
+        "_deps",
+        lambda request, user, settings: (profiles, scores, creds, _NullRunStore()),
     )
     return client, profiles, scores, creds
 
@@ -355,7 +375,12 @@ def test_empty_profile_is_a_clear_404_not_a_crash(
     monkeypatch.setattr(
         score_routes,
         "_deps",
-        lambda request, user, settings: (FakeProfiles({}), FakeScores(), FakeCredits()),
+        lambda request, user, settings: (
+            FakeProfiles({}),
+            FakeScores(),
+            FakeCredits(),
+            _NullRunStore(),
+        ),
     )
 
     r = client.post("/score/compute", json={}, headers=auth(make_token()))

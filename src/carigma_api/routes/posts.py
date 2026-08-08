@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
 from carigma_api.services.ai import UpstreamError
@@ -42,6 +43,7 @@ from carigma_api.services.posts import (
     skip,
 )
 from carigma_api.services.repository import SupabaseCreditStore, user_client
+from carigma_api.services.run_store import SupabaseRunStore
 from carigma_api.services.runs import RunReporter
 
 logger = logging.getLogger(__name__)
@@ -217,8 +219,17 @@ async def post_regenerate(
     Goes through `runs.execute` so a failed or empty generation charges nothing.
     """
     token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-    credit_store = SupabaseCreditStore(user_client(settings, token))
+    client = user_client(settings, token)
+    credit_store = SupabaseCreditStore(client)
+    run_store = SupabaseRunStore(client)
     action = "regenerate_slot"
+
+    # Replay first: a retried request is not a new one, so it is neither
+    # throttled nor charged again.
+    if (replayed := replay_if_seen(run_store, user.id, request, agent="content")) is not None:
+        return replayed
+
+    enforce_agent_rate_limit(user.id, "content")
 
     try:
         credits_service.check_affordable(credit_store, user.id, action)
@@ -244,6 +255,8 @@ async def post_regenerate(
         )
 
     run = runs_service.new_run(user.id, "content")
+    if key := idempotency_key(request):
+        run_store.remember_idempotency(user.id, key, run.id)
 
     def work(reporter: RunReporter) -> dict[str, Any]:
         reporter.step("draft", "Drafting fresh variants")
@@ -252,7 +265,9 @@ async def post_regenerate(
         # failed run charges nothing, which is the correct behaviour either way.
         raise UpstreamError("Content Intelligence is not wired up yet.")
 
-    settled = await runs_service.execute(run, work, credit_store=credit_store, action=action)
+    settled = await runs_service.execute(
+        run, work, credit_store=credit_store, action=action, run_store=run_store
+    )
 
     if settled.status is not runs_service.RunStatus.SUCCEEDED:
         raise HTTPException(

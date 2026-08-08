@@ -22,6 +22,7 @@ from jwt import PyJWKClient
 from jwt.algorithms import ECAlgorithm
 
 from carigma_api.config import Settings, get_settings
+from carigma_api.services.ratelimit import limiter
 
 TEST_SUPABASE_URL = "https://test-project.supabase.co"
 TEST_ISSUER = f"{TEST_SUPABASE_URL}/auth/v1"
@@ -135,3 +136,16 @@ def client(settings: Settings) -> Iterator[TestClient]:
 
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limiter() -> None:
+    """Each test starts with full buckets.
+
+    The limiter is module-global and process-lifetime by design — which is
+    correct in production and wrong for a test suite, where twenty tests share
+    one user id and would exhaust the bucket partway through the file. (Found
+    exactly that way: the score tests passed alone and failed together, which
+    was the limiter doing its job.)
+    """
+    limiter.reset()
