@@ -140,6 +140,139 @@ def test_migration_is_idempotent(path: Path) -> None:
     assert not adds, f"{path.name}: ADD COLUMN without IF NOT EXISTS"
 
 
+# ── Row Level Security ─────────────────────────────────────────────────────
+# Added after Supabase's own linter caught what this suite did not: V2_002
+# created `credit_requests` and `admin_notes` in `public` with no RLS, leaving
+# the founder's private notes about users readable by any `authenticated` key.
+#
+# The existing checks look for DESTRUCTIVE operations, which is what they were
+# built for. "Creates a public table without RLS" is the same CLASS of mistake
+# — a schema defect that ships silently — so it belongs here too.
+
+#: Written on the line above (or beside) a CREATE TABLE to opt out, for tables
+#: that are genuinely world-readable. Deliberately verbose: opting out of RLS
+#: should be an act of typing, not a shrug.
+RLS_OPT_OUT = "carigma:rls-exempt"
+
+#: Declares "RLS on, no policy, service-role only — this is intended".
+#: An explicit token rather than looking for the words "service role" in the
+#: file. The first version did the latter and a probe file passed simply
+#: because its own comment happened to contain the phrase; a guard that a
+#: passing mention satisfies is not a guard.
+RLS_SERVICE_ONLY = "carigma:rls-service-role-only"
+
+
+def _created_tables(sql_with_comments: str) -> list[tuple[str, bool]]:
+    """Every `create table [if not exists] public.X`, with its opt-out flag.
+
+    Line-by-line rather than one regex over the whole file, because comments
+    have to be treated differently from statements: the opt-out marker LIVES
+    in a comment, but a comment must never be mistaken for a statement.
+
+    The first version scanned raw SQL with a single regex and matched V2_001's
+    own prose — the line `-- CREATE TABLE IF NOT EXISTS — new tables only`
+    yielded a table called "if". Caught on the first run of this test.
+    """
+    out: list[tuple[str, bool]] = []
+    marker_seen_recently = False
+    blank_run = 0
+
+    for line in sql_with_comments.splitlines():
+        stripped = line.strip()
+
+        if not stripped:
+            blank_run += 1
+            # Two blank lines end a comment block's association with whatever
+            # follows, so a marker can't leak down the file.
+            if blank_run >= 2:
+                marker_seen_recently = False
+            continue
+        blank_run = 0
+
+        if stripped.startswith("--"):
+            if RLS_OPT_OUT in stripped:
+                marker_seen_recently = True
+            continue
+
+        match = re.match(
+            r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?(\w+)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            out.append((match.group(1).lower(), marker_seen_recently))
+        marker_seen_recently = False
+
+    return out
+
+
+@pytest.mark.parametrize("path", _sql_files(), ids=lambda p: p.name)
+def test_every_new_public_table_enables_rls(path: Path) -> None:
+    """A table in `public` without RLS is readable with the anon key.
+
+    Supabase exposes `public` over PostgREST, so "forgot to enable RLS" is not
+    a hardening oversight — it is the table being published. `admin_notes`
+    holds the founder's private observations about users; `credit_requests`
+    holds their verbatim words. Neither is anyone's to browse.
+    """
+    raw = path.read_text(encoding="utf-8")
+    stripped = _strip_comments(raw).lower()
+
+    for table, exempt in _created_tables(raw):
+        if exempt:
+            continue
+        enabled = re.search(
+            rf"alter\s+table\s+(?:public\.)?{re.escape(table)}\s+enable\s+row\s+level\s+security",
+            stripped,
+        )
+        assert enabled, (
+            f"{path.name}: table '{table}' is created in public with NO row level "
+            f"security. Supabase serves `public` over PostgREST, so anon and "
+            f"authenticated keys can read it. Add:\n"
+            f"    alter table public.{table} enable row level security;\n"
+            f"plus a policy if users should see their own rows — or nothing at "
+            f"all if it is service-role only. If the table really is meant to be "
+            f"world-readable, write `{RLS_OPT_OUT}` in a comment above it and say "
+            f"why."
+        )
+
+
+@pytest.mark.parametrize("path", _sql_files(), ids=lambda p: p.name)
+def test_rls_without_policies_is_deliberate_not_forgotten(path: Path) -> None:
+    """RLS on with no policy denies everyone — correct for service-role-only
+    tables, and a silent outage for anything else. The two are
+    indistinguishable from the SQL alone, so the intent has to be DECLARED.
+
+    A missing policy is the dangerous direction precisely because it does not
+    error: PostgREST returns an empty set, so a feature built on it looks like
+    it works and shows nothing.
+    """
+    raw = path.read_text(encoding="utf-8")
+    stripped = _strip_comments(raw).lower()
+
+    for table, exempt in _created_tables(raw):
+        if exempt:
+            continue
+        if not re.search(
+            rf"alter\s+table\s+(?:public\.)?{re.escape(table)}\s+enable\s+row\s+level\s+security",
+            stripped,
+        ):
+            continue  # the previous test already fails on this
+        has_policy = re.search(
+            rf"create\s+policy[^;]*\son\s+(?:public\.)?{re.escape(table)}\b", stripped
+        )
+        if has_policy:
+            continue
+        assert RLS_SERVICE_ONLY in raw, (
+            f"{path.name}: '{table}' has RLS enabled and NO policy, which denies "
+            f"anon and authenticated everything — silently, as an empty set "
+            f"rather than an error. Declare it with `{RLS_SERVICE_ONLY}` in a "
+            f"comment if intended, or add a policy. That is right for a "
+            f"service-role-only table and a silent empty-set bug for anything "
+            f"else. Say which, in a comment, near the RLS block."
+        )
+
+
 def test_no_blended_career_score_table() -> None:
     """The two platform scores must never share an axis or be averaged.
 
