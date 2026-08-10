@@ -101,7 +101,9 @@ def main() -> int:  # noqa: PLR0915
         return 1
 
     pack = pay.pack(PROBE_PACK)
-    assert pack is not None
+    if pack is None:
+        logger.error("unknown probe pack %r", PROBE_PACK)
+        return 1
     before = int(
         (db.table("credits").select("balance").eq("user_id", uid).execute().data or [{}])[0].get(
             "balance"
