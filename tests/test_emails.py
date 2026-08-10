@@ -401,3 +401,83 @@ def test_a_clean_run_reports_no_failure_section() -> None:
 
     assert "FAILED" not in summary.line()
     assert summary.failures == []
+
+
+# ── SMTP transport: the port decides the handshake ─────────────────────────
+# Hostinger's credentials are port 465, which is implicit TLS. The mailer
+# originally only did the 587 STARTTLS flow and would have failed on the first
+# real send — as a TIMEOUT, not a clear error, which is the worst kind.
+
+
+def _mailer(port: int) -> Any:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from send_emails import SmtpMailer  # type: ignore[import-not-found]
+
+    from carigma_api.config import Settings
+
+    return SmtpMailer(Settings(smtp_host="smtp.hostinger.com", smtp_port=port))
+
+
+def test_port_465_uses_implicit_tls() -> None:
+    assert _mailer(465).uses_implicit_tls is True
+
+
+def test_port_587_uses_starttls() -> None:
+    assert _mailer(587).uses_implicit_tls is False
+
+
+def test_465_opens_an_ssl_socket_and_never_calls_starttls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling starttls() on an already-encrypted 465 connection is the exact
+    mistake this guards. Verified by asserting it is NOT called."""
+    import smtplib
+
+    calls: list[str] = []
+
+    class FakeSSL:
+        def __init__(self, host: str, port: int, timeout: int = 0) -> None:
+            calls.append(f"SMTP_SSL:{port}")
+
+        def starttls(self) -> None:
+            calls.append("starttls")
+
+        def login(self, u: str, p: str) -> None:
+            calls.append("login")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSSL)
+    monkeypatch.setattr(smtplib, "SMTP", lambda *a, **k: pytest.fail("465 must not use plain SMTP"))
+
+    _mailer(465)._connect()
+
+    assert calls == ["SMTP_SSL:465", "login"]
+    assert "starttls" not in calls
+
+
+def test_587_connects_plaintext_then_upgrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    import smtplib
+
+    calls: list[str] = []
+
+    class FakePlain:
+        def __init__(self, host: str, port: int, timeout: int = 0) -> None:
+            calls.append(f"SMTP:{port}")
+
+        def starttls(self) -> None:
+            calls.append("starttls")
+
+        def login(self, u: str, p: str) -> None:
+            calls.append("login")
+
+    monkeypatch.setattr(smtplib, "SMTP", FakePlain)
+    monkeypatch.setattr(
+        smtplib, "SMTP_SSL", lambda *a, **k: pytest.fail("587 must not use SMTP_SSL")
+    )
+
+    _mailer(587)._connect()
+
+    # STARTTLS must happen BEFORE login, or credentials cross in plaintext.
+    assert calls == ["SMTP:587", "starttls", "login"]

@@ -34,17 +34,45 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("send_emails")
 
 
+#: Ports that speak TLS from the first byte (implicit TLS / SMTPS).
+IMPLICIT_TLS_PORTS = frozenset({465})
+
+
 class SmtpMailer:
-    """Hostinger SMTP. One connection reused for the whole pass."""
+    """Hostinger SMTP. One connection reused for the whole pass.
+
+    **Two different TLS handshakes, chosen by port.** This originally only did
+    the 587 flow, which would have failed on the first real send against
+    Hostinger's 465:
+
+    - **465 (SMTPS)** — TLS is negotiated *before* any SMTP conversation, so
+      the client must open an SSL socket. Sending a plaintext `EHLO` here gets
+      no usable reply; it hangs until the timeout.
+    - **587 (submission)** — plaintext connect, then `STARTTLS` upgrades it.
+
+    Calling `starttls()` on a 465 connection is the classic version of this
+    mistake, and it fails as a timeout rather than a clear error — which is
+    why the port drives the choice rather than a separate flag someone has to
+    remember to set consistently with it.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self._conn: smtplib.SMTP | None = None
 
+    @property
+    def uses_implicit_tls(self) -> bool:
+        return self._s.smtp_port in IMPLICIT_TLS_PORTS
+
     def _connect(self) -> smtplib.SMTP:
         if self._conn is None:
-            conn = smtplib.SMTP(self._s.smtp_host, self._s.smtp_port, timeout=20)
-            conn.starttls()
+            if self.uses_implicit_tls:
+                conn: smtplib.SMTP = smtplib.SMTP_SSL(
+                    self._s.smtp_host, self._s.smtp_port, timeout=20
+                )
+            else:
+                conn = smtplib.SMTP(self._s.smtp_host, self._s.smtp_port, timeout=20)
+                conn.starttls()
             conn.login(self._s.smtp_user, self._s.smtp_pass)
             self._conn = conn
         return self._conn
