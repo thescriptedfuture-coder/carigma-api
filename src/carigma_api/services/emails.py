@@ -409,6 +409,15 @@ class RunSummary:
         # Skipped is reported as a first-class number, not omitted. "12 sent,
         # 40 skipped" is the system working as designed.
         parts = [f"{sent} sent", f"{skipped} skipped (nothing to say)"]
+        # Every other outcome gets named too. A dry run that reported
+        # "0 sent · 0 skipped" was hiding the one thing it actually did.
+        for key, label in (
+            ("dry_run", "would send"),
+            ("duplicate", "already sent this period"),
+            ("unsubscribed", "unsubscribed"),
+        ):
+            if n := self.counts.get(key, 0):
+                parts.append(f"{n} {label}")
         if failed:
             parts.append(f"{failed} FAILED")
         return " · ".join(parts)

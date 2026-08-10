@@ -170,3 +170,67 @@ def test_no_payment_route_leaks_a_stack_trace(client: TestClient) -> None:
     ):
         assert "Traceback" not in res.text
         assert "razorpay" not in res.text.lower() or res.status_code == 200
+
+
+# ── The flag must not leak the wrong way ───────────────────────────────────
+# The flag exists so payments stay dormant until KYC clears. A default that
+# leaks `true` into production defeats the entire point of building it early.
+
+
+def test_the_shipped_default_is_off() -> None:
+    """Not "off in .env" — off in the CODE. A server with no PAYMENTS_ENABLED
+    set at all must not take money."""
+    import os
+    from unittest import mock
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert Settings(_env_file=None).payments_enabled is False  # type: ignore[call-arg]
+
+
+def test_the_template_ships_false() -> None:
+    """`.env.example` is what a new environment is built from. If it shipped
+    `true`, every fresh deploy would start live."""
+    from pathlib import Path
+
+    template = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    lines = [
+        ln.strip() for ln in template.splitlines() if ln.strip().startswith("PAYMENTS_ENABLED=")
+    ]
+    assert lines, "PAYMENTS_ENABLED is missing from .env.example"
+    assert lines == ["PAYMENTS_ENABLED=false"], f"template ships {lines}"
+
+
+def test_no_deploy_config_enables_payments() -> None:
+    """Scans every deploy descriptor in the repo tree.
+
+    Today this passes because no V2 service is defined yet — safety by
+    absence, which is weak. It becomes a real guard the moment someone adds
+    one, which is exactly when the mistake would otherwise be made.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    patterns = ("render.yaml", "render.yml", "Procfile", "Dockerfile", "fly.toml")
+    offenders: list[str] = []
+
+    for pattern in patterns:
+        for path in root.rglob(pattern):
+            if "node_modules" in path.parts or ".venv" in path.parts:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines):
+                if line.strip().startswith("#") or "PAYMENTS_ENABLED" not in line:
+                    continue
+                # YAML splits key and value across lines:
+                #     - key: PAYMENTS_ENABLED
+                #       value: true
+                # so look at this line AND the next two. A same-line-only
+                # check missed exactly this, which is how it was found —
+                # the guard was verified by breaking it and did not fail.
+                window = " ".join(
+                    ln for ln in lines[i : i + 3] if not ln.strip().startswith("#")
+                ).lower()
+                if any(t in window for t in ("true", "yes", "= 1", "=1", ": 1")):
+                    offenders.append(f"{path.name}:{i + 1}: {line.strip()}")
+
+    assert not offenders, "a deploy descriptor turns payments ON: " + "; ".join(offenders)

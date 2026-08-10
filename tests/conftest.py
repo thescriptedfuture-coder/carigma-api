@@ -149,3 +149,24 @@ def _fresh_rate_limiter() -> None:
     was the limiter doing its job.)
     """
     limiter.reset()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _hermetic_settings() -> Iterator[None]:
+    """Tests must never read the developer's `.env`.
+
+    Found the moment PAYMENTS_ENABLED=true was added locally: a test asserting
+    the shipped default is OFF started failing, because bare `Settings()` reads
+    the dotenv file. That is a test-isolation defect, not a test bug — a suite
+    whose result depends on an untracked local file tells you about that
+    laptop, not about the code. It also means CI and local disagree, which is
+    the worst way to find out.
+
+    Disabling `env_file` for the session makes every bare `Settings()` fall
+    back to the FIELD DEFAULTS, which is what tests about defaults should see.
+    Tests needing real values build them explicitly via the `settings` fixture.
+    """
+    original = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    yield
+    Settings.model_config["env_file"] = original

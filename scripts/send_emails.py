@@ -19,7 +19,7 @@ import argparse
 import logging
 import smtplib
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -177,7 +177,7 @@ class SupabaseSendLog:
             return False
 
 
-def run(kind: str, *, dry_run: bool) -> mail.RunSummary:
+def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> mail.RunSummary:
     settings = Settings()
     summary = mail.RunSummary()
 
@@ -196,8 +196,18 @@ def run(kind: str, *, dry_run: bool) -> mail.RunSummary:
     period = mail.daily_key(today) if kind == "daily" else mail.weekly_key(today)
     email_type = mail.EmailType.DAILY_BRIEF if kind == "daily" else mail.EmailType.WEEKLY_REVIEW
 
-    for row in _recipients(db):
-        facts = _facts_for(db, row["user_id"], kind)
+    recipients = _recipients(db)
+    if only:
+        # Restrict to ONE address. Not a convenience — a safety rail. Widening
+        # the lookback to exercise the positive path would otherwise mail real
+        # beta users to prove a code path, which is never an acceptable trade.
+        recipients = [r for r in recipients if r["email"].lower() == only.lower()]
+        logger.info("--only %s -> %d recipient(s)", only, len(recipients))
+        if not recipients:
+            logger.error("no recipient matches %s — nothing was sent", only)
+
+    for row in recipients:
+        facts = _facts_for(db, row["user_id"], kind, since_hours=since_hours)
         built = (
             mail.build_daily_brief(row["email"], facts, greeting_name=row.get("name", ""))
             if kind == "daily"
@@ -259,7 +269,7 @@ def _prefs_for(row: dict[str, Any]) -> mail.Preferences:
     )
 
 
-def _facts_for(db: Any, user_id: str, kind: str) -> Any:
+def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> Any:
     """Gather what ACTUALLY happened.
 
     Returns empty facts on a read failure rather than inventing anything — and
@@ -269,11 +279,25 @@ def _facts_for(db: Any, user_id: str, kind: str) -> Any:
     if kind == "daily":
         facts = mail.DailyFacts()
         try:
+            # `is_new_today` is a DERIVED field in the /jobs/feed RESPONSE
+            # (contract §9), not a column. This originally filtered on it as if
+            # it were stored, so every read raised, every user was marked
+            # "Career Scout unreachable", and the daily brief would have
+            # NEVER SENT — while looking like a run of quiet days.
+            #
+            # The honest-nothing behaviour is what surfaced it: the run
+            # reported "sources unavailable" rather than "nothing new", which
+            # is exactly the distinction that made a silent failure visible.
+            #
+            # New = first seen since the last brief. `first_seen` is the real
+            # column.
+            since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat()
             new_jobs = (
                 db.table("jobs_feed")
                 .select("id")
                 .eq("user_id", user_id)
-                .eq("is_new_today", True)
+                .eq("status", "active")
+                .gte("first_seen", since)
                 .execute()
                 .data
                 or []
@@ -297,9 +321,22 @@ def main() -> int:
         action="store_true",
         help="Print what would be sent. Sends nothing and claims no period.",
     )
+    parser.add_argument(
+        "--since-hours",
+        type=int,
+        default=24,
+        help="Lookback for 'new' matches. 24 in normal operation; widen only "
+        "to backfill or to reproduce a specific day.",
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="Restrict the run to ONE email address. Use this whenever you "
+        "widen --since-hours, so testing cannot mail real users.",
+    )
     args = parser.parse_args()
 
-    summary = run(args.kind, dry_run=args.dry_run)
+    summary = run(args.kind, dry_run=args.dry_run, since_hours=args.since_hours, only=args.only)
     # Non-zero only on a genuine failure. Skips are the system working, and a
     # cron that reports failure on a quiet day trains everyone to ignore it.
     return 1 if summary.failures else 0
