@@ -221,3 +221,79 @@ def test_the_confirmation_carries_a_resend_cooldown(client: TestClient) -> None:
 
 def test_obvious_junk_is_rejected_before_reaching_the_mailer(client: TestClient) -> None:
     assert client.post("/auth/reset-password", json={"email": "not-an-email"}).status_code == 422
+
+
+# ── Email preferences ──────────────────────────────────────────────────────
+
+
+def test_reading_email_preferences_requires_a_verified_token(client: TestClient) -> None:
+    assert client.get("/profile/email-preferences").status_code == 401
+
+
+def test_changing_email_preferences_requires_a_verified_token(client: TestClient) -> None:
+    res = client.put(
+        "/profile/email-preferences",
+        json={"daily_brief": False, "weekly_review": True, "unsubscribed_all": False},
+    )
+    assert res.status_code == 401
+
+
+def test_an_account_that_never_touched_this_reads_as_opted_in(
+    client: TestClient, profiles: FakeProfiles
+) -> None:
+    profiles.profile = {"platforms": ["linkedin"]}
+
+    body = client.get("/profile/email-preferences", headers=auth(make_token())).json()
+
+    assert body["daily_brief"] is True
+    assert body["effective"] == {"daily_brief": True, "weekly_review": True}
+
+
+def test_turning_the_daily_brief_off_persists_it(
+    client: TestClient, profiles: FakeProfiles
+) -> None:
+    res = client.put(
+        "/profile/email-preferences",
+        json={"daily_brief": False, "weekly_review": True, "unsubscribed_all": False},
+        headers=auth(make_token()),
+    )
+
+    assert res.status_code == 200
+    assert res.json()["effective"] == {"daily_brief": False, "weekly_review": True}
+    assert profiles.saved["preferences"]["email"]["daily_brief"] is False
+
+
+def test_the_write_merges_rather_than_replacing_the_preferences_column(
+    client: TestClient, profiles: FakeProfiles
+) -> None:
+    """The endpoint-level version of the service test. `save()` writes the
+    column wholesale, so a replace here would erase the agent's user memory."""
+    profiles.profile = {"platforms": ["linkedin"], "preferences": {"memory": ["no crypto"]}}
+
+    client.put(
+        "/profile/email-preferences",
+        json={"daily_brief": False, "weekly_review": False, "unsubscribed_all": True},
+        headers=auth(make_token()),
+    )
+
+    assert profiles.saved["preferences"]["memory"] == ["no crypto"]
+
+
+def test_a_failed_save_says_the_settings_are_unchanged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assuming you are unsubscribed when you are not is how a beta user
+    becomes a spam report."""
+    fake = FakeProfiles(fail=True)
+    monkeypatch.setattr(settings_routes, "_profiles", lambda request, settings: (fake, None))
+
+    res = client.put(
+        "/profile/email-preferences",
+        json={"daily_brief": False, "weekly_review": False, "unsubscribed_all": True},
+        headers=auth(make_token()),
+    )
+
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert "unchanged" in detail["message"]
+    assert "support@carigma.in" in detail["message"]

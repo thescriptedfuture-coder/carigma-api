@@ -10,11 +10,14 @@ from __future__ import annotations
 import pytest
 
 from carigma_api.services.settings_service import (
+    EMAIL_PREFS_KEY,
     RESEND_COOLDOWN_SECONDS,
     DeletionReceipt,
+    EmailPreferences,
     NoPlatformSelected,
     Platform,
     change_platforms,
+    merge_email_preferences,
     purge_resumes,
     reset_confirmation,
     set_retention,
@@ -219,3 +222,76 @@ def test_the_confirmation_suggests_spam_before_resending() -> None:
 
 def test_a_receipt_with_no_requests_is_complete() -> None:
     assert DeletionReceipt((), (), ()).complete is True
+
+
+# ── Email preferences ──────────────────────────────────────────────────────
+
+
+def test_absent_preferences_mean_opted_in() -> None:
+    """Matches the cron, which treats a missing key as True. If these ever
+    disagree, someone either gets silence they did not ask for or mail they
+    opted out of."""
+    assert EmailPreferences.from_stored(None) == EmailPreferences()
+    assert EmailPreferences.from_stored({}) == EmailPreferences()
+
+
+def test_defaults_match_the_cron() -> None:
+    """The two Preferences classes live in different processes — the API writes
+    them, `scripts/send_emails.py` reads them. Nothing but this test stops one
+    changing without the other."""
+    from carigma_api.services.emails import Preferences as CronPreferences
+
+    ours = EmailPreferences()
+    theirs = CronPreferences()
+
+    assert ours.daily_brief == theirs.daily_brief
+    assert ours.weekly_review == theirs.weekly_review
+    assert ours.unsubscribed_all == theirs.unsubscribed_all
+
+
+def test_the_cron_reads_the_key_we_write() -> None:
+    """`send_emails._recipients` does `preferences.get("email", {})`. The key is
+    a contract between two processes, so it is asserted, not assumed."""
+    merged = merge_email_preferences({}, EmailPreferences())
+    assert EMAIL_PREFS_KEY == "email"
+    assert EMAIL_PREFS_KEY in merged
+
+
+def test_unsubscribing_from_everything_overrides_the_individual_switches() -> None:
+    """Both toggles stay stored as True — so restoring them is one click — but
+    nothing arrives. `effective` is what the UI must show."""
+    prefs = EmailPreferences(daily_brief=True, weekly_review=True, unsubscribed_all=True)
+
+    assert prefs.receives("daily_brief") is False
+    assert prefs.receives("weekly_review") is False
+    payload = prefs.as_dict()
+    assert payload["daily_brief"] is True, "the stored value is preserved"
+    assert payload["effective"] == {"daily_brief": False, "weekly_review": False}
+
+
+def test_the_surface_says_receipts_still_arrive() -> None:
+    """Someone who turns everything off and then receives a payment receipt
+    will reasonably think we ignored them."""
+    assert "receipt" in EmailPreferences().as_dict()["still_sent"].lower()
+
+
+def test_saving_email_prefs_does_not_erase_the_agents_learned_memory() -> None:
+    """`profiles.preferences` also holds Profile Analyst user memory, and
+    `ProfileRepository.save` writes the column wholesale. A replace here would
+    wipe it silently, noticed weeks later when the agent stopped honouring
+    things the user had told it."""
+    stored = {
+        "memory": ["prefers Bengaluru roles", "no crypto companies"],
+        "email": {"daily_brief": True, "weekly_review": True, "unsubscribed_all": False},
+    }
+
+    merged = merge_email_preferences(stored, EmailPreferences(daily_brief=False))
+
+    assert merged["memory"] == ["prefers Bengaluru roles", "no crypto companies"]
+    assert merged["email"]["daily_brief"] is False
+
+
+def test_merging_into_a_malformed_blob_does_not_explode() -> None:
+    """V1 wrote a string here once. A preference read must not 500."""
+    assert merge_email_preferences("not-a-dict", EmailPreferences())["email"]["daily_brief"] is True
+    assert EmailPreferences.from_stored("not-a-dict") == EmailPreferences()

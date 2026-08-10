@@ -190,6 +190,85 @@ def set_retention(store: ResumeStore, user_id: str, *, opt_in: bool) -> Retentio
     return RetentionChange(opt_in=not receipt.complete, receipt=receipt)
 
 
+# ── Email preferences ──────────────────────────────────────────────────────
+
+#: Where email prefs live inside the `profiles.preferences` jsonb. The cron
+#: already reads exactly this path, so the key is a contract between two
+#: processes, not an implementation detail.
+EMAIL_PREFS_KEY = "email"
+
+
+@dataclass(frozen=True)
+class EmailPreferences:
+    """The three switches the cron honours.
+
+    `unsubscribed_all` is a master override, not a third peer. Modelling it as
+    a peer is how a UI ends up showing "daily brief: on" to someone who has
+    unsubscribed — technically the stored value, and a lie about what will
+    arrive.
+    """
+
+    daily_brief: bool = True
+    weekly_review: bool = True
+    unsubscribed_all: bool = False
+
+    @classmethod
+    def from_stored(cls, stored: Any) -> EmailPreferences:
+        """Read from the jsonb. Absent means opted IN, matching the cron.
+
+        Defaults are duplicated here and in `emails.Preferences` because the two
+        run in different processes; `test_defaults_match_the_cron` pins them
+        together so a change in one fails loudly rather than silently mailing
+        someone who had opted out.
+        """
+        prefs = stored if isinstance(stored, dict) else {}
+        return cls(
+            daily_brief=bool(prefs.get("daily_brief", True)),
+            weekly_review=bool(prefs.get("weekly_review", True)),
+            unsubscribed_all=bool(prefs.get("unsubscribed_all", False)),
+        )
+
+    def receives(self, name: str) -> bool:
+        """What will ACTUALLY arrive — the override applied."""
+        if self.unsubscribed_all:
+            return False
+        return self.daily_brief if name == "daily_brief" else self.weekly_review
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "daily_brief": self.daily_brief,
+            "weekly_review": self.weekly_review,
+            "unsubscribed_all": self.unsubscribed_all,
+            # Sent so the client never has to re-derive the override rule. Two
+            # implementations of one rule is how they drift apart.
+            "effective": {
+                "daily_brief": self.receives("daily_brief"),
+                "weekly_review": self.receives("weekly_review"),
+            },
+            # Stated on the surface, because someone who turns everything off
+            # and then receives a payment receipt will reasonably think we
+            # ignored them. A receipt is a transaction record, not marketing.
+            "still_sent": "Payment receipts and account emails still arrive — those aren't marketing.",
+        }
+
+
+def merge_email_preferences(stored_preferences: Any, prefs: EmailPreferences) -> dict[str, Any]:
+    """Fold email prefs into the WHOLE preferences blob.
+
+    `profiles.preferences` also holds the Profile Analyst's learned user memory.
+    `ProfileRepository.save` writes the column wholesale, so writing
+    `{"email": ...}` would erase that memory — silently, and only noticed weeks
+    later when the agent stopped honouring things the user had told it.
+    """
+    merged = dict(stored_preferences) if isinstance(stored_preferences, dict) else {}
+    merged[EMAIL_PREFS_KEY] = {
+        "daily_brief": prefs.daily_brief,
+        "weekly_review": prefs.weekly_review,
+        "unsubscribed_all": prefs.unsubscribed_all,
+    }
+    return merged
+
+
 # ── Password reset ─────────────────────────────────────────────────────────
 
 #: Long enough to stop mash-clicking, short enough not to strand someone whose

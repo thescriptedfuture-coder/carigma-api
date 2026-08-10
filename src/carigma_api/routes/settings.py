@@ -18,10 +18,13 @@ from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.settings_service import (
+    EMAIL_PREFS_KEY,
+    EmailPreferences,
     NoPlatformSelected,
     Platform,
     ResumeStore,
     change_platforms,
+    merge_email_preferences,
     reset_confirmation,
     set_retention,
 )
@@ -37,6 +40,12 @@ class PlatformsRequest(BaseModel):
 
 class RetentionRequest(BaseModel):
     opt_in: bool
+
+
+class EmailPrefsRequest(BaseModel):
+    daily_brief: bool
+    weekly_review: bool
+    unsubscribed_all: bool
 
 
 class ResetRequest(BaseModel):
@@ -167,6 +176,68 @@ def put_retention(
         ) from None
 
     return change.as_dict()
+
+
+@router.get("/profile/email-preferences")
+def get_email_preferences(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """What email this account will actually receive.
+
+    Read separately from `/profile` because the unsubscribe landing needs it
+    before anything else on the settings page has loaded, and because a
+    preference read must never fail just because some unrelated profile field
+    is malformed.
+    """
+    profiles, _ = _profiles(request, settings)
+    profile = profiles.load(user.id) or {}
+    stored = (profile.get("preferences") or {}).get(EMAIL_PREFS_KEY)
+    return EmailPreferences.from_stored(stored).as_dict()
+
+
+@router.put("/profile/email-preferences")
+def put_email_preferences(
+    body: EmailPrefsRequest,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Change what arrives. Free, and takes effect on the next cron run.
+
+    The write MERGES into `profiles.preferences` rather than replacing it —
+    that column also carries the Profile Analyst's learned user memory, and
+    `save()` writes it wholesale.
+    """
+    profiles, _ = _profiles(request, settings)
+    profile = profiles.load(user.id) or {}
+
+    prefs = EmailPreferences(
+        daily_brief=body.daily_brief,
+        weekly_review=body.weekly_review,
+        unsubscribed_all=body.unsubscribed_all,
+    )
+    merged = merge_email_preferences(profile.get("preferences"), prefs)
+
+    try:
+        profiles.save(user.id, {"preferences": merged})
+    except Exception as exc:
+        logger.exception("email preference save failed for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "save_failed",
+                # Says what is still true, so nobody assumes they are unsubscribed
+                # when they are not and then reports us as spam.
+                "message": (
+                    "We couldn't save that just now, so your email settings are unchanged. "
+                    "Try again, or email support@carigma.in and we'll do it by hand."
+                ),
+            },
+        ) from exc
+
+    return prefs.as_dict()
 
 
 @router.post("/auth/reset-password")
