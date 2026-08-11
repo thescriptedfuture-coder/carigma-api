@@ -13,6 +13,26 @@ attempts is deleted again if it succeeded, and a write that succeeds is the
 finding. It uses the ANON key only: no service key, no user JWT. That is exactly
 the position of someone who read the key out of the deployed frontend bundle,
 which is where the anon key legitimately lives.
+
+## What this CANNOT prove
+
+It measures one boundary: anonymous versus everyone. Since V2_005 removed
+`anon` from the last permissive policies, every table here answers "no rows,
+42501" — and it did so BEFORE V2_006 and V2_007 were written.
+
+So a clean run here does not mean the database is correctly scoped. The
+remaining risk after V2_005 is entirely on the *authenticated* boundary: a
+signed-in user reading another signed-in user's rows. `USING (true)` for
+`authenticated` looks identical to `auth.uid() = user_id` from out here,
+because both refuse anonymous callers.
+
+Proving that boundary needs two real sessions and a cross-read attempt:
+
+    sign in as A -> select from content_plan where user_id = <B's id>
+    expect 0 rows, not B's drafts
+
+Until something does that, V2_006 and V2_007 are verified by their pg_policies
+output, not by measurement. Treat a green run here as a REGRESSION check.
 """
 
 from __future__ import annotations
@@ -25,19 +45,40 @@ from supabase import create_client
 
 from carigma_api.config import get_settings
 
-#: Every table V2 touches. Names come from the migrations, not from memory.
+#: Every table the V2 migrations touch. Names come from the migrations, not
+#: from memory. This list covered only ten until V2_007 — which meant "verify
+#: with the anon key after each step" was checking barely half of what the
+#: migrations changed. A probe that silently skips tables is worse than a short
+#: one, because the summary line reads the same either way.
 TABLES = (
+    # V2_001–V2_003: already owner-scoped or service-role-only
     "profiles",
     "credits",
     "credit_ledger",
     "score_history",
-    "jobs_feed",
     "agent_runs",
     "credit_requests",
     "admin_notes",
+    # V2_006: owner-scoped (financial)
+    "payments",
+    "user_subscriptions",
+    # V2_007 group B: owner-scoped
+    "content_plan",
+    "interview_preps",
+    "application_events",
+    "content_feedback",
+    "jobs_feed",
+    "milestones",
+    # V2_007 group A: RLS on, NO policies (service-role only)
     "email_log",
     "digest_log",
+    "jobs_cache",
 )
+
+#: The column identifying a row's owner. `jobs_cache` deliberately has none —
+#: it is keyed on the query, so sending a user_id would make PostgREST reject
+#: the shape from its schema cache and leave the table unmeasured.
+OWNER_COLUMN = "user_id"
 
 #: The minimum row each table will accept. Only used to test whether the write
 #: is REFUSED — nothing here is meaningful data, and it is removed on success.
@@ -55,6 +96,16 @@ PROBE_ROWS: dict[str, dict[str, Any]] = {
     "admin_notes": {"user_id": None, "note": "rls-probe", "author": "rls-probe"},
     "email_log": {"user_id": None, "email_type": "rls-probe", "status": "failed"},
     "digest_log": {"user_id": None, "digest_type": "rls-probe"},
+    "payments": {"user_id": None, "credits": 0, "amount_inr": 0},
+    "user_subscriptions": {"user_id": None, "sub_id": "rls-probe", "plan_key": "rls-probe"},
+    "content_plan": {"user_id": None},
+    "interview_preps": {"user_id": None},
+    "application_events": {"user_id": None},
+    "content_feedback": {"user_id": None},
+    "milestones": {"user_id": None},
+    # No user_id column. Shared infrastructure keyed on the query; its row count
+    # for today IS the global JSearch cap counter.
+    "jobs_cache": {"query_key": "rls-probe", "source": "rls-probe"},
 }
 
 
@@ -132,7 +183,14 @@ def main() -> int:
         # ── Write ───────────────────────────────────────────────────────────
         row = dict(PROBE_ROWS[table])
         probe_id = str(uuid.uuid4())
-        row["user_id"] = probe_id
+        # Only tables that HAVE an owner column get one. jobs_cache does not,
+        # and adding it would make PostgREST reject the shape before Postgres
+        # sees it — leaving the table unmeasured while printing a result.
+        cleanup_col = OWNER_COLUMN if OWNER_COLUMN in row else "query_key"
+        if OWNER_COLUMN in row:
+            row[OWNER_COLUMN] = probe_id
+        else:
+            row[cleanup_col] = f"rls-probe-{probe_id}"
         try:
             client.table(table).insert(row).execute()
         except Exception as exc:
@@ -158,9 +216,12 @@ def main() -> int:
             exposed_write.append(table)
             # Put it back the way we found it.
             try:
-                client.table(table).delete().eq("user_id", probe_id).execute()
+                client.table(table).delete().eq(cleanup_col, row[cleanup_col]).execute()
             except Exception:
-                print(f"  !! could not clean up probe row in {table} (user_id={probe_id})")
+                print(
+                    f"  !! could not clean up probe row in {table} "
+                    f"({cleanup_col}={row[cleanup_col]})"
+                )
 
         print(f"  {table:18} {read:28} {write}")
 
