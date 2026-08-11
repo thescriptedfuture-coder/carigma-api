@@ -55,8 +55,50 @@ PROBE_ROWS: dict[str, dict[str, Any]] = {
 }
 
 
+def assert_key_is_unprivileged(key: str) -> None:
+    """Refuse to run unless the key really is the public one.
+
+    This guard exists because its absence produced a false alarm. The first run
+    of this script reported every table readable and writable by "anonymous" —
+    and the key in `SUPABASE_ANON_KEY` was an `sb_secret_` key. A secret key
+    bypasses RLS by design, so the probe was measuring its own privilege and
+    calling it an exposure.
+
+    Supabase's key formats are indistinguishable by shape at a glance, and the
+    variable NAME is not evidence of anything. A probe whose whole output
+    depends on running unprivileged must prove it is unprivileged first.
+    """
+    if key.startswith("sb_secret_"):
+        raise SystemExit(
+            "REFUSING TO RUN: the configured key is an `sb_secret_` key.\n"
+            "A secret key bypasses RLS, so every table would look exposed no\n"
+            "matter how RLS is configured. Set the `sb_publishable_` key."
+        )
+    if key.startswith("eyJ"):
+        # A legacy JWT: decode and check the role claim rather than trusting it.
+        import base64
+        import json
+
+        try:
+            body = key.split(".")[1]
+            role = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))).get("role")
+        except Exception:
+            raise SystemExit("REFUSING TO RUN: key looks like a JWT but will not decode.") from None
+        if role != "anon":
+            raise SystemExit(f"REFUSING TO RUN: key carries role={role!r}, not 'anon'.")
+        return
+    if not key.startswith("sb_publishable_"):
+        raise SystemExit(
+            f"REFUSING TO RUN: unrecognised key format (starts {key[:4]!r}).\n"
+            "Expected `sb_publishable_` or a legacy anon JWT."
+        )
+
+
 def main() -> int:
     settings = get_settings()
+    # Preconditions before measurement. Everything below is only meaningful if
+    # this call passes.
+    assert_key_is_unprivileged(settings.supabase_anon_key)
     client = create_client(settings.supabase_url, settings.supabase_anon_key)
 
     exposed_read: list[str] = []
