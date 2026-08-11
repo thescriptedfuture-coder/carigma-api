@@ -88,15 +88,22 @@ def main() -> int:
             client.table(table).insert(row).execute()
         except Exception as exc:
             detail = str(exc)
-            if "row-level security" in detail or "42501" in detail:
-                write = "write refused by RLS"
-            elif "violates" in detail or "null value" in detail or "invalid input" in detail:
-                # Refused by a constraint, NOT by RLS. That is not protection:
-                # a better-shaped row would go in. Reported as exposed.
-                write = "WRITE REACHED THE TABLE (blocked only by a column constraint)"
+            if "42501" in detail or "row-level security" in detail:
+                # The ONLY response that proves RLS is switched on and enforcing.
+                write = "REFUSED BY RLS (42501)"
+            elif "PGRST204" in detail or "Could not find" in detail:
+                # PostgREST rejected the shape from its schema cache without ever
+                # reaching Postgres. This tells us NOTHING about RLS.
+                # ASCII only: this prints to a Windows console under cp1252.
+                write = "inconclusive - PostgREST rejected the shape, never hit the DB"
+            elif "23503" in detail or "23502" in detail or "violates" in detail:
+                # Reached the table and was rejected by a CONSTRAINT. A constraint
+                # runs only after the RLS check passes, so this proves RLS did not
+                # stop the write — a better-shaped row would land.
+                write = "PASSED RLS, stopped by a constraint only"
                 exposed_write.append(table)
             else:
-                write = f"write failed: {detail[:70]}"
+                write = f"write failed: {detail[:60]}"
         else:
             write = "WRITE SUCCEEDED"
             exposed_write.append(table)
@@ -108,6 +115,15 @@ def main() -> int:
 
         print(f"  {table:18} {read:28} {write}")
 
+    print()
+    print("How to read the write column:")
+    print("  42501            = RLS is ON and enforcing. The only proof of that.")
+    print("  constraint error = RLS did NOT stop the write. Constraints are checked")
+    print("                     AFTER the RLS check, so reaching one means the row")
+    print("                     passed. For a table whose only policies are")
+    print("                     `auth.uid() = user_id`, this means RLS is DISABLED:")
+    print("                     Postgres stores policies whether or not RLS is on,")
+    print("                     and enforces them only when it is.")
     print()
     if missing:
         print(f"NOT FOUND ({len(missing)}): {', '.join(missing)}")
