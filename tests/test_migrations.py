@@ -52,6 +52,12 @@ FORBIDDEN = [
     (r"\bset\s+not\s+null\b", "SET NOT NULL"),
     (r"\bdrop\s+constraint\b", "DROP CONSTRAINT"),
     (r"\bdrop\s+index\b", "DROP INDEX"),
+    # Dropping a PERMISSIVE policy fails closed — it denies more, never less.
+    # Dropping a RESTRICTIVE one does the opposite: restrictive policies are
+    # AND-ed, so removing one LOOSENS access. The two are indistinguishable in
+    # a `drop policy` statement, so the statement itself is forbidden and the
+    # drop-then-create idiom below is the sanctioned exception.
+    (r"\bdrop\s+policy\b", "DROP POLICY"),
 ]
 
 # V1's tables. Adding a NOT NULL column to any of these, or otherwise tightening

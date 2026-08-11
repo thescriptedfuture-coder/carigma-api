@@ -47,11 +47,15 @@
 -- names. The loop reads each policy from pg_policies and recreates it with the
 -- same name, command and expressions, changing only the role list.
 --
--- The cost is real and worth stating: `tests/test_migrations.py` cannot see
--- inside `execute format(...)`, so **this migration is outside the additive-only
--- guard**. It passes the guard by being invisible to it, not by being checked.
+-- The drop uses `drop policy IF EXISTS`, which is the idiom
+-- `tests/test_migrations.py` sanctions. That matters more than it looks: the
+-- guard now forbids a bare `drop policy` outright, because a RESTRICTIVE policy
+-- is AND-ed and dropping one LOOSENS access — and nothing in the statement
+-- distinguishes restrictive from permissive. The guard still cannot read inside
+-- `execute format(...)` well enough to confirm a `create` follows every `drop`.
 --
--- Three things make that acceptable here, and none of them is "it looked fine":
+-- Three things cover the part the guard cannot, and none of them is "it looked
+-- fine":
 --
 --   1. `drop policy` fails CLOSED. Removing a permissive policy from an
 --      RLS-enabled table denies more, never less. The failure mode is V1
@@ -61,11 +65,6 @@
 --      policy is still there.
 --   3. The result is verified from outside by `scripts/verify_rls.py` with the
 --      publishable key, which does not care how the policy got there.
---
--- Separately: the guard forbids `drop constraint` and `drop index` but not
--- `drop policy`. For PERMISSIVE policies that is defensible (fail-closed). For
--- a RESTRICTIVE policy it is not — those are AND-ed, so dropping one LOOSENS
--- access. That is a genuine gap in the guard, unrelated to this migration.
 
 do $$
 declare
@@ -106,7 +105,7 @@ begin
                and tablename = t
                and 'anon' = any (roles)
         loop
-            execute format('drop policy %I on public.%I', p.policyname, t);
+            execute format('drop policy if exists %I on public.%I', p.policyname, t);
             execute format(
                 'create policy %I on public.%I as permissive for %s to authenticated%s%s',
                 p.policyname, t,

@@ -49,7 +49,10 @@ PROBE_ROWS: dict[str, dict[str, Any]] = {
     "jobs_feed": {"user_id": None, "title": "rls-probe"},
     "agent_runs": {"user_id": None, "agent": "rls-probe", "status": "queued"},
     "credit_requests": {"user_id": None, "note": "rls-probe"},
-    "admin_notes": {"user_id": None, "body": "rls-probe"},
+    # Columns per V2_002. An invented column name makes PostgREST reject the
+    # request from its schema cache before it ever reaches Postgres, which
+    # leaves the table UNMEASURED while looking like a result.
+    "admin_notes": {"user_id": None, "note": "rls-probe", "author": "rls-probe"},
     "email_log": {"user_id": None, "email_type": "rls-probe", "status": "failed"},
     "digest_log": {"user_id": None, "digest_type": "rls-probe"},
 }
@@ -112,8 +115,12 @@ def main() -> int:
         try:
             res = client.table(table).select("*").limit(1).execute()
             rows = res.data if isinstance(res.data, list) else []
-            read = f"READ OK ({len(rows)} row visible)"
-            exposed_read.append(table)
+            # A SELECT that succeeds and returns NOTHING is RLS working, not a
+            # leak — PostgREST answers 200 with an empty set rather than an
+            # error. Only rows actually handed over count as exposure.
+            read = f"{len(rows)} row(s) returned" if rows else "no rows (RLS filtered)"
+            if rows:
+                exposed_read.append(table)
         except Exception as exc:
             text = str(exc)
             if "does not exist" in text or "PGRST205" in text:
