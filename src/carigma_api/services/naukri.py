@@ -83,11 +83,27 @@ class Dimension:
     confidence: Confidence
     #: Why this score, in the user's terms. Never absent for a measured one.
     receipt: str
-    #: Why we could not assess it, and what would let us.
+    #: Why we could not assess it.
     unavailable_reason: str | None = None
+    #: What the user can DO to make it scoreable. Required whenever the
+    #: dimension is unavailable — see `Dimension.unavailable`.
+    unlocked_by: str | None = None
 
     @classmethod
-    def unavailable(cls, key: str, label: str, reason: str) -> Dimension:
+    def unavailable(cls, key: str, label: str, reason: str, *, unlocked_by: str) -> Dimension:
+        """An honest gap — and the thing that would close it.
+
+        `unlocked_by` is REQUIRED, not optional. An absence stated without a
+        next action is a dead end; stated with one it becomes the co-pilot
+        model working — "we can't measure this yet, and here is what would let
+        us". The type refuses the dead-end version, the same way `measured`
+        refuses a score with no receipt.
+        """
+        if not unlocked_by.strip():
+            raise ValueError(
+                f"{key} is unavailable with no way to unlock it — an absence "
+                f"without a next action is a dead end, not an honest gap"
+            )
         return cls(
             key=key,
             label=label,
@@ -96,6 +112,7 @@ class Dimension:
             confidence=Confidence.UNAVAILABLE,
             receipt="",
             unavailable_reason=reason,
+            unlocked_by=unlocked_by,
         )
 
     @classmethod
@@ -122,6 +139,7 @@ class Dimension:
             "confidence": str(self.confidence),
             "receipt": self.receipt,
             "unavailable_reason": self.unavailable_reason,
+            "unlocked_by": self.unlocked_by,
         }
 
 
@@ -217,8 +235,8 @@ def score_key_skills(
             Dimension.unavailable(
                 "key_skills",
                 "Key Skills coverage",
-                "We haven't scanned enough live listings for your target role yet. "
-                "One Career Scout run gives this something to measure against.",
+                "We haven't scanned enough live listings for your target role yet.",
+                unlocked_by="One Career Scout run gives this something to measure against.",
             ),
             None,
         )
@@ -325,7 +343,8 @@ def score_parseability(hazards: tuple[str, ...] | None) -> tuple[Dimension, Fix 
             Dimension.unavailable(
                 "parseability",
                 "Resume parse-ability",
-                "No resume analysed yet. Upload one and this becomes measurable.",
+                "No resume analysed yet.",
+                unlocked_by="Upload your resume and we can check what the parser actually reads.",
             ),
             None,
         )

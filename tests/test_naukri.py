@@ -73,7 +73,9 @@ def test_an_unassessable_dimension_leaves_the_model_entirely() -> None:
     score = NaukriScore(
         dimensions=[
             _measured("headline", 100),
-            Dimension.unavailable("key_skills", "Key Skills", "no JD corpus yet"),
+            Dimension.unavailable(
+                "key_skills", "Key Skills", "no JD corpus yet", unlocked_by="run Career Scout"
+            ),
         ]
     )
 
@@ -87,7 +89,9 @@ def test_the_payload_states_how_much_of_the_model_was_assessed() -> None:
     payload = NaukriScore(
         dimensions=[
             _measured("headline", 60),
-            Dimension.unavailable("parseability", "Parse-ability", "no resume yet"),
+            Dimension.unavailable(
+                "parseability", "Parse-ability", "no resume yet", unlocked_by="upload a resume"
+            ),
         ]
     ).as_dict()
 
@@ -97,7 +101,9 @@ def test_the_payload_states_how_much_of_the_model_was_assessed() -> None:
 
 def test_nothing_assessable_scores_None_not_zero() -> None:
     """A brand-new user has not scored badly. They have not been scored."""
-    score = NaukriScore(dimensions=[Dimension.unavailable("headline", "H", "no data")])
+    score = NaukriScore(
+        dimensions=[Dimension.unavailable("headline", "H", "no data", unlocked_by="add one")]
+    )
 
     assert score.score is None
     assert score.assessable_weight == 0
@@ -120,7 +126,7 @@ def test_no_jd_corpus_means_unavailable_not_a_guess() -> None:
     assert dimension.confidence is Confidence.UNAVAILABLE
     assert dimension.score is None
     assert fix is None
-    assert "Career Scout" in (dimension.unavailable_reason or "")
+    assert "Career Scout" in (dimension.unlocked_by or "")
 
 
 def test_missing_skills_are_candidates_the_user_must_confirm() -> None:
@@ -268,3 +274,31 @@ def test_no_fix_ever_claims_to_have_applied_itself() -> None:
         text = f"{fix.title} {fix.why_it_helps}".lower()
         for claim in claims:
             assert claim not in text, f"{fix.key} claims to have done the work: {claim!r}"
+
+
+def test_every_unavailable_dimension_says_what_would_unlock_it() -> None:
+    """An absence stated without a next action is a dead end. Stated with one
+    it becomes the co-pilot model: "we can't measure this yet, and here is what
+    would let us."
+
+    Enforced on every unavailable dimension the scorers can produce, not just
+    the two that happen to have good copy today.
+    """
+    unavailable = [
+        score_key_skills(("SQL",), ())[0],
+        score_parseability(None)[0],
+    ]
+
+    for dimension in unavailable:
+        assert dimension.confidence is Confidence.UNAVAILABLE
+        assert dimension.unlocked_by, f"{dimension.key} is a dead end"
+        # A next action, not a restatement of the absence.
+        assert len(dimension.unlocked_by) > 20
+        assert dimension.unlocked_by != dimension.unavailable_reason
+
+
+def test_an_unavailable_dimension_cannot_be_built_without_a_way_out() -> None:
+    """The type refuses the dead-end version, exactly as `measured` refuses a
+    score with no receipt."""
+    with pytest.raises(ValueError, match="dead end"):
+        Dimension.unavailable("headline", "Headline", "no data", unlocked_by="")
