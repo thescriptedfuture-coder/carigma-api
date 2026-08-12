@@ -64,6 +64,39 @@ WEIGHTS: dict[str, int] = {
 MAX_SKILL_REPEATS = 2
 
 
+@dataclass(frozen=True)
+class UnlockAction:
+    """Somewhere to go, from where the user is standing.
+
+    `unlocked_by` says what would make a dimension scoreable; this makes it
+    reachable. A sentence describing something elsewhere is a signpost with no
+    road — the user has to work out where "run Career Scout" happens.
+    """
+
+    label: str
+    route: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"label": self.label, "route": self.route}
+
+
+class NaukriState(StrEnum):
+    """What the lens is actually showing.
+
+    Carried explicitly so no surface has to infer it from `score is None`,
+    which is the kind of derivation that ends up spelled differently in two
+    places.
+    """
+
+    #: Never run. The state EVERY existing user is in at cutover, so it is the
+    #: primary path rather than an edge case.
+    NEVER_RUN = "never_run"
+    #: Some dimensions measured, some not.
+    PARTIAL = "partial"
+    #: Everything assessed.
+    COMPLETE = "complete"
+
+
 class Confidence(StrEnum):
     #: Measured from data we hold.
     MEASURED = "measured"
@@ -88,9 +121,21 @@ class Dimension:
     #: What the user can DO to make it scoreable. Required whenever the
     #: dimension is unavailable — see `Dimension.unavailable`.
     unlocked_by: str | None = None
+    #: Where to do it. Optional only because a genuine wait ("we need 30 days
+    #: of history") has no button — but every CURRENT unavailable dimension has
+    #: one, and a test holds that.
+    unlock_action: UnlockAction | None = None
 
     @classmethod
-    def unavailable(cls, key: str, label: str, reason: str, *, unlocked_by: str) -> Dimension:
+    def unavailable(
+        cls,
+        key: str,
+        label: str,
+        reason: str,
+        *,
+        unlocked_by: str,
+        action: UnlockAction | None = None,
+    ) -> Dimension:
         """An honest gap — and the thing that would close it.
 
         `unlocked_by` is REQUIRED, not optional. An absence stated without a
@@ -113,6 +158,7 @@ class Dimension:
             receipt="",
             unavailable_reason=reason,
             unlocked_by=unlocked_by,
+            unlock_action=action,
         )
 
     @classmethod
@@ -140,6 +186,7 @@ class Dimension:
             "receipt": self.receipt,
             "unavailable_reason": self.unavailable_reason,
             "unlocked_by": self.unlocked_by,
+            "unlock_action": self.unlock_action.as_dict() if self.unlock_action else None,
         }
 
 
@@ -196,6 +243,14 @@ class NaukriScore:
     def unavailable(self) -> list[Dimension]:
         return [d for d in self.dimensions if d.score is None]
 
+    @property
+    def state(self) -> NaukriState:
+        if self.assessable_weight == 0:
+            return NaukriState.NEVER_RUN
+        if self.assessable_weight < 100:
+            return NaukriState.PARTIAL
+        return NaukriState.COMPLETE
+
     def as_dict(self) -> dict[str, Any]:
         assessable = self.assessable_weight
         return {
@@ -203,11 +258,13 @@ class NaukriScore:
             # Stated so no surface can render "62" as "62/100" when a fifth of
             # the model could not be assessed.
             "assessed_weight": assessable,
-            "coverage_note": (
-                f"Scored on the {assessable}% of the model we could assess."
-                if assessable < 100
-                else "Every dimension assessed."
-            ),
+            "state": str(self.state),
+            # State-aware, because "Scored on the 0% of the model we could
+            # assess" is accurate and reads like a bug. A never-run lens has
+            # not scored badly on nothing — it has not started, and the honest
+            # sentence for that is a different sentence, not a degenerate case
+            # of the partial one.
+            "coverage_note": _coverage_note(self.state, assessable),
             "dimensions": [d.as_dict() for d in self.dimensions],
             "fixes": [f.as_dict() for f in self.fixes],
             # The weights are ours, not Naukri's. Saying so is the difference
@@ -217,6 +274,16 @@ class NaukriScore:
                 "They are tuned against real dashboard outcomes."
             ),
         }
+
+
+def _coverage_note(state: NaukriState, assessable: int) -> str:
+    if state is NaukriState.NEVER_RUN:
+        # No number at all. A percentage here invites the reader to treat zero
+        # as a result rather than as an absence of one.
+        return "Not scored yet — the tune-up hasn't run."
+    if state is NaukriState.PARTIAL:
+        return f"Scored on the {assessable}% of the model we could assess."
+    return "Every dimension assessed."
 
 
 # ── The dimensions ─────────────────────────────────────────────────────────
@@ -237,6 +304,7 @@ def score_key_skills(
                 "Key Skills coverage",
                 "We haven't scanned enough live listings for your target role yet.",
                 unlocked_by="One Career Scout run gives this something to measure against.",
+                action=UnlockAction(label="Run Career Scout", route="/jobs"),
             ),
             None,
         )
@@ -345,6 +413,7 @@ def score_parseability(hazards: tuple[str, ...] | None) -> tuple[Dimension, Fix 
                 "Resume parse-ability",
                 "No resume analysed yet.",
                 unlocked_by="Upload your resume and we can check what the parser actually reads.",
+                action=UnlockAction(label="Upload your resume", route="/settings"),
             ),
             None,
         )

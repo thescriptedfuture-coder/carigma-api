@@ -19,6 +19,7 @@ from carigma_api.services.naukri import (
     Confidence,
     Dimension,
     NaukriScore,
+    NaukriState,
     cap_repeats,
     score_filter_fields,
     score_headline,
@@ -302,3 +303,82 @@ def test_an_unavailable_dimension_cannot_be_built_without_a_way_out() -> None:
     score with no receipt."""
     with pytest.raises(ValueError, match="dead end"):
         Dimension.unavailable("headline", "Headline", "no data", unlocked_by="")
+
+
+# ── The never-run state: the PRIMARY path, not an edge case ────────────────
+#
+# `naukri_scores` is empty and V1 never had Naukri scoring, so every existing
+# user lands here at cutover. It gets tested like the main path it is.
+
+
+def _never_run() -> NaukriScore:
+    """Exactly what a real user sees today: nothing measurable."""
+    return NaukriScore(
+        dimensions=[
+            score_key_skills((), ())[0],
+            score_parseability(None)[0],
+        ]
+    )
+
+
+def test_a_never_run_lens_does_not_talk_about_percentages() -> None:
+    """ "Scored on the 0% of the model we could assess" is accurate and reads
+    like a bug. A lens that has not started has not scored badly on nothing."""
+    payload = _never_run().as_dict()
+
+    assert payload["state"] == str(NaukriState.NEVER_RUN)
+    assert payload["coverage_note"] == "Not scored yet — the tune-up hasn't run."
+    assert "0%" not in payload["coverage_note"]
+    assert payload["score"] is None
+
+
+def test_the_state_is_carried_not_inferred_from_a_null_score() -> None:
+    """Two surfaces inferring `score is None` would eventually spell it
+    differently. The API decides."""
+    assert _never_run().state is NaukriState.NEVER_RUN
+    assert NaukriScore(dimensions=[_measured("headline", 50)]).state is NaukriState.PARTIAL
+    assert NaukriScore(dimensions=[_measured(k, 50) for k in WEIGHTS]).state is NaukriState.COMPLETE
+
+
+def test_a_partial_lens_still_says_how_much_was_assessed() -> None:
+    """The percentage framing is right where it is true — it just is not the
+    never-run sentence."""
+    payload = NaukriScore(
+        dimensions=[
+            _measured("headline", 60),
+            Dimension.unavailable("key_skills", "K", "no corpus", unlocked_by="run the scout"),
+        ]
+    ).as_dict()
+
+    assert payload["state"] == str(NaukriState.PARTIAL)
+    assert "20% of the model" in payload["coverage_note"]
+
+
+def test_every_unlock_on_the_never_run_screen_is_somewhere_you_can_GO() -> None:
+    """The user's point: "run Career Scout" must be a thing they can do from
+    where they are standing, not a sentence describing something elsewhere.
+
+    This is the whole never-run screen — if these are not actionable, the
+    primary path is a dead end with good grammar.
+    """
+    for dimension in _never_run().dimensions:
+        assert dimension.confidence is Confidence.UNAVAILABLE
+        assert dimension.unlock_action is not None, f"{dimension.key} is a signpost with no road"
+        assert dimension.unlock_action.label
+        assert dimension.unlock_action.route.startswith("/")
+
+
+def test_the_never_run_payload_carries_both_the_sentence_and_the_button() -> None:
+    payload = _never_run().as_dict()
+
+    for dim in payload["dimensions"]:
+        assert dim["unlocked_by"], "the sentence"
+        assert dim["unlock_action"]["route"], "the road"
+        # Distinct jobs: prose explains, the action is clickable.
+        assert dim["unlock_action"]["label"] != dim["unlocked_by"]
+
+
+def test_a_never_run_lens_offers_no_fixes_to_pretend_with() -> None:
+    """Nothing measured means nothing to fix. Inventing a fix here would be
+    fabricating a finding about a profile we have never assessed."""
+    assert _never_run().fixes == []
