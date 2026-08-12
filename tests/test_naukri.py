@@ -431,3 +431,30 @@ def test_never_run_is_not_a_value_that_lives_in_a_row() -> None:
     storing it would require the row that `should_persist` refuses."""
     assert should_persist(_never_run()) is False
     assert starts_new_cycle(None) is True, "no row means the next run charges"
+
+
+def test_the_cycle_maps_onto_two_ACTIONS_not_a_special_case_in_charging() -> None:
+    """Per-cycle billing needed no change to the run protocol.
+
+    The cost stays a pure function of the action; the route picks which action
+    the work is. A state-dependent price would have required a cost override —
+    i.e. a way for any caller to set its own price, which is exactly the second
+    charging path the credit rule exists to prevent.
+    """
+    from carigma_api.services.credits import cost_of
+
+    assert cost_of("run_naukri") == TUNEUP_CREDITS
+    assert cost_of("naukri_step") == 0
+
+
+def test_the_action_follows_from_the_cycle_state() -> None:
+    """The mapping the route will use, asserted here so it cannot drift into
+    the route and be spelled differently."""
+    from carigma_api.services.credits import cost_of
+
+    def action_for(latest: CycleState | None) -> str:
+        return "run_naukri" if starts_new_cycle(latest) else "naukri_step"
+
+    assert cost_of(action_for(None)) == TUNEUP_CREDITS
+    assert cost_of(action_for(CycleState.OPTIMIZED)) == TUNEUP_CREDITS
+    assert cost_of(action_for(CycleState.NEEDS_TUNEUP)) == 0
