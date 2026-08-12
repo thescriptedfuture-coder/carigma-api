@@ -99,14 +99,21 @@ def build_review(
     facts: tuple[ReviewFact, ...],
     streak: Streak,
     milestone: dict[str, str] | None = None,
-    wire: tuple[dict[str, str], ...] = (),
 ) -> dict[str, Any]:
     """Assemble a review payload from real activity.
 
-    Two filters are applied here rather than trusted to the client:
-    facts without receipts cannot exist (the type refuses them), and wire items
-    without a source are dropped — Brief 3a: "wire items carry sources or don't
-    ship".
+    Facts without receipts cannot exist here — the type refuses them.
+
+    **There is deliberately no `wire` key.** The review used to build its own
+    market wire in parallel with the curated batch, which meant a second source
+    of market claims that never passed through P6-2's publish gate: it could
+    carry an item no human had checked. The path is deleted rather than left
+    unrendered, because an orphaned field is a trap — the next person finds a
+    plausible value and renders it.
+
+    The market read now comes from `services.market.wire_for` alone, through
+    `GET /market/wire`, for every surface and for the email. One curation, no
+    second implementation to drift.
     """
     week_end = week_start + timedelta(days=6)
     return {
@@ -116,7 +123,6 @@ def build_review(
         "streak": streak.as_dict(),
         "facts": [f.as_dict() for f in facts],
         "milestone": milestone,
-        "wire": [item for item in wire if item.get("source")],
     }
 
 
