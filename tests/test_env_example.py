@@ -113,3 +113,58 @@ def test_service_key_is_marked_server_only() -> None:
     preceding = content[:idx].lower()
     assert "never put this in carigma-web" in preceding
     assert "bypasses all row-level security" in preceding
+
+
+def test_no_module_reads_the_environment_behind_Settings_back() -> None:
+    """Every env var must arrive through `Settings`, so `.env.example` can be
+    checked against it.
+
+    This closes the gap that let the SMTP fields exist for a whole phase
+    without appearing in `.env.example`: the sync test above compares
+    `Settings` to the template, so a module calling `os.getenv("SMTP_HOST")`
+    directly is invisible to BOTH sides of that comparison. Adding the fields
+    fixed the symptom; this fixes the hole.
+
+    It is the same blind spot as a guard that checked AST identifiers while the
+    violation lived in a string literal — a check that inspects one
+    representation and not the other.
+
+    `config.py` is the one legitimate reader. Scripts are included: the digest
+    cron is where the SMTP fields were read from in the first place.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+
+    for path in sorted([*(root / "src").rglob("*.py"), *(root / "scripts").rglob("*.py")]):
+        if path.name == "config.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # os.getenv(...) / os.environ.get(...) / environ[...]
+            reads_env = (
+                isinstance(func, ast.Attribute)
+                and func.attr in {"getenv"}
+                or (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "get"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "environ"
+                )
+            )
+            if reads_env:
+                name = (
+                    node.args[0].value
+                    if node.args and isinstance(node.args[0], ast.Constant)
+                    else "<dynamic>"
+                )
+                offenders.append(f"{path.relative_to(root)}: reads {name!r} directly")
+
+    assert not offenders, (
+        "env vars must come through Settings so .env.example can be verified:\n  "
+        + "\n  ".join(offenders)
+    )
