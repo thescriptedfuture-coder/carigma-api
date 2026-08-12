@@ -457,11 +457,27 @@ def test_the_429_carries_a_retry_after_header_and_charges_nothing(
     )
     live_limiter.reset()
 
+    # FREEZE THE CLOCK. The bucket refills continuously against
+    # time.monotonic(), so on a slow enough machine the loop below outlasts one
+    # token's refill and the final request is allowed — the limiter working
+    # correctly, reported as a failure. Observed once in four full runs.
+    #
+    # Pinning the clock removes the race rather than widening a margin: with no
+    # elapsed time there is no refill, so exhausting the burst MUST 429. A test
+    # that depends on being faster than a timer is a flake wearing a guard's
+    # clothes.
+    import carigma_api.services.ratelimit as ratelimit_module
+
+    frozen = ratelimit_module.time.monotonic()
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: frozen)
+
     res = None
     for _ in range(AGENT_BURST + 1):
         res = client.post("/score/compute", json={"onboarding": True}, headers=auth(make_token()))
 
     assert res is not None and res.status_code == 429
+    # And it tells the caller when to come back. "Retry in 0s" tells them nothing.
+    assert int(res.headers["Retry-After"]) >= 1
     assert int(res.headers["Retry-After"]) >= 1
     assert res.json()["detail"]["error"] == "rate_limited"
     # A throttled request is not a charged one.
