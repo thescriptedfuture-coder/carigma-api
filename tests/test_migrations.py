@@ -92,20 +92,64 @@ def test_migrations_directory_exists() -> None:
     assert _sql_files(), "no V2_*.sql migrations found"
 
 
+#: Declares that a dropped constraint was CREATED BY V2 and therefore is not
+#: V1's to protect. The claim is VERIFIED below against the earlier migrations,
+#: not taken on trust — an opt-out nobody checks is a comment.
+V2_OWNED_CONSTRAINT = "carigma:v2-owned-constraint:"
+
+
+def _v2_created_constraints(before: Path) -> set[str]:
+    """Constraint names an EARLIER V2 migration adds.
+
+    Only earlier ones: a migration cannot justify dropping something it creates
+    later in the same run, and ordering is the whole point of the numbering.
+    """
+    names: set[str] = set()
+    for path in _sql_files():
+        if path.name >= before.name:
+            continue
+        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
+        names.update(re.findall(r"add\s+constraint\s+([a-z0-9_]+)", sql))
+    return names
+
+
 @pytest.mark.parametrize("path", _sql_files(), ids=lambda p: p.name)
 def test_migration_contains_no_destructive_statements(path: Path) -> None:
-    sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
+    raw = path.read_text(encoding="utf-8")
+    sql = _strip_comments(raw).lower()
 
     # `drop policy if exists` immediately followed by `create policy` is the
     # standard idempotent-policy idiom and only ever touches V2-owned policies.
-    sql_without_policy_idiom = re.sub(r"drop\s+policy\s+if\s+exists[^;]*;", " ", sql)
+    cleaned = re.sub(r"drop\s+policy\s+if\s+exists[^;]*;", " ", sql)
+
+    # A constraint V2 itself added is not V1's to protect, and widening one is
+    # how a V2-owned vocabulary grows. But "V2 owns it" is a CLAIM, so the
+    # marker has to name the constraint and the name has to actually appear in
+    # an earlier migration's `add constraint`. A marker that merely asserts
+    # good intentions would be the vacuous-guard pattern again.
+    claimed = {
+        name.strip().lower()
+        for name in re.findall(rf"{re.escape(V2_OWNED_CONSTRAINT)}\s*([a-z0-9_]+)", raw, re.I)
+    }
+    if claimed:
+        actually_v2 = _v2_created_constraints(path)
+        unverified = sorted(claimed - actually_v2)
+        assert not unverified, (
+            f"{path.name} claims V2 owns {', '.join(unverified)}, but no earlier "
+            f"migration adds a constraint by that name. Either the name is wrong "
+            f"or the constraint is V1's — in which case it must not be dropped."
+        )
+        for name in claimed:
+            cleaned = re.sub(
+                rf"drop\s+constraint\s+(if\s+exists\s+)?{re.escape(name)}\s*;", " ", cleaned
+            )
 
     for pattern, label in FORBIDDEN:
-        match = re.search(pattern, sql_without_policy_idiom)
+        match = re.search(pattern, cleaned)
         assert match is None, (
             f"{path.name} contains {label} — migrations must be strictly additive "
             f"while V1 is live. Found near: "
-            f"{sql_without_policy_idiom[max(0, match.start() - 60) : match.start() + 60]!r}"
+            f"{cleaned[max(0, match.start() - 60) : match.start() + 60]!r}"
         )
 
 
