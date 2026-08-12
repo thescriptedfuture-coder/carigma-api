@@ -97,6 +97,32 @@ class NaukriState(StrEnum):
     COMPLETE = "complete"
 
 
+#: Roadmap 7.1. Charged ONCE PER CYCLE, not per run and not per step.
+#:
+#: The cycle is eight bounded steps and the design explicitly promises nothing
+#: nags between them. Per-step billing would make the user weigh a charge at
+#: every step of a task they have already committed to — which produces
+#: mid-cycle abandonment, the exact failure the bounded grammar exists to
+#: prevent. You pay to start the tune-up; finishing it costs nothing more.
+TUNEUP_CREDITS = 10
+
+
+class CycleState(StrEnum):
+    """Where the bounded tune-up is. Stored on the row, not derived.
+
+    Naukri is a task you complete and then refresh — the completion state is
+    the point of the grammar, and it is a fact about what the user did rather
+    than something recomputed from a score.
+    """
+
+    #: No row exists. This value never appears IN a row — see `should_persist`.
+    NEVER_RUN = "never_run"
+    #: A cycle is open. Re-scoring within it is free.
+    NEEDS_TUNEUP = "needs_tuneup"
+    #: Done, until the freshness meter decays.
+    OPTIMIZED = "optimized"
+
+
 class Confidence(StrEnum):
     #: Measured from data we hold.
     MEASURED = "measured"
@@ -284,6 +310,29 @@ def _coverage_note(state: NaukriState, assessable: int) -> str:
     if state is NaukriState.PARTIAL:
         return f"Scored on the {assessable}% of the model we could assess."
     return "Every dimension assessed."
+
+
+def starts_new_cycle(latest: CycleState | None) -> bool:
+    """Whether this run BEGINS a cycle, and therefore whether it charges.
+
+    Charged when there is no open cycle: no row at all, or the last one closed
+    as `optimized`. A run while `needs_tuneup` is mid-cycle work the user has
+    already paid for, and charging again would bill them twice for one task.
+    """
+    return latest is None or latest is CycleState.OPTIMIZED
+
+
+def should_persist(score: NaukriScore) -> bool:
+    """A never-run score must NOT be written.
+
+    Scoring nothing and persisting it would put a null score in
+    `naukri_scores` that every later trend line has to special-case forever —
+    and it would claim, in the record, that we assessed a profile we did not.
+
+    **The absence of a row IS the never-run state.** One representation, so
+    nothing can disagree with it.
+    """
+    return score.state is not NaukriState.NEVER_RUN
 
 
 # ── The dimensions ─────────────────────────────────────────────────────────
@@ -491,6 +540,12 @@ def cap_repeats(skills: tuple[str, ...]) -> tuple[str, ...]:
 
 __all__ = [
     "FILTER_FIELDS",
+    "TUNEUP_CREDITS",
+    "CycleState",
+    "NaukriState",
+    "UnlockAction",
+    "should_persist",
+    "starts_new_cycle",
     "MAX_SKILL_REPEATS",
     "PARSE_HAZARDS",
     "WEIGHTS",

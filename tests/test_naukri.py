@@ -15,8 +15,10 @@ import pytest
 from carigma_api.services.naukri import (
     FILTER_FIELDS,
     MAX_SKILL_REPEATS,
+    TUNEUP_CREDITS,
     WEIGHTS,
     Confidence,
+    CycleState,
     Dimension,
     NaukriScore,
     NaukriState,
@@ -25,6 +27,8 @@ from carigma_api.services.naukri import (
     score_headline,
     score_key_skills,
     score_parseability,
+    should_persist,
+    starts_new_cycle,
 )
 
 FULL_PROFILE = {
@@ -382,3 +386,48 @@ def test_a_never_run_lens_offers_no_fixes_to_pretend_with() -> None:
     """Nothing measured means nothing to fix. Inventing a fix here would be
     fabricating a finding about a profile we have never assessed."""
     assert _never_run().fixes == []
+
+
+# ── The cycle: charged once, and never-run writes nothing ──────────────────
+
+
+def test_the_tuneup_is_ten_credits_per_CYCLE() -> None:
+    """Roadmap 7.1. Not per run, not per step."""
+    assert TUNEUP_CREDITS == 10
+
+
+def test_a_first_run_starts_a_cycle_and_charges() -> None:
+    assert starts_new_cycle(None) is True
+
+
+def test_re_running_MID_cycle_is_free() -> None:
+    """The cycle is eight bounded steps and nothing nags between them.
+    Charging per step would make the user weigh a cost at every step of a task
+    they already committed to — which is what causes mid-cycle abandonment."""
+    assert starts_new_cycle(CycleState.NEEDS_TUNEUP) is False
+
+
+def test_running_again_after_finishing_starts_a_NEW_cycle() -> None:
+    """The tune-up is periodic. A refresh months later is a new task, and a
+    new charge."""
+    assert starts_new_cycle(CycleState.OPTIMIZED) is True
+
+
+def test_a_never_run_score_is_not_persisted() -> None:
+    """A null score in `naukri_scores` is a row every later trend line has to
+    special-case forever — and it would claim, in the record, that we assessed
+    a profile we did not.
+
+    The absence of a row IS the never-run state. One representation."""
+    assert should_persist(_never_run()) is False
+
+
+def test_a_score_with_anything_measured_IS_persisted() -> None:
+    assert should_persist(NaukriScore(dimensions=[_measured("headline", 40)])) is True
+
+
+def test_never_run_is_not_a_value_that_lives_in_a_row() -> None:
+    """`CycleState.NEVER_RUN` exists to be returned, never stored — because
+    storing it would require the row that `should_persist` refuses."""
+    assert should_persist(_never_run()) is False
+    assert starts_new_cycle(None) is True, "no row means the next run charges"
