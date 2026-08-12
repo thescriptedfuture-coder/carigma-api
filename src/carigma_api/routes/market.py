@@ -18,6 +18,7 @@ and the only way to be sure it never happens is for it not to exist.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -33,7 +34,13 @@ from carigma_api.services.market import (
     assert_publishable,
     wire_for,
 )
-from carigma_api.services.repository import _as_rows, service_client, user_client
+from carigma_api.services.reengagement import Sequence
+from carigma_api.services.repository import (
+    _as_rows,
+    emails_by_user_id,
+    service_client,
+    user_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +167,70 @@ def publish_batch(
 
     published = Batch.from_row({**rows[0], "published_at": now.isoformat()})
     return published.as_dict(now)
+
+
+@admin_router.get("/reengagement")
+def list_reengagement(
+    admin: AdminUser, settings: Annotated[Settings, Depends(get_settings)]
+) -> dict[str, Any]:
+    """Lapse-and-return history.
+
+    A free consequence of modelling one row per SEQUENCE rather than a counter
+    on the user: every lapse episode is still here, with how many digests it
+    took and whether the person came back. A counter would have overwritten all
+    of it.
+
+    `returned` is the number worth watching — it is the only evidence the
+    programme does anything. `finished` is eight sends with no return, and a
+    rising finished:returned ratio is the argument for changing the cadence or
+    stopping.
+    """
+    db = service_client(settings)
+    try:
+        res = (
+            db.table("reengagement_sequences")
+            .select("*")
+            .order("started_at", desc=True)
+            .limit(100)
+            .execute()
+        )
+        rows = _as_rows(res.data if res else None)
+    except Exception:
+        logger.exception("could not read reengagement sequences")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "Couldn't load re-engagement history."},
+        ) from None
+
+    emails = emails_by_user_id(db)
+    sequences = [Sequence.from_row(r) for r in rows]
+
+    by_state = Counter(str(s.state) for s in sequences)
+    returned = by_state.get("returned", 0)
+    finished = by_state.get("finished", 0)
+
+    return {
+        "sequences": [
+            {
+                **s.as_dict(),
+                "email": emails.get(s.user_id, ""),
+                "started_at": r.get("started_at"),
+            }
+            for s, r in zip(sequences, rows, strict=True)
+        ],
+        "counts": {
+            "active": by_state.get("active", 0),
+            "returned": returned,
+            "finished": finished,
+        },
+        # Stated, not left to be divided by eye. Zero returns out of any
+        # meaningful number of finished sequences is the signal to stop.
+        "headline": (
+            f"{returned} came back · {finished} ran to the end"
+            if (returned or finished)
+            else "No completed sequences yet."
+        ),
+    }
 
 
 # ── The user-facing wire ───────────────────────────────────────────────────

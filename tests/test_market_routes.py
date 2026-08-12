@@ -259,3 +259,71 @@ def test_the_admin_list_states_what_is_live_rather_than_making_it_inferred(
 
     client.post("/admin/market/mkt_w33/publish", headers=admin_headers())
     assert client.get("/admin/market", headers=admin_headers()).json()["live"] == "mkt_w33"
+
+
+# ── Admin: lapse-and-return history ────────────────────────────────────────
+
+
+def test_the_reengagement_history_is_admin_only(client: TestClient, db: FakeDB) -> None:
+    plain = auth(make_token(email="someone@example.com"))
+    assert client.get("/admin/reengagement", headers=plain).status_code == 403
+
+
+def test_the_history_counts_returns_against_completions(
+    client: TestClient, db: FakeDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`returned` is the only evidence the programme does anything, and a
+    rising finished:returned ratio is the argument for changing or stopping it.
+    Stated rather than left to be divided by eye."""
+    monkeypatch.setattr(routes, "emails_by_user_id", lambda db: {"u1": "a@x.com"})
+    db.rows.extend(
+        [
+            {
+                "id": 1,
+                "user_id": "u1",
+                "sends_made": 2,
+                "state": "returned",
+                "started_at": "2026-06-01T00:00:00Z",
+                "closed_at": "2026-06-14T00:00:00Z",
+                "next_due_at": None,
+                "last_sent_at": None,
+            },
+            {
+                "id": 2,
+                "user_id": "u1",
+                "sends_made": 8,
+                "state": "finished",
+                "started_at": "2026-07-01T00:00:00Z",
+                "closed_at": "2026-09-01T00:00:00Z",
+                "next_due_at": None,
+                "last_sent_at": None,
+            },
+            {
+                "id": 3,
+                "user_id": "u1",
+                "sends_made": 1,
+                "state": "active",
+                "started_at": "2026-08-01T00:00:00Z",
+                "closed_at": None,
+                "next_due_at": "2026-08-20T00:00:00Z",
+                "last_sent_at": None,
+            },
+        ]
+    )
+
+    body = client.get("/admin/reengagement", headers=admin_headers()).json()
+
+    assert body["counts"] == {"active": 1, "returned": 1, "finished": 1}
+    assert body["headline"] == "1 came back · 1 ran to the end"
+    # Two episodes for ONE user — the history a counter would have overwritten.
+    assert len([s for s in body["sequences"] if s["user_id"] == "u1"]) == 3
+
+
+def test_no_sequences_yet_says_so_rather_than_showing_zeroes(
+    client: TestClient, db: FakeDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes, "emails_by_user_id", lambda db: {})
+
+    body = client.get("/admin/reengagement", headers=admin_headers()).json()
+
+    assert body["headline"] == "No completed sequences yet."

@@ -27,7 +27,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from carigma_api.config import Settings  # noqa: E402
-from carigma_api.services import emails as mail  # noqa: E402
+from carigma_api.services import emails as mail
+from carigma_api.services import market, reengagement  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -177,6 +178,143 @@ class SupabaseSendLog:
             return False
 
 
+def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
+    """The lapsed-user market digest. Its own loop, deliberately.
+
+    It selects from `reengagement_sequences`, not from every profile, and its
+    send has a precondition none of the others have: **there must be a live
+    curated batch.** Folding it into `run()` behind a flag would put a
+    conditional that must never be wrong inside a loop optimised for a
+    different job.
+
+    Order of refusals, each before the next:
+
+      1. No live market batch  -> nothing sends AT ALL, to anyone. One check
+         for the whole run, because the answer cannot differ per user.
+      2. Sequence not due      -> skip.
+      3. Preferences           -> `mail.send` refuses; MARKET_DIGEST is
+         marketing, so an unsubscribe silences it.
+      4. Duplicate guard       -> `digest_log`, same as every other send.
+
+    A user who signed in is closed out here rather than in a separate job: the
+    cron is the only thing that reads these rows, so the reset belongs where
+    the read happens.
+    """
+    settings = Settings()
+    summary = mail.RunSummary()
+
+    if not dry_run and not (settings.smtp_host and settings.smtp_user):
+        logger.warning("SMTP is not configured — forcing --dry-run.")
+        dry_run = True
+
+    db = service_client(settings)
+    now = datetime.now(UTC)
+
+    # ── 1. Is there anything true to say? ──────────────────────────────────
+    # Asked ONCE, before any recipient is considered. `gist_for_email` returns
+    # None (not []) when no batch is live, so "no research" cannot be mistaken
+    # for "an email with an empty section".
+    batches = [market.Batch.from_row(r) for r in _rows(db, "market_digests")]
+    gist = market.gist_for_email(batches, now)
+    if gist is None:
+        logger.info(
+            "reengagement: no live market batch — nothing sends. "
+            "This is the correct outcome for a week with no curated research."
+        )
+        return summary
+
+    digest = reengagement.build_digest(gist)
+    if digest is None:  # pragma: no cover — gist is non-empty by the check above
+        logger.info("reengagement: digest built empty — nothing sends.")
+        return summary
+
+    mailer = SmtpMailer(settings)
+    log = SupabaseSendLog(db)
+    emails = emails_by_user_id(db)
+    signed_in = _last_sign_in(db)
+
+    for row in _rows(db, "reengagement_sequences"):
+        sequence = reengagement.Sequence.from_row(row)
+        if not sequence.is_open:
+            continue
+
+        # ── The reset. They came back; stop and keep the row as history. ───
+        if not reengagement.has_lapsed(signed_in.get(sequence.user_id), now):
+            _update_sequence(db, sequence.id, reengagement.close_on_return(now))
+            logger.info("reengagement: %s returned — sequence closed", sequence.user_id)
+            continue
+
+        if not reengagement.is_due(sequence, now):
+            continue
+
+        recipient = emails.get(sequence.user_id, "")
+        if not recipient:
+            logger.warning("reengagement: no email for %s — skipped", sequence.user_id)
+            continue
+        if only and recipient.lower() != only.lower():
+            continue
+
+        outcome = mail.send(
+            mail.Email(
+                to=recipient,
+                subject=digest.subject,
+                body=digest.body,
+                email_type=mail.EmailType.MARKET_DIGEST,
+            ),
+            mailer=mailer,
+            log=log,
+            user_id=sequence.user_id,
+            recipient=recipient,
+            email_type=mail.EmailType.MARKET_DIGEST,
+            period_key=mail.weekly_key(now.date()),
+            prefs=_prefs_for_user(db, sequence.user_id),
+            dry_run=dry_run,
+        )
+        summary.record(outcome, recipient)
+
+        # Advance ONLY on a real send. A skip, a duplicate or an unsubscribe
+        # must not consume one of the eight — otherwise a user who was
+        # unsubscribed the whole time is silently "finished" having received
+        # nothing.
+        if outcome.status is mail.SendStatus.SENT:
+            _update_sequence(db, sequence.id, reengagement.record_send(sequence, now))
+
+    mailer.close()
+    logger.info("reengagement: %s", summary.line())
+    return summary
+
+
+def _rows(db: Any, table: str) -> list[dict[str, Any]]:
+    try:
+        return list(db.table(table).select("*").execute().data or [])
+    except Exception:
+        logger.exception("could not read %s", table)
+        return []
+
+
+def _update_sequence(db: Any, sequence_id: int, update: dict[str, Any]) -> None:
+    try:
+        db.table("reengagement_sequences").update(update).eq("id", sequence_id).execute()
+    except Exception:
+        # Loud: a send that happened without its row advancing would repeat.
+        logger.exception("could not advance reengagement sequence %s", sequence_id)
+
+
+def _last_sign_in(db: Any) -> dict[str, Any]:
+    """user_id -> last_sign_in_at, from auth. Empty on failure.
+
+    An empty map means every open sequence looks NOT-lapsed and is closed as
+    returned, which stops sending. Failing toward silence is the right
+    direction: the alternative is mailing someone who came back.
+    """
+    try:
+        users = db.auth.admin.list_users(page=1, per_page=500) or []
+    except Exception:
+        logger.exception("could not read sign-in times — no reengagement sends this run")
+        return {}
+    return {u.id: getattr(u, "last_sign_in_at", None) for u in users}
+
+
 def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> mail.RunSummary:
     settings = Settings()
     summary = mail.RunSummary()
@@ -260,6 +398,27 @@ def _recipients(db: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _prefs_for_user(db: Any, user_id: str) -> mail.Preferences:
+    """One user's email preferences, read fresh.
+
+    On a read failure this returns `unsubscribed_all=True` — NOT the permissive
+    default. If we cannot tell whether someone opted out, the only safe answer
+    is to behave as though they did. The alternative mails a person who said no,
+    and an unsubscribe is not a retry.
+    """
+    try:
+        rows = (
+            db.table("profiles").select("preferences").eq("user_id", user_id).execute().data or []
+        )
+    except Exception:
+        logger.exception("could not read preferences for %s — treating as opted out", user_id)
+        return mail.Preferences(unsubscribed_all=True)
+    if not rows:
+        logger.warning("no profile row for %s — treating as opted out", user_id)
+        return mail.Preferences(unsubscribed_all=True)
+    return _prefs_for({"prefs": (rows[0].get("preferences") or {}).get("email", {})})
+
+
 def _prefs_for(row: dict[str, Any]) -> mail.Preferences:
     prefs = row.get("prefs") or {}
     return mail.Preferences(
@@ -315,7 +474,7 @@ def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> An
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["daily", "weekly"])
+    parser.add_argument("kind", choices=["daily", "weekly", "reengagement"])
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -336,7 +495,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    summary = run(args.kind, dry_run=args.dry_run, since_hours=args.since_hours, only=args.only)
+    if args.kind == "reengagement":
+        # Its own runner: different recipient source, and one refusal the other
+        # kinds do not have (no live market batch means nothing sends at all).
+        summary = run_reengagement(dry_run=args.dry_run, only=args.only)
+    else:
+        summary = run(args.kind, dry_run=args.dry_run, since_hours=args.since_hours, only=args.only)
     # Non-zero only on a genuine failure. Skips are the system working, and a
     # cron that reports failure on a quiet day trains everyone to ignore it.
     return 1 if summary.failures else 0

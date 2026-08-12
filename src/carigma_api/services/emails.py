@@ -44,6 +44,10 @@ class EmailType(StrEnum):
     WELCOME = "welcome"
     DAILY_BRIEF = "daily_brief"
     WEEKLY_REVIEW = "weekly_review"
+    #: The lapsed-user market digest (P6-3). Marketing, and governed by the
+    #: SAME toggle as the weekly review: someone who turned that off while
+    #: active has already said no to a weekly email, and lapsing is not consent.
+    MARKET_DIGEST = "market_digest"
     RECEIPT = "receipt"
 
     @property
@@ -53,7 +57,11 @@ class EmailType(StrEnum):
         A receipt is a record of a transaction, not marketing — unsubscribing
         from "emails" must not stop someone receiving proof they paid.
         """
-        return self in (EmailType.DAILY_BRIEF, EmailType.WEEKLY_REVIEW)
+        return self in (
+            EmailType.DAILY_BRIEF,
+            EmailType.WEEKLY_REVIEW,
+            EmailType.MARKET_DIGEST,
+        )
 
 
 class SendStatus(StrEnum):
