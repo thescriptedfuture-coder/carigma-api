@@ -73,6 +73,9 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     "interview_preps": {"application_id": APP_ID, "prep": {}},
     "application_events": {"application_id": APP_ID, "event_type": "rls-probe"},
     "content_feedback": {"reason": "rls-probe"},
+    # V2_008. RLS from birth rather than retrofitted, so this is here from the
+    # table's first day instead of being added after a probe found it missing.
+    "profile_updates": {"kind": "skill", "magnitude": "quiet"},
     "jobs_feed": {"dedup_key": "rls-probe", "title": "rls-probe", "company": "rls-probe"},
     "milestones": {"milestone_key": "rls-probe"},
     # V2_006, the financial pair.
