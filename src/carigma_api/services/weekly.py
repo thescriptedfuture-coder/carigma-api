@@ -40,7 +40,7 @@ class ContractState(StrEnum):
     """Mirrors `weekly_contracts_state_check` in V2_001. Keep them in step.
 
     `expired` and `lapsed` used to be here and **nothing could ever write
-    them**. `count_lapses` counted three states of which two were dead, so it
+    them**. `consecutive_lapses` counted three states of which two were dead, so it
     could only ever return what `auto_adopted` gave it — and `auto_adopt()`
     had no caller either, so the answer was always zero and the entire lapse
     escalation was unreachable.
