@@ -78,6 +78,13 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     "profile_updates": {"kind": "skill", "magnitude": "quiet"},
     "jobs_feed": {"dedup_key": "rls-probe", "title": "rls-probe", "company": "rls-probe"},
     "milestones": {"milestone_key": "rls-probe"},
+    # V2_011, the four that ended the in-memory stores. Here from their first
+    # day, like `profile_updates` — the alternative is adding them after a
+    # probe finds them missing, which is a phase of exposure.
+    "content_loop": {"week_start": "2026-01-05", "day": "MON", "slot_date": "2026-01-05"},
+    "content_weeks": {"week_start": "2026-01-05"},
+    "tracker": {"title": "rls-probe", "company": "rls-probe"},
+    "weekly_review": {"week_start": "2026-01-05"},
     # V2_006, the financial pair.
     "payments": {"credits": 0, "amount_inr": 0},
     # `sub_id` is NOT NULL and UNIQUE — missed on the first run, which reported

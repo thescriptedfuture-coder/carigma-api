@@ -240,13 +240,19 @@ def test_the_snapshot_records_the_tables_that_do_not_exist() -> None:
     """The five that broke the old exemption list.
 
     Named here so their absence is a stated fact rather than a discovery
-    someone makes again. `content_loop`, `tracker` and `weekly_review` back
-    Posts, the Tracker and the weekly review — all three of which currently
-    keep their state in process memory.
+    someone makes again — and policed, so a name cannot sit here after the
+    table arrives. Three of the original five were created by V2_011, and this
+    test failing is what reported it.
+
+    `ai_memory` and `users` remain absent: the first is a V1 concept nothing in
+    V2 reads, the second is Supabase's `auth.users` under a name we do not use.
     """
     live = live_tables()
 
-    for missing in ("content_loop", "tracker", "weekly_review", "ai_memory", "users"):
+    # `content_loop`, `tracker` and `weekly_review` were on this list until
+    # V2_011 created them — and the staleness check is what said so, rather
+    # than the list quietly staying wrong. `content_weeks` came with them.
+    for missing in ("ai_memory", "users"):
         assert missing not in live, (
             f"{missing} EXISTS now — re-snapshot and take it off this list, "
             f"because its absence is no longer the fact being recorded"

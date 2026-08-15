@@ -35,6 +35,22 @@
     "slot_id",
     "user_id"
   ],
+  "content_loop": [
+    "created_at",
+    "day",
+    "drafts",
+    "id",
+    "optional",
+    "published_at",
+    "skip_note",
+    "skip_reason",
+    "slot_date",
+    "state",
+    "time_label",
+    "updated_at",
+    "user_id",
+    "week_start"
+  ],
   "content_plan": [
     "body",
     "created_at",
@@ -50,6 +66,18 @@
     "updated_at",
     "user_id",
     "visual_prompt",
+    "week_start"
+  ],
+  "content_weeks": [
+    "cadence_days",
+    "cadence_per_week",
+    "created_at",
+    "id",
+    "paused_because",
+    "paused_until",
+    "streak_weeks",
+    "updated_at",
+    "user_id",
     "week_start"
   ],
   "credit_ledger": [
@@ -315,6 +343,21 @@
     "updated_at",
     "user_id"
   ],
+  "tracker": [
+    "applied_at",
+    "closed_at",
+    "closed_reason",
+    "company",
+    "created_at",
+    "id",
+    "interview_at",
+    "job_id",
+    "notes",
+    "stage",
+    "title",
+    "updated_at",
+    "user_id"
+  ],
   "usage": [
     "period",
     "runs",
@@ -341,6 +384,20 @@
     "proposed_at",
     "state",
     "total_credits",
+    "user_id",
+    "week_start"
+  ],
+  "weekly_review": [
+    "accepted_kinds",
+    "cadence",
+    "created_at",
+    "decided_at",
+    "facts",
+    "id",
+    "items",
+    "proposed_at",
+    "state",
+    "updated_at",
     "user_id",
     "week_start"
   ]

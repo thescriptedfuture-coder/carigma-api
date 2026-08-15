@@ -134,20 +134,53 @@ def fetch_schema(settings: Settings) -> dict[str, Any]:
     return definitions
 
 
-def probe_row(columns: dict[str, Any]) -> dict[str, Any]:
-    """The smallest row this table will accept for a WRITE attempt.
+def probe_row(columns: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    """A row complete enough that reaching a constraint MEANS something.
 
-    Built from the table's real columns, so PostgREST can never reject the
-    shape from its schema cache — a PGRST204 leaves the table unmeasured while
-    still printing a line, which is the failure mode this whole file is about.
+    ## The false inference this replaces
 
-    The row does not need to be valid. A constraint rejection proves the write
-    got PAST RLS, which is the finding; only 42501 proves it did not.
+    The old version sent the smallest row it could build — one `user_id`, or
+    one text column — reasoning that "a constraint runs only after the RLS
+    check passes, so reaching one proves RLS did not stop the write."
+
+    **That is false for NOT NULL.** Column constraints are evaluated while the
+    tuple is formed, before the row-level `WITH CHECK` policy is consulted. So
+    an under-filled row hits 23502 without RLS ever having an opinion, and the
+    probe read that as an exposure.
+
+    It reported `referrals` as anonymously writable. `referrals` has no
+    `user_id`, so the fallback sent a single string column; the NOT NULL
+    violation on `referrer_id` was scored as "passed RLS". Filling the required
+    columns by hand and retrying returns 42501 — refused, as designed.
+
+    A security probe that cries wolf gets ignored, which is worse than not
+    having one.
     """
+    row: dict[str, Any] = {}
+    for name in required:
+        if name in _GENERATED:
+            continue
+        spec = columns.get(name) or {}
+        fmt = str(spec.get("format") or "")
+        if fmt == "uuid":
+            row[name] = str(uuid.uuid4())
+        elif fmt.startswith(("integer", "bigint", "smallint", "numeric", "double")):
+            row[name] = 1
+        elif fmt == "boolean":
+            row[name] = False
+        elif fmt.startswith("timestamp") or fmt == "date":
+            row[name] = "2026-01-01T00:00:00Z"
+        elif fmt == "jsonb" or fmt == "json":
+            row[name] = {}
+        else:
+            row[name] = f"rls-probe-{uuid.uuid4()}"
+    if row:
+        return row
+
+    # Nothing required beyond generated columns. Fall back to any owner column
+    # or the first writable text column, so the attempt is still made.
     if "user_id" in columns:
         return {"user_id": str(uuid.uuid4())}
-    # No owner column (jobs_cache, market_digests). Use the first text column
-    # the database does not generate itself.
     for name, spec in columns.items():
         if name not in _GENERATED and spec.get("type") == "string":
             return {name: f"rls-probe-{uuid.uuid4()}"}
@@ -193,7 +226,7 @@ def main() -> int:
                 continue
 
         # ── Write ───────────────────────────────────────────────────────────
-        row = probe_row(columns)
+        row = probe_row(columns, definitions[table].get("required") or [])
         if not row:
             unmeasured.append(table)
             print(f"  {table:20} {read:28} write NOT ATTEMPTED (no usable column)")
@@ -210,11 +243,17 @@ def main() -> int:
                 # Counted as unmeasured rather than passed, because it is.
                 write = "UNMEASURED - PostgREST rejected the shape"
                 unmeasured.append(table)
-            elif any(code in detail for code in ("23502", "23503", "23505", "22P02")) or (
-                "violates" in detail
-            ):
-                # A constraint runs only AFTER the RLS check passes, so reaching
-                # one proves RLS did not stop the write.
+            elif "23502" in detail:
+                # NOT NULL is checked while the tuple is formed, BEFORE the RLS
+                # `WITH CHECK` policy. Reaching it proves nothing either way, so
+                # it is unmeasured rather than either verdict. This is the false
+                # positive that reported `referrals` as anonymously writable.
+                write = "UNMEASURED - not-null hit before RLS was consulted"
+                unmeasured.append(table)
+            elif any(code in detail for code in ("23503", "23505", "22P02")):
+                # A foreign key, a unique index and a type cast are all checked
+                # after the row-level policy, so reaching one DOES prove the
+                # write got past RLS.
                 write = "PASSED RLS, stopped by a constraint only"
                 exposed_write.append(table)
             else:
