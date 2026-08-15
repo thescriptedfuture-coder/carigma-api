@@ -382,3 +382,63 @@ def test_the_signals_type_carries_no_extra_state() -> None:
         "new_match_count",
         "open_match_count",
     }
+
+
+def test_an_upcoming_interview_reaches_the_screen_with_its_time(wired) -> None:  # type: ignore[no-untyped-def]
+    """The interview rung end to end, through HTTP.
+
+    Added because the web's payload guard reported `when` as a field the API
+    never sends — true, and only because no test had ever produced an
+    interview primary action. The shape was unverified rather than absent,
+    which is the UNVERIFIED category the audit found two of.
+    """
+    client, db, profiles = wired
+    uid = "11111111-1111-1111-1111-111111111111"
+    soon = NOW + timedelta(hours=30)
+    db.seed(
+        "tracker",
+        (1,),
+        {
+            "user_id": uid,
+            "stage": "interview",
+            "company": "Zomato",
+            "title": "Data Analyst",
+            "interview_at": soon.isoformat(),
+            "closed_at": None,
+        },
+    )
+
+    body = client.get("/today", headers=token()).json()
+    primary = body["primary_action"]
+
+    assert primary["key"] == "interview_soon"
+    assert primary["time_bound"] is True
+    assert primary["when"], "an interview rung with no time is not time-bound"
+    assert "Zomato" in primary["body"]
+
+    # And through /thread, which carries the same rung at a different path.
+    # The web checks LadderItem against BOTH `primary_action` and `items[]`,
+    # so a shape verified on one and not the other is still half unverified.
+    head = client.get("/thread", headers=token()).json()["items"][0]
+    assert head["key"] == "interview_soon"
+    assert head["when"] == primary["when"]
+
+
+def test_a_closed_application_is_not_an_upcoming_interview(wired) -> None:  # type: ignore[no-untyped-def]
+    """An interview for a role that is gone is not something to prepare for."""
+    client, db, _profiles = wired
+    uid = "11111111-1111-1111-1111-111111111111"
+    db.seed(
+        "tracker",
+        (1,),
+        {
+            "user_id": uid,
+            "stage": "closed",
+            "company": "Zomato",
+            "title": "Data Analyst",
+            "interview_at": (NOW + timedelta(hours=5)).isoformat(),
+            "closed_at": NOW.isoformat(),
+        },
+    )
+
+    assert client.get("/today", headers=token()).json()["primary_action"]["key"] == "standing"

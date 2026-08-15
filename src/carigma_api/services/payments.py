@@ -123,6 +123,30 @@ class PaymentStatus(StrEnum):
     def is_terminal(self) -> bool:
         return self is not PaymentStatus.CREATED
 
+    @property
+    def is_dead(self) -> bool:
+        """Terminal, and not a success. The user was not charged."""
+        return self in (PaymentStatus.FAILED, PaymentStatus.EXPIRED, PaymentStatus.CANCELLED)
+
+
+def status_from_provider(raw: str) -> PaymentStatus | None:
+    """Map Razorpay's status onto ours, or None if we do not recognise it.
+
+    `verify_topup` used to compare against the literal tuple
+    `("expired", "cancelled", "failed")` and then write `provider_status`
+    straight into the row — a second declaration of the enum, and an
+    unvalidated write. Razorpay has statuses we do not model (`partially_paid`
+    is one), and storing one of those would leave a payment in a state nothing
+    can resolve: not `created`, not any value we compare against.
+
+    Returning None means "we do not know what this is", which is a reason to
+    leave the row alone, not a reason to guess.
+    """
+    try:
+        return PaymentStatus(raw)
+    except ValueError:
+        return None
+
 
 #: Subscription statuses that mean "the user has a live or starting plan".
 LIVE_SUB_STATUSES: frozenset[str] = frozenset(
@@ -140,6 +164,24 @@ class GrantOutcome(StrEnum):
     ALREADY_CREDITED = "already_credited"
     NOT_PAID_YET = "not_paid_yet"
     FAILED = "failed"
+    #: The money moved and the credits did NOT arrive.
+    #:
+    #: Distinct from FAILED, which means the payment itself did not go through
+    #: and nobody was charged. This is the opposite: charged, not credited.
+    #: It is the only outcome where the user is owed something, so it must
+    #: never be reported as a success.
+    GRANT_FAILED = "grant_failed"
+
+
+#: Said to someone whose money moved and whose credits did not arrive.
+#:
+#: It admits the charge, does not blame them, and commits to a resolution
+#: without promising a timeframe we cannot keep. It must never read as though
+#: nothing happened — something did, and it cost them.
+_OWED = (
+    "Your payment went through but we couldn't add the credits. "
+    "We can see it and we'll put it right — nothing further is needed from you."
+)
 
 
 @dataclass(frozen=True)
@@ -261,14 +303,24 @@ def verify_topup(
         # a different message would confirm the link id exists.
         return VerificationResult(GrantOutcome.FAILED, message="We couldn't find that payment.")
 
-    if provider_status in ("expired", "cancelled", "failed"):
-        store.mark_payment(user_id, link_id, provider_status)
+    theirs = status_from_provider(provider_status)
+
+    if theirs is not None and theirs.is_dead:
+        # Write the real outcome. Until this ran through a route, a dead
+        # payment could sit at `created` forever, and "why does my payment say
+        # nothing happened" has no answer in the data.
+        store.mark_payment(user_id, link_id, theirs.value)
         return VerificationResult(
             GrantOutcome.FAILED,
             message="That payment didn't go through. You haven't been charged.",
         )
 
-    if provider_status != "paid":
+    if theirs is not PaymentStatus.PAID:
+        if theirs is None:
+            # Not an error — Razorpay has states we do not model. We report
+            # what we can honestly say and leave the row untouched, so the next
+            # reconcile sees it unchanged rather than stuck on a guess.
+            logger.info("unmodelled payment status %r on %s", provider_status, link_id)
         return VerificationResult(
             GrantOutcome.NOT_PAID_YET,
             message="We haven't seen that payment complete yet.",
@@ -295,7 +347,30 @@ def verify_topup(
 
     amount = int(row.get("credits") or 0)  # falsy-ok: no credits recorded on a pack IS zero credits
     label = row.get("pack_key") or "top-up"
-    balance = credits.grant(user_id, amount, f"Top-up · {label} (Razorpay)")
+
+    try:
+        balance = credits.grant(user_id, amount, f"Top-up · {label} (Razorpay)")
+    except Exception:
+        # The write itself raised. We do NOT know whether it landed, so the
+        # claim stays: releasing it could double-credit. This is the case that
+        # needs a person.
+        logger.exception("credit grant raised after claiming payment %s", link_id)
+        return VerificationResult(GrantOutcome.GRANT_FAILED, message=_OWED)
+
+    if balance is None:
+        # `grant` returns None only when the balance READ failed, which means
+        # `apply_delta` was never called and provably nothing was applied. So
+        # the claim is released and the next reconcile retries it — the credits
+        # arrive on the user's next page visit instead of via a support ticket.
+        #
+        # Before this, None was passed straight through as `balance_after` on a
+        # GRANTED result: the user was told "N credits added", the row said
+        # `paid`, and every retry answered "already added — you were charged
+        # once". Charged, uncredited, and self-confirming.
+        logger.error("could not credit claimed payment %s; releasing the claim", link_id)
+        store.mark_payment(user_id, link_id, PaymentStatus.CREATED.value)
+        return VerificationResult(GrantOutcome.GRANT_FAILED, message=_OWED)
+
     return VerificationResult(
         GrantOutcome.GRANTED,
         credits_added=amount,
@@ -349,7 +424,27 @@ def verify_subscription_cycles(
 
     amount = the_plan.credits * won
     months = "month" if won == 1 else "months"
-    balance = credits.grant(user_id, amount, f"{the_plan.label} · {won} {months} (Razorpay)")
+
+    try:
+        balance = credits.grant(user_id, amount, f"{the_plan.label} · {won} {months} (Razorpay)")
+    except Exception:
+        # Unknown whether the write landed, so the counter stays advanced.
+        # Same reasoning as the top-up path: only a provably unapplied grant is
+        # safe to retry.
+        logger.exception("credit grant raised after claiming cycles on %s", sub_id)
+        return VerificationResult(GrantOutcome.GRANT_FAILED, message=_OWED)
+
+    if balance is None:
+        # The balance read failed, so nothing was applied. Wind `cycles_credited`
+        # back to what we read, guarded on it still being the value we set —
+        # the same conditional update, run in reverse. A subscriber whose grant
+        # blipped gets their month on the next reconcile instead of silently
+        # losing it, and the guard means a concurrent reconcile that has moved
+        # the counter on wins rather than being clobbered.
+        logger.error("could not credit claimed cycles on %s; winding back", sub_id)
+        store.claim_cycles(user_id, sub_id, seen=provider_paid_count, paid=seen)
+        return VerificationResult(GrantOutcome.GRANT_FAILED, message=_OWED)
+
     return VerificationResult(
         GrantOutcome.GRANTED,
         credits_added=amount,

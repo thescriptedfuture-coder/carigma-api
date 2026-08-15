@@ -381,7 +381,8 @@
     "items[].primary.label",
     "items[].primary.route",
     "items[].time_bound",
-    "items[].title"
+    "items[].title",
+    "items[].when"
   ],
   "GET /today": [
     "deferred",
@@ -394,7 +395,8 @@
     "primary_action.primary.label",
     "primary_action.primary.route",
     "primary_action.time_bound",
-    "primary_action.title"
+    "primary_action.title",
+    "primary_action.when"
   ],
   "GET /weekly/contract": [
     "contract",
@@ -508,6 +510,17 @@
     "score",
     "state",
     "total_weight"
+  ],
+  "POST /payments/topup": [
+    "checkout_url",
+    "link_id"
+  ],
+  "POST /payments/verify": [
+    "balance_after",
+    "credits_added",
+    "message",
+    "outcome",
+    "success"
   ],
   "POST /posts/week/{}/mark-published": [
     "charged",
