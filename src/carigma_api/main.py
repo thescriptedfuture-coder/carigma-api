@@ -26,6 +26,7 @@ from carigma_api.routes import payments as payments_routes
 from carigma_api.routes import posts as posts_routes
 from carigma_api.routes import profile as profile_routes
 from carigma_api.routes import profile_updates as profile_update_routes
+from carigma_api.routes import referrals as referral_routes
 from carigma_api.routes import score as score_routes
 from carigma_api.routes import settings as settings_routes
 from carigma_api.routes import today as today_routes
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(credits_routes.router)
     app.include_router(profile_routes.router)
     app.include_router(today_routes.router)
+    app.include_router(referral_routes.router)
     return app
 
 

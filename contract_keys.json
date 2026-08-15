@@ -368,6 +368,27 @@
   "GET /profile/updates/open": [
     "change"
   ],
+  "GET /referrals": [
+    "activated",
+    "cap",
+    "cap_note",
+    "code",
+    "earned",
+    "link",
+    "message",
+    "pending",
+    "pending_note",
+    "referred_credits",
+    "referrer_credits",
+    "slots_left",
+    "whatsapp_url"
+  ],
+  "GET /referrals/{}": [
+    "credits",
+    "headline",
+    "sub",
+    "valid"
+  ],
   "GET /score/history": [
     "items",
     "items[].created_at",
@@ -616,6 +637,12 @@
     "run_agents",
     "state",
     "user_approved"
+  ],
+  "POST /referrals/claim": [
+    "credits_now",
+    "credits_on_upload",
+    "message",
+    "state"
   ],
   "POST /score/compute": [
     "credits",

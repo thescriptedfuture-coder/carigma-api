@@ -137,13 +137,37 @@ class FakeTable:
         return Result(found)
 
 
+class _Deferred:
+    """`.rpc(...).execute()` — the builder shape the real client uses."""
+
+    def __init__(self, run: Any) -> None:
+        self._run = run
+
+    def execute(self) -> Any:
+        return self._run()
+
+
 class FakeDB:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.failing: set[str] = set()
+        self.functions: dict[str, Any] = {}
 
     def table(self, name: str) -> FakeTable:
         return FakeTable(self, name)
+
+    def rpc(self, name: str, params: dict[str, Any]) -> Any:
+        """Postgres functions, which some surfaces must use instead of tables.
+
+        Registered per test with `db.functions[name] = fn`. Unregistered names
+        raise rather than returning empty: a silent `[]` from a typo'd function
+        name is indistinguishable from a real empty answer, and on the referral
+        surface an empty answer is a valid-looking "you have earned nothing".
+        """
+        fn = self.functions.get(name)
+        if fn is None:
+            raise KeyError(f"no fake for rpc {name!r} — register it in db.functions")
+        return _Deferred(lambda: Result(fn(params)))
 
     def rows(self, name: str) -> list[dict[str, Any]]:
         return self.tables.get(name, [])
