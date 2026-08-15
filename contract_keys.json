@@ -423,6 +423,23 @@
     "presentation",
     "week_start"
   ],
+  "GET /weekly/review": [
+    "review",
+    "review.built_at",
+    "review.facts",
+    "review.facts[].direction",
+    "review.facts[].glyph",
+    "review.facts[].receipt",
+    "review.facts[].text",
+    "review.milestone",
+    "review.reading_minutes",
+    "review.streak",
+    "review.streak.broken",
+    "review.streak.previous_best",
+    "review.streak.sentence",
+    "review.streak.weeks",
+    "review.week_label"
+  ],
   "GET /weekly/standing-by": [
     "actions",
     "actions[].action",

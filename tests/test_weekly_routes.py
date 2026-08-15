@@ -15,20 +15,37 @@ import pytest
 from fastapi.testclient import TestClient
 
 from carigma_api.routes import weekly as weekly_routes
+from carigma_api.services.review import Direction, ReviewFact, Streak
 from carigma_api.services.weekly import (
     ContractItem,
     ContractState,
     WeeklyContract,
     auto_adopt,
 )
+from carigma_api.services.weekly_store import SupabaseContractStore
 from tests.conftest import USER_ID, auth, make_token
+from tests.fake_supabase import FakeDB
+
+#: The store the routes are wired to for the duration of a test. Module-level
+#: so `seed_week` can reach it without every test threading it through.
+_DB: FakeDB
 
 
 @pytest.fixture(autouse=True)
-def _clean_store() -> Iterator[None]:
-    weekly_routes.reset_store()
+def _wired(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Real store code, in-memory rows.
+
+    The routes used to hold contracts in a module dict, so the tests reset it
+    between cases. They now go through `SupabaseContractStore`, which means
+    every test here exercises the row round-trip — `to_row` writing what
+    `from_row` reads — instead of putting a dataclass in and getting the same
+    object back.
+    """
+    global _DB
+    _DB = FakeDB()
+    store = SupabaseContractStore(_DB)
+    monkeypatch.setattr(weekly_routes, "_deps", lambda request, settings: store)
     yield
-    weekly_routes.reset_store()
 
 
 def this_monday() -> date:
@@ -46,7 +63,7 @@ def items() -> tuple[ContractItem, ...]:
 
 def seed_week(user_id: str = USER_ID, **kw: object) -> WeeklyContract:
     contract = WeeklyContract(week_start=this_monday(), items=items(), **kw)  # type: ignore[arg-type]
-    weekly_routes.seed(user_id, contract)
+    SupabaseContractStore(_DB).save(user_id, contract)
     return contract
 
 
@@ -180,7 +197,7 @@ def test_an_auto_adopted_week_never_reports_itself_as_approved(
     client: TestClient,
 ) -> None:
     """The whole point of the module, checked at the boundary a client reads."""
-    weekly_routes.seed(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
+    SupabaseContractStore(_DB).save(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
 
     body = client.get("/weekly/contract", headers=auth(make_token())).json()
 
@@ -194,7 +211,7 @@ def test_an_auto_adopted_week_cannot_be_retroactively_approved(
 ) -> None:
     """Otherwise a stray client retry would convert "we assumed" into "they
     agreed" — the exact rewrite of history this design forbids."""
-    weekly_routes.seed(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
+    SupabaseContractStore(_DB).save(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
 
     res = client.post(
         "/weekly/contract/approve",
@@ -208,7 +225,7 @@ def test_an_auto_adopted_week_cannot_be_retroactively_approved(
 
 
 def test_auto_adoption_pauses_drafts_but_keeps_scanning(client: TestClient) -> None:
-    weekly_routes.seed(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
+    SupabaseContractStore(_DB).save(USER_ID, auto_adopt(seed_week(), now=datetime.now(UTC)))
     body = client.get("/weekly/contract", headers=auth(make_token())).json()
 
     kinds = {i["kind"] for i in body["contract"]["items"]}
@@ -223,7 +240,7 @@ def _lapsed_history(count: int) -> None:
     monday = this_monday()
     for i in range(count, 0, -1):
         week = monday - timedelta(weeks=i)
-        weekly_routes.seed(
+        SupabaseContractStore(_DB).save(
             USER_ID,
             WeeklyContract(week_start=week, items=items(), state=ContractState.AUTO_ADOPTED),
         )
@@ -314,3 +331,216 @@ def test_a_re_entry_week_can_then_be_signed(client: TestClient) -> None:
 
     assert res.status_code == 200
     assert res.json()["contract"]["user_approved"] is True
+
+
+# ── GET /weekly/review ─────────────────────────────────────────────────────
+# This endpoint had no test of any kind. It was not on the UNBUILT list — the
+# route existed and returned 200 — which is exactly what UNVERIFIED is for.
+
+
+def last_monday() -> date:
+    return this_monday() - timedelta(weeks=1)
+
+
+def store() -> SupabaseContractStore:
+    return SupabaseContractStore(_DB)
+
+
+def a_fact(text: str = "3 posts shipped") -> ReviewFact:
+    return ReviewFact(direction=Direction.UP, text=text, receipt="content_loop, 3 rows")
+
+
+def test_the_review_requires_a_verified_token(client: TestClient) -> None:
+    assert client.get("/weekly/review").status_code == 401
+
+
+def test_a_user_with_no_review_gets_null_not_an_error(client: TestClient) -> None:
+    """Day one. Null is the honest answer and the client renders the promise."""
+    res = client.get("/weekly/review", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert res.json() == {"review": None}
+
+
+def test_a_built_review_comes_back_with_its_facts(client: TestClient) -> None:
+    store().save_review(
+        USER_ID,
+        last_monday(),
+        weekly_routes.earned_review(facts=(a_fact(),), streak=Streak(weeks=4)),
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert review is not None
+    assert [f["text"] for f in review["facts"]] == ["3 posts shipped"]
+    assert review["streak"]["weeks"] == 4
+    assert review["week_label"].startswith("Week of ")
+
+
+def test_a_quiet_week_is_a_review_with_no_facts_not_a_missing_review(
+    client: TestClient,
+) -> None:
+    """The absence question, on this surface.
+
+    A week that produced nothing is a REAL answer about a real week. Rendered
+    as "your first review builds Sunday" it would tell someone who has been
+    here four months that they are new — the same collapse the Posts port hit,
+    where a paused week read as never-planned.
+    """
+    store().save_review(
+        USER_ID, last_monday(), weekly_routes.earned_review(facts=(), streak=Streak(weeks=0))
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert review is not None, "a quiet week is not a missing week"
+    assert review["facts"] == []
+    assert review["streak"]["weeks"] == 0
+
+
+def test_this_weeks_row_is_not_read_as_last_weeks_review(client: TestClient) -> None:
+    """The review covers the week that CLOSED.
+
+    This week's row holds the plan being proposed; last week's holds what
+    happened. They share a screen and a table, and reading the wrong one would
+    report a week that has not finished yet.
+    """
+    seed_week()  # this week's contract, with no facts on it
+    store().save_review(
+        USER_ID,
+        last_monday(),
+        weekly_routes.earned_review(facts=(a_fact("last week"),), streak=Streak(weeks=1)),
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert review is not None
+    assert [f["text"] for f in review["facts"]] == ["last week"]
+
+
+def test_a_review_we_cannot_read_is_not_reported_as_absent(client: TestClient) -> None:
+    """ "We couldn't look" is not "there is nothing".
+
+    Returning null on a failed read would render the day-one promise to a
+    long-standing user — a claim about their history, made from an error.
+    """
+    _DB.failing.add("weekly_review")
+
+    res = client.get("/weekly/review", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "read_failed"
+    assert "Traceback" not in res.text
+
+
+def test_saving_a_review_does_not_blank_the_contract_on_that_row(
+    client: TestClient,
+) -> None:
+    """One row carries both. A review written for a week that already has a
+    decided contract must not reset its state — an upsert that replaced the
+    row would silently reopen a week the user had signed."""
+    signed = WeeklyContract(
+        week_start=last_monday(),
+        items=items(),
+        state=ContractState.APPROVED,
+        accepted_kinds=("content",),
+        decided_at=datetime.now(UTC),
+    )
+    store().save(USER_ID, signed)
+
+    store().save_review(
+        USER_ID, last_monday(), weekly_routes.earned_review(facts=(a_fact(),), streak=Streak(1))
+    )
+
+    after = store().load(USER_ID, last_monday())
+    assert after is not None
+    assert after.state is ContractState.APPROVED
+    assert after.accepted_kinds == ("content",)
+    assert after.decided_at is not None
+
+
+# ── The absence question, through the database ─────────────────────────────
+
+
+def test_took_nothing_and_never_decided_survive_the_round_trip(
+    client: TestClient,
+) -> None:
+    """Both have empty `accepted_kinds`, and the row must still tell them apart.
+
+    Collapsing them would let the Sunday sweep auto-adopt a week the user
+    explicitly declined — putting a plan in force that they refused.
+    """
+    monday = this_monday()
+    declined = WeeklyContract(
+        week_start=monday,
+        items=items(),
+        state=ContractState.DECLINED,
+        accepted_kinds=(),
+        decided_at=datetime.now(UTC),
+    )
+    open_week = WeeklyContract(
+        week_start=monday - timedelta(weeks=1),
+        items=items(),
+        state=ContractState.PROPOSED,
+        accepted_kinds=(),
+    )
+    store().save(USER_ID, declined)
+    store().save(USER_ID, open_week)
+
+    back = {c.week_start: c for c in store().history(USER_ID)}
+
+    took_nothing = back[monday]
+    never_decided = back[monday - timedelta(weeks=1)]
+
+    assert took_nothing.accepted_kinds == never_decided.accepted_kinds == ()
+    assert took_nothing.state is ContractState.DECLINED
+    assert took_nothing.decided_at is not None
+    assert never_decided.state is ContractState.PROPOSED
+    assert never_decided.decided_at is None
+    # And the thing that actually matters: neither puts anything in force, but
+    # only one of them is still open to being answered.
+    assert took_nothing.state.is_decided is True
+    assert never_decided.state.is_decided is False
+
+
+def test_a_row_with_an_unreadable_state_raises_rather_than_reopening_the_week(
+    client: TestClient,
+) -> None:
+    """`or "proposed"` used to make this silently return an open proposal."""
+    _DB.seed(
+        "weekly_review",
+        {
+            "user_id": USER_ID,
+            "week_start": this_monday().isoformat(),
+            "state": "",
+            "cadence": "weekly",
+            "items": [],
+            "accepted_kinds": [],
+        },
+    )
+
+    with pytest.raises(ValueError):
+        store().history(USER_ID)
+
+
+def test_the_build_time_is_when_the_review_was_built(client: TestClient) -> None:
+    """Not when the row appeared.
+
+    The row is created when the week's CONTRACT is proposed, on the Monday;
+    the review is built the following Sunday. Reading `created_at` would have
+    reported every review as built six days before it was — and the version
+    before that printed the literal string "Sun 18:00" regardless.
+    """
+    built = datetime(2026, 8, 9, 18, 4, tzinfo=UTC)
+    # The contract row for that week exists first, as it does in real life.
+    store().save(USER_ID, WeeklyContract(week_start=last_monday(), items=items()))
+    store().save_review(
+        USER_ID,
+        last_monday(),
+        weekly_routes.earned_review(facts=(a_fact(),), streak=Streak(1), built_at=built),
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert review["built_at"] == built.isoformat()
+    assert "18:00" not in review["built_at"], "the hardcoded Sunday claim is gone"
