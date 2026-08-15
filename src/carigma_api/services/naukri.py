@@ -106,6 +106,14 @@ class NaukriState(StrEnum):
 #: prevent. You pay to start the tune-up; finishing it costs nothing more.
 TUNEUP_CREDITS = 10
 
+#: One constant, because it is a claim about how OUR model works. A copy of it
+#: frozen inside a stored payload would keep asserting provenance for weights
+#: that have since changed, so surfaces read this rather than the blob.
+MODEL_NOTE = (
+    "Weightings are Carigma's informed estimates, not Naukri's formula. "
+    "They are tuned against real dashboard outcomes."
+)
+
 
 class CycleState(StrEnum):
     """Where the bounded tune-up is. Stored on the row, not derived.
@@ -295,10 +303,7 @@ class NaukriScore:
             "fixes": [f.as_dict() for f in self.fixes],
             # The weights are ours, not Naukri's. Saying so is the difference
             # between an estimate and a claim about someone else's algorithm.
-            "model_note": (
-                "Weightings are Carigma's informed estimates, not Naukri's formula. "
-                "They are tuned against real dashboard outcomes."
-            ),
+            "model_note": MODEL_NOTE,
         }
 
 
@@ -540,6 +545,7 @@ def cap_repeats(skills: tuple[str, ...]) -> tuple[str, ...]:
 
 __all__ = [
     "FILTER_FIELDS",
+    "MODEL_NOTE",
     "TUNEUP_CREDITS",
     "CycleState",
     "NaukriState",
