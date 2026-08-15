@@ -16,6 +16,7 @@ Scheduling (Render Cron, both IST):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import smtplib
 import sys
@@ -474,7 +475,7 @@ def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> An
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["daily", "weekly", "reengagement"])
+    parser.add_argument("kind", choices=["daily", "weekly", "reengagement", "sweep"])
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -494,6 +495,16 @@ def main() -> int:
         "widen --since-hours, so testing cannot mail real users.",
     )
     args = parser.parse_args()
+
+    if args.kind == "sweep":
+        # Not an email. It lives here because this is the process that already
+        # holds a service-role client and runs on a schedule, and a second
+        # cron entry point would be a second thing to forget to deploy.
+        from carigma_api.services.sweep import sweep
+
+        report = sweep(service_client(Settings()), dry_run=args.dry_run)
+        print(json.dumps(report.as_dict(), indent=2))
+        return 0
 
     if args.kind == "reengagement":
         # Its own runner: different recipient source, and one refusal the other

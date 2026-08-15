@@ -41,6 +41,7 @@ from carigma_api.services.repository import (
     service_client,
     user_client,
 )
+from carigma_api.services.weekly import ContractState
 
 logger = logging.getLogger(__name__)
 
@@ -266,3 +267,52 @@ def get_wire(
 
 
 __all__ = ["admin_router", "router"]
+
+
+@admin_router.get("/weekly-contracts")
+def weekly_contract_signal(
+    admin: AdminUser, settings: Annotated[Settings, Depends(get_settings)]
+) -> dict[str, Any]:
+    """auto_adopted vs approved — whether the Sunday ritual is working.
+
+    The equivalent of the finished:returned ratio one surface over. `approved`
+    is someone choosing their week. `auto_adopted` is someone letting it ride,
+    which is a legitimate outcome the design deliberately allows — the plan
+    continues conservatively and nobody is punished. But a rising
+    auto_adopted:approved ratio says the Sunday moment is not landing, and that
+    is the argument for changing when or how it is asked, not for asking harder.
+
+    Reported as counts and a ratio, never as a verdict. `ratio` is None rather
+    than 0 when nobody has approved anything: dividing by zero to get "infinite
+    drift" would be a number invented to fill a gap.
+    """
+    db = service_client(settings)
+    try:
+        res = db.table("weekly_review").select("state, week_start, user_id").execute()
+        rows = _as_rows(res.data if res else None)
+    except Exception:
+        logger.exception("could not read weekly contracts")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "Couldn't load weekly contracts."},
+        ) from None
+
+    counts = Counter(str(row.get("state") or "") for row in rows)
+    approved = counts.get("approved", 0)
+    adopted = counts.get("auto_adopted", 0)
+
+    return {
+        "counts": {state: counts.get(state, 0) for state in (str(s) for s in ContractState)},
+        "approved": approved,
+        "auto_adopted": adopted,
+        # None, not 0. "No approvals yet" and "one adoption per approval" are
+        # different facts, and a zero here would read as the second.
+        "ratio_adopted_to_approved": round(adopted / approved, 2) if approved else None,
+        "decided_weeks": approved + adopted + counts.get("declined", 0),
+        "total_weeks": len(rows),
+        "note": (
+            "auto_adopted is a legitimate outcome — the plan continues conservatively "
+            "and nothing is lost. A rising ratio is a signal about when the week is "
+            "proposed, not about the user."
+        ),
+    }

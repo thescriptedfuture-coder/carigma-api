@@ -398,3 +398,71 @@ def test_a_week_the_user_actually_decided_gets_no_carried_forward_notice() -> No
 
     for decided in (ContractState.APPROVED, ContractState.DECLINED, ContractState.PROPOSED):
         assert carried_forward_copy(contract(LAST_WEEK, decided)) is None
+
+
+# ── The admin signal ───────────────────────────────────────────────────────
+
+
+def _admin_signal(rows: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    from carigma_api.routes import market as market_routes
+
+    class Stub:
+        def table(self, _name: str) -> Any:
+            outer = self
+
+            class T:
+                def select(self, *_a: Any, **_k: Any) -> Any:
+                    return self
+
+                def execute(self) -> Any:
+                    return type("Res", (), {"data": [dict(r) for r in outer.rows]})()
+
+            return T()
+
+    stub = Stub()
+    stub.rows = rows  # type: ignore[attr-defined]
+    monkeypatch.setattr(market_routes, "service_client", lambda settings: stub)
+    return market_routes.weekly_contract_signal(admin=None, settings=None)  # type: ignore[arg-type]
+
+
+def test_the_admin_signal_counts_adopted_against_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _admin_signal(
+        [{"state": "approved"}, {"state": "auto_adopted"}, {"state": "auto_adopted"}],
+        monkeypatch,
+    )
+
+    assert payload["approved"] == 1
+    assert payload["auto_adopted"] == 2
+    assert payload["ratio_adopted_to_approved"] == 2.0
+
+
+def test_no_approvals_yet_is_null_not_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "Nobody has approved anything" and "one adoption per approval" are
+    different facts. A zero here would read as the second."""
+    payload = _admin_signal([{"state": "auto_adopted"}], monkeypatch)
+
+    assert payload["ratio_adopted_to_approved"] is None
+
+
+def test_the_signal_reports_every_state_the_enum_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Derived from `ContractState`, so a new state cannot be silently absent
+    from the dashboard."""
+    payload = _admin_signal([{"state": "approved"}], monkeypatch)
+
+    assert set(payload["counts"]) == {str(s) for s in ContractState}
+
+
+def test_the_signal_does_not_call_auto_adoption_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is a legitimate outcome the design allows. The note must point at
+    when the week is proposed, not at the user."""
+    note = _admin_signal([{"state": "auto_adopted"}], monkeypatch)["note"].lower()
+
+    assert "legitimate" in note
+    for blaming in ("ignored", "failed to", "neglect", "did not bother"):
+        assert blaming not in note
