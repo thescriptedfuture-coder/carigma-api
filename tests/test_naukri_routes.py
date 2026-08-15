@@ -7,7 +7,6 @@ quietly violate even when the service underneath is right:
 - **The cycle is charged once.** Starting costs 10; every step after is free.
 - **A run that cannot be stored is a failure**, and a failure charges nothing.
 - **Reading is not a run**, so the GET never touches credits.
-- **`/naukri/fix` applies only what the user confirmed.**
 """
 
 from __future__ import annotations
@@ -145,7 +144,6 @@ def wired(client: TestClient, monkeypatch: pytest.MonkeyPatch):  # type: ignore[
 def test_every_naukri_endpoint_requires_a_verified_token(client: TestClient) -> None:
     assert client.get("/naukri/score").status_code == 401
     assert client.post("/naukri/score").status_code == 401
-    assert client.post("/naukri/fix", json={"key": "headline"}).status_code == 401
 
 
 # ── The never-run read: the path every existing user is on ─────────────────
@@ -192,12 +190,41 @@ def test_every_unavailable_dimension_offers_somewhere_to_go(wired) -> None:  # t
     client, *_ = wired
 
     body = client.get("/naukri/score", headers=auth(make_token())).json()
-    unavailable = [d for d in body["dimensions"] if d["score"] is None]
+    unavailable = [d for d in body["dimensions"] if d["confidence"] == "unavailable"]
 
     assert unavailable, "the fixture should leave something unmeasurable"
     for dimension in unavailable:
         assert dimension["unlocked_by"], f"{dimension['key']} states no way out"
         assert dimension["unlock_action"]["route"], f"{dimension['key']} names nowhere to go"
+
+
+def test_a_dimension_we_have_not_built_offers_the_user_nothing_to_do(wired) -> None:  # type: ignore[no-untyped-def]
+    """The two kinds of absence are different statements.
+
+    `key_skills` and `parseability` used to render "Run Career Scout" and
+    "Upload your resume" — buttons for data nothing in the product collects.
+    An action the product cannot honour is a lie with a click target.
+    """
+    client, *_ = wired
+
+    body = client.get("/naukri/score", headers=auth(make_token())).json()
+    not_built = [d for d in body["dimensions"] if d["confidence"] == "not_built"]
+
+    assert not_built, "nothing is marked as not-yet-built"
+    for dimension in not_built:
+        assert dimension["unlock_action"] is None, f"{dimension['key']} offers a dead button"
+        assert dimension["unlocked_by"] is None
+        assert dimension["needs"], f"{dimension['key']} is absent with no explanation"
+        assert dimension["weight"] == 0, "an unbuilt dimension is inside the denominator"
+
+
+def test_the_lens_says_what_it_covers_before_it_says_a_number(wired) -> None:  # type: ignore[no-untyped-def]
+    client, *_ = wired
+
+    body = client.get("/naukri/score", headers=auth(make_token())).json()
+
+    assert "2 of the 7 dimensions" in body["scope_note"]
+    assert body["total_weight"] == 30
 
 
 def test_the_never_run_screen_states_what_the_first_run_costs(wired) -> None:  # type: ignore[no-untyped-def]
@@ -231,6 +258,16 @@ def test_reading_the_lens_never_charges(wired) -> None:  # type: ignore[no-untyp
 
 
 # ── The false finding a key mismatch produced ──────────────────────────────
+
+
+def test_there_is_no_write_endpoint_left_on_this_router() -> None:
+    """`/naukri/fix` merged confirmed skills into a profile. The only producer
+    of a confirmable skill was `score_key_skills`, which is gone — so the
+    endpoint became a live profile-write path with nothing user-facing in front
+    of it, which is worse than dead code."""
+    paths = {r.path for r in routes.router.routes}  # type: ignore[attr-defined]
+
+    assert paths == {"/naukri/score"}
 
 
 def test_a_real_headline_is_not_reported_as_empty(wired) -> None:  # type: ignore[no-untyped-def]
@@ -375,14 +412,14 @@ def test_nothing_assessable_stores_nothing_and_charges_nothing(
     """Two rules composing into one answer, proved rather than asserted.
 
     `_build_score` cannot currently produce this — headline and filter fields
-    always score, even at zero — so the state is reached by making every
-    dimension unavailable. Without the honest empty the work would return a
+    always score, even at zero — so the state is reached by making the only
+    weighted dimension unavailable. Without the honest empty the work would return a
     full dict of unavailables, which is non-empty by len(), so `execute` would
     bill for a run that stores nothing.
     """
     from carigma_api.services.naukri import Dimension, NaukriScore, UnlockAction
 
-    def nothing_measurable(profile: dict[str, Any], jd_skills: tuple[str, ...]) -> NaukriScore:
+    def nothing_measurable(profile: dict[str, Any]) -> NaukriScore:
         return NaukriScore(
             dimensions=[
                 Dimension.unavailable(
@@ -459,124 +496,6 @@ def test_an_unreadable_cycle_state_resolves_to_the_free_reading(wired) -> None: 
 
     assert body["credits"]["charged"] == 0
     assert creds.balance == 90
-
-
-# ── /naukri/fix ────────────────────────────────────────────────────────────
-
-
-def test_a_fix_applies_only_skills_the_user_confirmed(wired) -> None:  # type: ignore[no-untyped-def]
-    """7.1's hard rule: a suggested skill must be confirmed TRUE by the person
-    whose profile it is. An API that could self-confirm makes it advisory."""
-    client, _db, profiles, _creds = wired
-
-    res = client.post(
-        "/naukri/fix",
-        json={"key": "key_skills", "confirmed_skills": ["Airflow"]},
-        headers=auth(make_token()),
-    )
-
-    assert res.status_code == 200
-    assert res.json()["applied"] == ["Airflow"]
-    assert profiles.saved is not None
-    assert "Airflow" in profiles.saved["skills"]
-
-
-def test_a_fix_caps_repetition_rather_than_advising_against_it(wired) -> None:  # type: ignore[no-untyped-def]
-    """RChilli normalises repeats, so the third mention buys nothing and costs
-    credibility. The cap is enforced on the way in, not suggested."""
-    client, _db, profiles, _creds = wired
-
-    body = client.post(
-        "/naukri/fix",
-        json={"key": "key_skills", "confirmed_skills": ["dbt", "dbt", "dbt", "dbt"]},
-        headers=auth(make_token()),
-    ).json()
-
-    assert body["applied"] == ["dbt", "dbt"]
-
-
-def test_applying_a_fix_is_free(wired) -> None:  # type: ignore[no-untyped-def]
-    client, _db, _profiles, creds = wired
-
-    body = client.post(
-        "/naukri/fix",
-        json={"key": "key_skills", "confirmed_skills": ["Airflow"]},
-        headers=auth(make_token()),
-    ).json()
-
-    assert body["charged"] == 0
-    assert creds.balance == 100
-    assert creds.ledger == []
-
-
-def test_a_failed_save_says_the_profile_is_unchanged(wired, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    client, _db, profiles, _creds = wired
-
-    def boom(user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
-        raise RuntimeError("write failed")
-
-    monkeypatch.setattr(profiles, "save", boom)
-
-    res = client.post(
-        "/naukri/fix",
-        json={"key": "key_skills", "confirmed_skills": ["Airflow"]},
-        headers=auth(make_token()),
-    )
-
-    assert res.status_code == 503
-    assert "unchanged" in res.json()["detail"]["message"]
-
-
-def test_a_list_of_blanks_is_refused_rather_than_silently_ignored(wired) -> None:  # type: ignore[no-untyped-def]
-    client, _db, profiles, _creds = wired
-
-    res = client.post(
-        "/naukri/fix",
-        json={"key": "key_skills", "confirmed_skills": ["  ", ""]},
-        headers=auth(make_token()),
-    )
-
-    assert res.status_code == 400
-    assert profiles.saved is None
-
-
-# ── The fix path must never grow a charge ──────────────────────────────────
-
-
-def test_the_fix_endpoint_never_charges_credits() -> None:
-    """Asserted against the FUNCTION's code, not a response, so a charge added
-    later fails even if no test covers the new behaviour.
-
-    It walks the AST including string constants: an identifier-only walk once
-    passed while `db.table('credits').update(...)` sat on a free path, because
-    a table name is a string literal, not a Name node.
-    """
-    import ast
-    import inspect
-
-    tree = ast.parse(inspect.getsource(routes.apply_naukri_fix))
-
-    referenced: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            referenced.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            referenced.add(node.attr)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            referenced.add(node.value)
-
-    for forbidden in (
-        "credits",
-        "credit_ledger",
-        "deduct",
-        "deduct_credits",
-        "spend",
-        "charge",
-        "charge_for_result",
-        "apply_delta",
-        "execute_run",
-    ):
-        assert forbidden not in referenced, f"{forbidden!r} appears on the free fix path"
 
 
 def test_the_read_endpoint_never_charges_credits() -> None:

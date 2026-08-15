@@ -2,7 +2,13 @@
 
     GET  /naukri/score   what the lens shows          FREE
     POST /naukri/score   run the tune-up              10 on cycle start, then free
-    POST /naukri/fix     apply a confirmed fix        free (mid-cycle)
+
+There is no `/naukri/fix`. It merged user-confirmed skills into a profile, and
+the only thing that ever produced a confirmable skill was `score_key_skills` —
+which is gone, because no JD corpus exists to score against. An endpoint that
+writes to a profile with nothing on the other end reachable by a user is a
+live write path with no gate in front of it, which is worse than dead code.
+Fixes now describe the change and point at where it is made.
 
 ## The never-run state is the PRIMARY path
 
@@ -31,7 +37,6 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
@@ -41,15 +46,13 @@ from carigma_api.services import runs as runs_service
 from carigma_api.services.credits import InsufficientCredits
 from carigma_api.services.naukri import (
     MODEL_NOTE,
+    NOT_YET_MODELLED,
     CycleState,
     Dimension,
     NaukriScore,
     UnlockAction,
-    cap_repeats,
     score_filter_fields,
     score_headline,
-    score_key_skills,
-    score_parseability,
     should_persist,
     starts_new_cycle,
 )
@@ -67,14 +70,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["naukri"])
 
 TABLE = "naukri_scores"
-
-
-class FixRequest(BaseModel):
-    key: str = Field(min_length=1, max_length=40)
-    #: Only skills the user has TICKED. The API never promotes a candidate on
-    #: its own — 7.1's hard rule is that every suggested skill is confirmed as
-    #: true by the person whose profile it is.
-    confirmed_skills: list[str] = Field(default_factory=list)
 
 
 def _deps(request: Request, settings: Settings) -> tuple[Any, ...]:
@@ -119,8 +114,8 @@ def _cycle_state_of(row: dict[str, Any]) -> CycleState:
         return CycleState.NEEDS_TUNEUP
 
 
-def _build_score(profile: dict[str, Any], jd_skills: tuple[str, ...]) -> NaukriScore:
-    """Score every dimension we can, and honestly decline the rest.
+def _build_score(profile: dict[str, Any]) -> NaukriScore:
+    """Score what we assess, and name what we do not assess yet.
 
     `profile` is the repository's shape — **camelCase**, produced by
     `db_to_profile`, not the database's snake_case columns. Reading
@@ -129,22 +124,20 @@ def _build_score(profile: dict[str, Any], jd_skills: tuple[str, ...]) -> NaukriS
     finding about a real profile. A missing key looks exactly like an empty
     field, so the mistake is silent by construction.
     """
-    skills = cap_repeats(tuple(str(profile.get("skills") or "").split(",")))
-
     dimensions = []
     fixes = []
     for dimension, fix in (
-        score_key_skills(skills, jd_skills),
         score_headline(str(profile.get("linkedinHeadline") or "")),
-        # No resume text is retained, so there is nothing to detect hazards in.
-        # `None` is the honest argument, NOT an empty tuple: a user who has not
-        # been analysed is not a user whose resume parses cleanly.
-        score_parseability(None),
         score_filter_fields(profile),
     ):
         dimensions.append(dimension)
         if fix is not None:
             fixes.append(fix)
+
+    # Named, not scored. Weight 0, no action — the thing in the way is our
+    # roadmap, and an action the product cannot honour is a lie with a click
+    # target.
+    dimensions.extend(Dimension.not_built(key) for key in NOT_YET_MODELLED)
     return NaukriScore(dimensions=dimensions, fixes=fixes)
 
 
@@ -157,17 +150,14 @@ def _preview_score() -> NaukriScore:
     That is the whole tune-up given away on the read path, a payload
     contradicting itself, and a paid POST with nothing left to sell.
 
-    The two kinds of absence keep their own copy, because they are undone by
-    different things: `headline` and `filter_fields` are waiting on the run,
-    while `key_skills` and `parseability` would still be unavailable after it.
-    Collapsing them into one sentence would promise that running the tune-up
-    unlocks all four.
+    The two assessed dimensions are UNAVAILABLE here — waiting on the run,
+    which the user can do. The unbuilt five are NOT_BUILT in both states,
+    because running changes nothing about them.
     """
     waiting = "The tune-up hasn't looked at this yet."
     run_it = UnlockAction(label="Run the tune-up", route="/signal/naukri")
 
     dimensions = [
-        score_key_skills((), ())[0],
         Dimension.unavailable(
             "headline",
             "Resume headline",
@@ -175,7 +165,6 @@ def _preview_score() -> NaukriScore:
             unlocked_by="Run the tune-up and we'll score your headline against what Resdex ranks.",
             action=run_it,
         ),
-        score_parseability(None)[0],
         Dimension.unavailable(
             "filter_fields",
             "Filter fields",
@@ -183,6 +172,7 @@ def _preview_score() -> NaukriScore:
             unlocked_by="Run the tune-up and we'll check which recruiter filters you pass.",
             action=run_it,
         ),
+        *(Dimension.not_built(key) for key in NOT_YET_MODELLED),
     ]
     # No fixes. Nothing measured means nothing to fix, and inventing one would
     # be a finding about a profile we have never assessed.
@@ -294,7 +284,7 @@ async def run_naukri_tuneup(
         second credit path; this needs none.
         """
         reporter.step("score", "Reading your profile against live listings")
-        score = _build_score(profile, ())
+        score = _build_score(profile)
         reporter.complete_step()
 
         # An honest empty when nothing could be assessed, so `execute` reaches
@@ -344,54 +334,6 @@ async def run_naukri_tuneup(
     result["next_run_costs"] = credits_service.cost_of("naukri_step")
     result["credits"] = settled.credits.as_dict() if settled.credits else None
     return result
-
-
-@router.post("/naukri/fix")
-def apply_naukri_fix(
-    body: FixRequest,
-    request: Request,
-    user: CurrentUser,
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, Any]:
-    """Record a fix the user confirmed. Free — mid-cycle work already paid for.
-
-    Only `confirmed_skills` are accepted, and they are capped for repetition on
-    the way in. Nothing is promoted from `candidate_skills` automatically: 7.1's
-    rule is that a suggested skill must be confirmed TRUE by the person whose
-    profile it is, and an API that could self-confirm would make that rule
-    advisory.
-    """
-    _, profiles, _, _ = _deps(request, settings)
-
-    confirmed = cap_repeats(tuple(body.confirmed_skills))
-    if body.confirmed_skills and not confirmed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "nothing_confirmed", "message": "No usable skills in that list."},
-        )
-
-    profile = profiles.load(user.id) or {}
-    existing = cap_repeats(tuple(str(profile.get("skills") or "").split(",")))
-    merged = cap_repeats((*existing, *confirmed))
-
-    try:
-        profiles.save(user.id, {"skills": ", ".join(s.strip() for s in merged if s.strip())})
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error": "save_failed",
-                "message": "We couldn't save that just now. Your profile is unchanged.",
-            },
-        ) from exc
-
-    return {
-        "key": body.key,
-        "applied": list(confirmed),
-        # Free, and said so — the user agreed to one charge for the cycle.
-        "charged": 0,
-        "cycle_state": str(CycleState.NEEDS_TUNEUP),
-    }
 
 
 __all__ = ["router"]

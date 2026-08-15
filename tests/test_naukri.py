@@ -1,20 +1,33 @@
-"""The Naukri tune-up scorer.
+"""The Naukri model.
 
-The rule that shapes every test here: **a dimension we cannot score honestly
-scores nothing.** Not zero, not a guess, not a middle value — it leaves the
-model, and the total says how much of the model it was computed from.
+Rewritten when the lens was cut back to what it actually computes. The tests
+that went with it asserted things about `score_key_skills`, `score_parseability`
+and `cap_repeats`, none of which exist any more — they scored dimensions no
+data source could ever feed, which put 45 points into a denominator nobody
+could earn.
 
-That is `ProviderUnavailable != empty` applied to a number. A user reading "62"
-must not be reading a figure a fifth of which was invented.
+What is held here now:
+
+- **The denominator is what we compute**, never 100.
+- **"We don't assess this" and "we couldn't assess this for you" are different
+  states**, and the types make them impossible to confuse.
+- A `NOT_BUILT` dimension carries no action, because there is nothing the user
+  could do.
+- An `UNAVAILABLE` one always carries one, because there is.
 """
 
 from __future__ import annotations
+
+import ast
+import inspect
 
 import pytest
 
 from carigma_api.services.naukri import (
     FILTER_FIELDS,
-    MAX_SKILL_REPEATS,
+    MODEL_NOTE,
+    NOT_YET_MODELLED,
+    TOTAL_WEIGHT,
     TUNEUP_CREDITS,
     WEIGHTS,
     Confidence,
@@ -22,377 +35,301 @@ from carigma_api.services.naukri import (
     Dimension,
     NaukriScore,
     NaukriState,
-    cap_repeats,
+    UnlockAction,
+    scope_note,
     score_filter_fields,
     score_headline,
-    score_key_skills,
-    score_parseability,
     should_persist,
     starts_new_cycle,
 )
 
 FULL_PROFILE = {
+    "linkedinHeadline": "Business Analyst | 5 years | SQL, Power BI | Ops analytics",
     "location": "Bengaluru",
-    "total_experience": "5",
-    "current_ctc": "18 LPA",
-    "notice_period": "30 days",
     "education": "B.Tech",
 }
 
 
-# ── The model ──────────────────────────────────────────────────────────────
+def _scored(profile: dict[str, object] | None = None) -> NaukriScore:
+    p = dict(FULL_PROFILE if profile is None else profile)
+    dimensions = []
+    fixes = []
+    for dim, fix in (score_headline(str(p.get("linkedinHeadline") or "")), score_filter_fields(p)):
+        dimensions.append(dim)
+        if fix is not None:
+            fixes.append(fix)
+    dimensions.extend(Dimension.not_built(k) for k in NOT_YET_MODELLED)
+    return NaukriScore(dimensions=dimensions, fixes=fixes)
 
 
-def test_the_seven_weights_are_the_roadmap_model_and_sum_to_100() -> None:
-    assert WEIGHTS == {
-        "key_skills": 25,
-        "headline": 20,
-        "parseability": 20,
-        "completeness": 12,
-        "filter_fields": 10,
-        "designation": 8,
-        "summary_recency": 5,
-    }
-    assert sum(WEIGHTS.values()) == 100
+# ── The model describes what it computes ───────────────────────────────────
+
+
+def test_the_denominator_is_what_we_compute_not_one_hundred() -> None:
+    """A model advertising points it cannot award is a ceiling nobody reaches.
+
+    `WEIGHTS` used to declare seven dimensions summing to 100 while four had no
+    scorer and two had no data source, so `COMPLETE` was unreachable by
+    construction and every user sat permanently below a line.
+    """
+    assert TOTAL_WEIGHT == sum(WEIGHTS.values())
+    assert set(WEIGHTS) == {"headline", "filter_fields"}
+    assert TOTAL_WEIGHT != 100, "the denominator drifted back to a number we cannot award"
+
+
+def test_complete_is_actually_reachable() -> None:
+    score = _scored()
+
+    assert score.assessable_weight == TOTAL_WEIGHT
+    assert score.state is NaukriState.COMPLETE
+
+
+def test_no_weight_is_declared_twice() -> None:
+    """A key in both dicts would be scored and disclaimed at the same time."""
+    assert not set(WEIGHTS) & set(NOT_YET_MODELLED)
+
+
+def test_the_scope_note_is_derived_from_the_code_not_written_out() -> None:
+    """ "The seven dimensions" survived in the copy while four had no scorer,
+    because the sentence and the code had no connection."""
+    note = scope_note()
+    total = len(WEIGHTS) + len(NOT_YET_MODELLED)
+
+    assert f"{len(WEIGHTS)} of the {total}" in note
+
+    # Walk the AST, skipping the docstring. The first version of this guard
+    # read `inspect.getsource` and fired on its own explanation of the bug —
+    # a guard over prose, which is the thing CONTRIBUTING says not to build.
+    fn = ast.parse(inspect.getsource(scope_note)).body[0]
+    assert isinstance(fn, ast.FunctionDef)
+    body = fn.body[1:] if ast.get_docstring(fn) else fn.body
+    literals = [
+        n.value.lower()
+        for stmt in body
+        for n in ast.walk(stmt)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+    for spelled in ("two", "five", "seven"):
+        assert not any(spelled in lit for lit in literals), (
+            f"the count is spelled {spelled!r} in the copy instead of computed"
+        )
 
 
 def test_the_payload_says_the_weights_are_ours_not_naukris() -> None:
-    """Presenting an estimate as the platform's own arithmetic would be the
-    same lie as fabricating a job."""
-    note = NaukriScore(dimensions=[_measured("headline", 80)]).as_dict()["model_note"]
+    payload = _scored().as_dict()
 
-    assert "estimate" in note.lower()
-    assert "not naukri's formula" in note.lower()
+    assert payload["model_note"] == MODEL_NOTE
+    assert "not Naukri's formula" in payload["model_note"]
 
 
-def _measured(key: str, score: int) -> Dimension:
-    return Dimension.measured(key, key, score, "a receipt")
+def test_the_payload_carries_both_halves_of_the_fraction() -> None:
+    """A score with no denominator is the "62/100" misreading waiting to happen."""
+    payload = _scored().as_dict()
+
+    assert payload["assessed_weight"] == TOTAL_WEIGHT
+    assert payload["total_weight"] == TOTAL_WEIGHT
 
 
-# ── Unavailable is not zero ────────────────────────────────────────────────
+# ── The two states that must never merge ───────────────────────────────────
 
 
-def test_an_unassessable_dimension_leaves_the_model_entirely() -> None:
-    """Not scored zero — which would read as "you did badly at this" — and not
-    scored full, which would flatter. It is simply not counted."""
-    score = NaukriScore(
-        dimensions=[
-            _measured("headline", 100),
-            Dimension.unavailable(
-                "key_skills", "Key Skills", "no JD corpus yet", unlocked_by="run Career Scout"
-            ),
-        ]
+def test_not_built_and_unavailable_are_different_states() -> None:
+    """ "We don't assess this yet" and "we couldn't assess this for you" are
+    different statements. A user reading one as the other draws the wrong
+    conclusion about their own profile."""
+    assert Confidence.NOT_BUILT is not Confidence.UNAVAILABLE
+
+    not_built = Dimension.not_built("key_skills")
+    unavailable = Dimension.unavailable(
+        "headline",
+        "Resume headline",
+        "Nothing read yet.",
+        unlocked_by="Run the tune-up.",
+        action=UnlockAction(label="Run it", route="/signal/naukri"),
     )
 
-    # 20 of the 45 available weight, all of it earned.
-    assert score.assessable_weight == 20
-    assert score.score == 100, "the unavailable 25% must not drag the score down"
+    assert not_built.confidence is Confidence.NOT_BUILT
+    assert unavailable.confidence is Confidence.UNAVAILABLE
 
 
-def test_the_payload_states_how_much_of_the_model_was_assessed() -> None:
-    """So no surface can render 62 as 62/100 when a fifth was not measured."""
-    payload = NaukriScore(
-        dimensions=[
-            _measured("headline", 60),
-            Dimension.unavailable(
-                "parseability", "Parse-ability", "no resume yet", unlocked_by="upload a resume"
-            ),
-        ]
-    ).as_dict()
+def test_a_not_built_dimension_offers_no_action_at_all() -> None:
+    """The thing standing in the way is our roadmap, not the user's profile.
 
-    assert payload["assessed_weight"] == 20
-    assert "20% of the model" in payload["coverage_note"]
-
-
-def test_nothing_assessable_scores_None_not_zero() -> None:
-    """A brand-new user has not scored badly. They have not been scored."""
-    score = NaukriScore(
-        dimensions=[Dimension.unavailable("headline", "H", "no data", unlocked_by="add one")]
-    )
-
-    assert score.score is None
-    assert score.assessable_weight == 0
-
-
-def test_a_measured_dimension_cannot_exist_without_a_receipt() -> None:
-    """Same rule as the weekly review's facts: the type refuses a claim with no
-    evidence behind it."""
-    with pytest.raises(ValueError, match="receipt"):
-        Dimension.measured("headline", "Headline", 70, "")
-
-
-# ── Key skills: coverage of TRUE skills ────────────────────────────────────
-
-
-def test_no_jd_corpus_means_unavailable_not_a_guess() -> None:
-    """Scoring coverage against nothing produces a number with no referent."""
-    dimension, fix = score_key_skills(("SQL",), ())
-
-    assert dimension.confidence is Confidence.UNAVAILABLE
-    assert dimension.score is None
-    assert fix is None
-    assert "Career Scout" in (dimension.unlocked_by or "")
-
-
-def test_missing_skills_are_candidates_the_user_must_confirm() -> None:
-    """Every suggested skill must be confirmable as TRUE. We propose; the user
-    ticks. Nothing here is written to a profile."""
-    _, fix = score_key_skills(("SQL",), ("SQL", "dbt", "Airflow"))
-
-    assert fix is not None
-    assert fix.requires_confirmation is True
-    assert set(fix.candidate_skills) == {"dbt", "Airflow"}
-
-
-def test_full_coverage_offers_no_fix() -> None:
-    dimension, fix = score_key_skills(("SQL", "dbt"), ("SQL", "dbt"))
-
-    assert dimension.score == 100
-    assert fix is None
-
-
-def test_the_key_skills_reason_explains_absence_not_ranking() -> None:
-    """The mechanic matters: a missing true skill is not a ranking penalty, it
-    is exclusion from the result set. A user who understands that will fix it."""
-    _, fix = score_key_skills((), ("SQL",))
-
-    assert fix is not None
-    assert "before" in fix.why_it_helps.lower()
-    assert "entirely" in fix.why_it_helps.lower()
-
-
-# ── No keyword stuffing ────────────────────────────────────────────────────
-
-
-def test_repetition_is_capped_not_merely_discouraged() -> None:
-    """RChilli normalises repeats to zero gain and recruiters reject stuffed
-    profiles. The cap is enforced so no caller can opt out."""
-    capped = cap_repeats(("SQL", "SQL", "SQL", "SQL", "dbt"))
-
-    assert capped.count("SQL") == MAX_SKILL_REPEATS
-    assert "dbt" in capped
-
-
-def test_the_cap_is_case_insensitive() -> None:
-    """ "SQL, sql, Sql" is stuffing with extra steps."""
-    assert len(cap_repeats(("SQL", "sql", "Sql", "SqL"))) == MAX_SKILL_REPEATS
-
-
-# ── Parse-ability ──────────────────────────────────────────────────────────
-
-
-def test_no_resume_analysed_is_unavailable_not_unparseable() -> None:
-    """A user who has not uploaded is not a user with a broken resume."""
-    dimension, fix = score_parseability(None)
-
-    assert dimension.confidence is Confidence.UNAVAILABLE
-    assert fix is None
-
-
-def test_a_clean_resume_scores_full_and_offers_no_fix() -> None:
-    dimension, fix = score_parseability(())
-
-    assert dimension.score == 100
-    assert fix is None
-
-
-def test_each_parse_hazard_is_explained_by_its_consequence(  # noqa: D103
-) -> None:
-    _, fix = score_parseability(("multi_column", "scanned"))
-
-    assert fix is not None
-    # Not the jargon — what the parser actually does with it.
-    assert "interleaved" in fix.why_it_helps
-    assert "no text layer" in fix.why_it_helps
-
-
-# ── Filter fields gate, they do not rank ───────────────────────────────────
-
-
-def test_all_filters_filled_scores_full() -> None:
-    dimension, fix = score_filter_fields(dict(FULL_PROFILE))
-
-    assert dimension.score == 100
-    assert fix is None
-
-
-def test_blank_filters_are_explained_as_exclusion(  # noqa: D103
-) -> None:
-    dimension, fix = score_filter_fields({**FULL_PROFILE, "notice_period": ""})
-
-    assert dimension.score == round(100 * (len(FILTER_FIELDS) - 1) / len(FILTER_FIELDS))
-    assert fix is not None
-    assert "BEFORE ranking" in fix.why_it_helps
-    assert "never sees" in fix.why_it_helps
-
-
-def test_ctc_and_notice_require_confirmation() -> None:
-    """Facts only the user knows. We must never fill them in."""
-    _, fix = score_filter_fields({**FULL_PROFILE, "current_ctc": ""})
-
-    assert fix is not None and fix.requires_confirmation is True
-
-
-# ── Every fix teaches ──────────────────────────────────────────────────────
-
-
-def test_every_fix_explains_why_rather_than_asserting() -> None:
-    """7.1: explain why each fix helps, tied to Resdex mechanics. A fix without
-    a reason cannot be judged, and teaches nothing after we stop saying it."""
-    fixes = [
-        score_key_skills((), ("SQL",))[1],
-        score_headline("")[1],
-        score_parseability(("scanned",))[1],
-        score_filter_fields({})[1],
-    ]
-
-    for fix in fixes:
-        assert fix is not None
-        assert len(fix.why_it_helps) > 60, f"{fix.key} asserts without explaining"
-        assert fix.title, f"{fix.key} has no title"
-
-
-def test_no_fix_ever_claims_to_have_applied_itself() -> None:
-    """Carigma proposes; the user decides. A fix that says "done" would be
-    claiming to have edited someone's Naukri profile, which we cannot do.
-
-    The banned list is FIRST-PERSON COMPLETION CLAIMS, not bare verbs. The
-    first version forbade "applied" and tripped on "these are applied before
-    ranking" — a true sentence about Naukri's filters, not a claim about us.
-
-    This is the limit of the AST rule: the thing being asserted absent is
-    prose, and prose has no parse tree. The discipline that survives is the
-    same one — name the actual violation ("we applied") rather than a token
-    that appears in it.
+    An action here would be a lie with a click target — exactly what the
+    `key_skills` "Run Career Scout" button was, pointing at an endpoint that
+    does not exist.
     """
-    claims = (
-        "we've updated",
-        "we have updated",
-        "we applied",
-        "we've applied",
-        "done for you",
-        "we changed",
-        "has been updated",
-    )
-    for fix in (score_key_skills((), ("SQL",))[1], score_filter_fields({})[1]):
-        assert fix is not None
-        text = f"{fix.title} {fix.why_it_helps}".lower()
-        for claim in claims:
-            assert claim not in text, f"{fix.key} claims to have done the work: {claim!r}"
+    for key in NOT_YET_MODELLED:
+        dim = Dimension.not_built(key)
+        assert dim.unlock_action is None, f"{key} offers a button for something we have not built"
+        assert dim.unlocked_by is None, f"{key} tells the user to do something about our gap"
 
 
-def test_every_unavailable_dimension_says_what_would_unlock_it() -> None:
-    """An absence stated without a next action is a dead end. Stated with one
-    it becomes the co-pilot model: "we can't measure this yet, and here is what
-    would let us."
+def test_a_not_built_dimension_says_what_WE_would_need() -> None:
+    """It is a statement about our roadmap, so it reads as one."""
+    for key in NOT_YET_MODELLED:
+        assert Dimension.not_built(key).needs, f"{key} is absent with no explanation"
 
-    Enforced on every unavailable dimension the scorers can produce, not just
-    the two that happen to have good copy today.
-    """
-    unavailable = [
-        score_key_skills(("SQL",), ())[0],
-        score_parseability(None)[0],
-    ]
 
-    for dimension in unavailable:
-        assert dimension.confidence is Confidence.UNAVAILABLE
-        assert dimension.unlocked_by, f"{dimension.key} is a dead end"
-        # A next action, not a restatement of the absence.
-        assert len(dimension.unlocked_by) > 20
-        assert dimension.unlocked_by != dimension.unavailable_reason
+def test_a_not_built_dimension_cannot_drag_the_score_down() -> None:
+    """Weight zero, so it is outside the arithmetic entirely rather than a zero
+    inside it."""
+    score = _scored()
+
+    assert all(d.weight == 0 for d in score.not_built)
+    assert score.assessable_weight == TOTAL_WEIGHT
+    # And the same score with the not-built cards removed is identical.
+    without = NaukriScore(dimensions=[d for d in score.dimensions if d.weight], fixes=score.fixes)
+    assert without.score == score.score
+    assert without.state is score.state
 
 
 def test_an_unavailable_dimension_cannot_be_built_without_a_way_out() -> None:
-    """The type refuses the dead-end version, exactly as `measured` refuses a
-    score with no receipt."""
     with pytest.raises(ValueError, match="dead end"):
-        Dimension.unavailable("headline", "Headline", "no data", unlocked_by="")
+        Dimension.unavailable("headline", "Resume headline", "Nope.", unlocked_by="   ")
 
 
-# ── The never-run state: the PRIMARY path, not an edge case ────────────────
-#
-# `naukri_scores` is empty and V1 never had Naukri scoring, so every existing
-# user lands here at cutover. It gets tested like the main path it is.
+def test_a_measured_dimension_cannot_exist_without_a_receipt() -> None:
+    with pytest.raises(ValueError, match="receipt"):
+        Dimension.measured("headline", "Resume headline", 70, "")
 
 
-def _never_run() -> NaukriScore:
-    """Exactly what a real user sees today: nothing measurable."""
-    return NaukriScore(
-        dimensions=[
-            score_key_skills((), ())[0],
-            score_parseability(None)[0],
-        ]
-    )
+# ── The dimensions we do assess ────────────────────────────────────────────
+
+
+def test_a_full_headline_scores_and_shows_its_working() -> None:
+    dim, fix = score_headline(FULL_PROFILE["linkedinHeadline"])
+
+    assert dim.score is not None and dim.score > 0
+    assert dim.receipt
+    assert fix is None or fix.why_it_helps
+
+
+def test_an_empty_headline_is_a_real_zero_not_an_absence() -> None:
+    """We CAN read an empty headline. Nothing is unavailable about it."""
+    dim, fix = score_headline("")
+
+    assert dim.confidence is Confidence.MEASURED
+    assert dim.score == 0
+    assert fix is not None
+
+
+def test_the_filter_fields_are_only_ones_a_user_can_actually_fill() -> None:
+    """`total_experience`, `current_ctc` and `notice_period` were here with no
+    column, no input, and no way for any run to fill them — so the dimension
+    was capped for every user forever and its fix named three fields nobody
+    could supply."""
+    assert set(FILTER_FIELDS) == {"location", "education"}
+    for gone in ("total_experience", "current_ctc", "notice_period"):
+        assert gone not in FILTER_FIELDS
+
+
+def test_blank_filters_are_explained_as_exclusion_not_deduction() -> None:
+    dim, fix = score_filter_fields({"location": "Bengaluru"})
+
+    assert dim.score == 50
+    assert fix is not None
+    assert "BEFORE ranking" in fix.why_it_helps
+
+
+def test_all_filters_filled_scores_full_and_offers_no_fix() -> None:
+    dim, fix = score_filter_fields({"location": "Bengaluru", "education": "B.Tech"})
+
+    assert dim.score == 100
+    assert fix is None
+
+
+# ── Fixes describe; they never apply ───────────────────────────────────────
+
+
+def test_every_fix_explains_why_rather_than_asserting() -> None:
+    for profile in ({}, {"location": "Bengaluru"}, FULL_PROFILE):
+        for fix in _scored(profile).fixes:
+            assert len(fix.why_it_helps) > 40, f"{fix.key} asserts without explaining"
+
+
+def test_every_fix_points_at_where_the_change_is_made() -> None:
+    """A fix with no destination is the same dead end as an absence with no
+    action — the user is told what to change and left to find it."""
+    for fix in _scored({}).fixes:
+        assert fix.action is not None, f"{fix.key} names no destination"
+        assert fix.action.route.startswith("/")
+
+
+def test_no_fix_ever_claims_to_have_applied_itself() -> None:
+    """Prose has no parse tree, so this is the one guard that must match
+    strings. The discipline holds in a weaker form: ban the CLAIM, not a token
+    inside it. A version banning "applied" fired on "these are applied before
+    ranking" — a true sentence about Naukri's filters.
+    """
+    claims = ("we applied", "we've applied", "we have applied", "we updated", "we changed")
+    for profile in ({}, FULL_PROFILE):
+        for fix in _scored(profile).fixes:
+            blob = f"{fix.title} {fix.why_it_helps}".lower()
+            for claim in claims:
+                assert claim not in blob, f"{fix.key} says {claim!r}"
+
+
+def test_nothing_in_this_module_writes_to_a_profile() -> None:
+    """Walks the AST rather than grepping: a string match can only enumerate
+    the spellings someone already thought of."""
+    from carigma_api.services import naukri as module
+
+    tree = ast.parse(inspect.getsource(module))
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            referenced.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            referenced.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            referenced.add(node.value)
+
+    for forbidden in ("save", "upsert", "insert", "update", "profiles", "table"):
+        assert forbidden not in referenced, f"{forbidden!r} appears in a module that only describes"
+
+
+# ── Coverage copy ──────────────────────────────────────────────────────────
 
 
 def test_a_never_run_lens_does_not_talk_about_percentages() -> None:
     """ "Scored on the 0% of the model we could assess" is accurate and reads
-    like a bug. A lens that has not started has not scored badly on nothing."""
-    payload = _never_run().as_dict()
+    like a bug — a percentage invites zero to be read as a result."""
+    note = NaukriScore().as_dict()["coverage_note"]
 
-    assert payload["state"] == str(NaukriState.NEVER_RUN)
-    assert payload["coverage_note"] == "Not scored yet — the tune-up hasn't run."
-    assert "0%" not in payload["coverage_note"]
-    assert payload["score"] is None
+    assert "%" not in note
+    assert "hasn't run" in note
+
+
+def test_a_partial_lens_says_how_much_of_what_we_assess_was_read() -> None:
+    partial = NaukriScore(
+        dimensions=[
+            Dimension.measured("headline", "Resume headline", 80, "ok"),
+            Dimension.unavailable(
+                "filter_fields",
+                "Filter fields",
+                "Nothing read.",
+                unlocked_by="Run the tune-up.",
+            ),
+        ]
+    )
+    payload = partial.as_dict()
+
+    assert payload["state"] == "partial"
+    # 20 of 30 — a percentage of what we assess, never of 100.
+    assert "67%" in payload["coverage_note"]
 
 
 def test_the_state_is_carried_not_inferred_from_a_null_score() -> None:
-    """Two surfaces inferring `score is None` would eventually spell it
-    differently. The API decides."""
-    assert _never_run().state is NaukriState.NEVER_RUN
-    assert NaukriScore(dimensions=[_measured("headline", 50)]).state is NaukriState.PARTIAL
-    assert NaukriScore(dimensions=[_measured(k, 50) for k in WEIGHTS]).state is NaukriState.COMPLETE
+    """Two surfaces inferring the same thing eventually spell it differently."""
+    assert NaukriScore().as_dict()["state"] == "never_run"
+    assert _scored().as_dict()["state"] == "complete"
 
 
-def test_a_partial_lens_still_says_how_much_was_assessed() -> None:
-    """The percentage framing is right where it is true — it just is not the
-    never-run sentence."""
-    payload = NaukriScore(
-        dimensions=[
-            _measured("headline", 60),
-            Dimension.unavailable("key_skills", "K", "no corpus", unlocked_by="run the scout"),
-        ]
-    ).as_dict()
-
-    assert payload["state"] == str(NaukriState.PARTIAL)
-    assert "20% of the model" in payload["coverage_note"]
-
-
-def test_every_unlock_on_the_never_run_screen_is_somewhere_you_can_GO() -> None:
-    """The user's point: "run Career Scout" must be a thing they can do from
-    where they are standing, not a sentence describing something elsewhere.
-
-    This is the whole never-run screen — if these are not actionable, the
-    primary path is a dead end with good grammar.
-    """
-    for dimension in _never_run().dimensions:
-        assert dimension.confidence is Confidence.UNAVAILABLE
-        assert dimension.unlock_action is not None, f"{dimension.key} is a signpost with no road"
-        assert dimension.unlock_action.label
-        assert dimension.unlock_action.route.startswith("/")
-
-
-def test_the_never_run_payload_carries_both_the_sentence_and_the_button() -> None:
-    payload = _never_run().as_dict()
-
-    for dim in payload["dimensions"]:
-        assert dim["unlocked_by"], "the sentence"
-        assert dim["unlock_action"]["route"], "the road"
-        # Distinct jobs: prose explains, the action is clickable.
-        assert dim["unlock_action"]["label"] != dim["unlocked_by"]
-
-
-def test_a_never_run_lens_offers_no_fixes_to_pretend_with() -> None:
-    """Nothing measured means nothing to fix. Inventing a fix here would be
-    fabricating a finding about a profile we have never assessed."""
-    assert _never_run().fixes == []
-
-
-# ── The cycle: charged once, and never-run writes nothing ──────────────────
+# ── The cycle and its single charge ────────────────────────────────────────
 
 
 def test_the_tuneup_is_ten_credits_per_CYCLE() -> None:
-    """Roadmap 7.1. Not per run, not per step."""
     assert TUNEUP_CREDITS == 10
 
 
@@ -401,60 +338,35 @@ def test_a_first_run_starts_a_cycle_and_charges() -> None:
 
 
 def test_re_running_MID_cycle_is_free() -> None:
-    """The cycle is eight bounded steps and nothing nags between them.
-    Charging per step would make the user weigh a cost at every step of a task
-    they already committed to — which is what causes mid-cycle abandonment."""
     assert starts_new_cycle(CycleState.NEEDS_TUNEUP) is False
 
 
 def test_running_again_after_finishing_starts_a_NEW_cycle() -> None:
-    """The tune-up is periodic. A refresh months later is a new task, and a
-    new charge."""
     assert starts_new_cycle(CycleState.OPTIMIZED) is True
 
 
 def test_a_never_run_score_is_not_persisted() -> None:
-    """A null score in `naukri_scores` is a row every later trend line has to
-    special-case forever — and it would claim, in the record, that we assessed
-    a profile we did not.
-
-    The absence of a row IS the never-run state. One representation."""
-    assert should_persist(_never_run()) is False
+    """A null score in `naukri_scores` is something every later trend line has
+    to special-case forever, and it claims in the record that we assessed a
+    profile we did not."""
+    assert should_persist(NaukriScore()) is False
 
 
 def test_a_score_with_anything_measured_IS_persisted() -> None:
-    assert should_persist(NaukriScore(dimensions=[_measured("headline", 40)])) is True
+    assert should_persist(_scored()) is True
 
 
 def test_never_run_is_not_a_value_that_lives_in_a_row() -> None:
-    """`CycleState.NEVER_RUN` exists to be returned, never stored — because
-    storing it would require the row that `should_persist` refuses."""
-    assert should_persist(_never_run()) is False
-    assert starts_new_cycle(None) is True, "no row means the next run charges"
+    """The absence of a row IS the never-run state. One representation, so
+    nothing can disagree with it."""
+    assert should_persist(NaukriScore()) is False
+    assert CycleState.NEVER_RUN not in (CycleState.NEEDS_TUNEUP, CycleState.OPTIMIZED)
 
 
-def test_the_cycle_maps_onto_two_ACTIONS_not_a_special_case_in_charging() -> None:
-    """Per-cycle billing needed no change to the run protocol.
+def test_a_lens_of_only_not_built_dimensions_is_still_never_run() -> None:
+    """The unbuilt cards must not make an empty lens look like a run."""
+    only_absent = NaukriScore(dimensions=[Dimension.not_built(k) for k in NOT_YET_MODELLED])
 
-    The cost stays a pure function of the action; the route picks which action
-    the work is. A state-dependent price would have required a cost override —
-    i.e. a way for any caller to set its own price, which is exactly the second
-    charging path the credit rule exists to prevent.
-    """
-    from carigma_api.services.credits import cost_of
-
-    assert cost_of("run_naukri") == TUNEUP_CREDITS
-    assert cost_of("naukri_step") == 0
-
-
-def test_the_action_follows_from_the_cycle_state() -> None:
-    """The mapping the route will use, asserted here so it cannot drift into
-    the route and be spelled differently."""
-    from carigma_api.services.credits import cost_of
-
-    def action_for(latest: CycleState | None) -> str:
-        return "run_naukri" if starts_new_cycle(latest) else "naukri_step"
-
-    assert cost_of(action_for(None)) == TUNEUP_CREDITS
-    assert cost_of(action_for(CycleState.OPTIMIZED)) == TUNEUP_CREDITS
-    assert cost_of(action_for(CycleState.NEEDS_TUNEUP)) == 0
+    assert only_absent.state is NaukriState.NEVER_RUN
+    assert only_absent.score is None
+    assert should_persist(only_absent) is False
