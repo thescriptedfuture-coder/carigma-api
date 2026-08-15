@@ -23,6 +23,7 @@ from jwt.algorithms import ECAlgorithm
 
 from carigma_api.config import Settings, get_settings
 from carigma_api.services.ratelimit import limiter
+from tests import _contract_recorder
 
 TEST_SUPABASE_URL = "https://test-project.supabase.co"
 TEST_ISSUER = f"{TEST_SUPABASE_URL}/auth/v1"
@@ -128,6 +129,26 @@ def client(settings: Settings) -> Iterator[TestClient]:
     with TestClient(app) as c:
         # Rebuild against the test settings (lifespan built it from real env).
         app.state.jwt_verifier = JWTVerifier(settings)
+
+        # Transcribe every response shape this suite produces. The web checks
+        # its TypeScript interfaces against the result, because types and
+        # fixtures can agree with each other while both disagree with the
+        # server — which is exactly what happened to the Naukri lens.
+        inner = c.request
+
+        def recording(method: str, url: Any, **kwargs: Any) -> Any:
+            response = inner(method, url, **kwargs)
+            try:
+                _contract_recorder.record(
+                    method, str(response.request.url.path), response.status_code, response.json()
+                )
+            except Exception:  # noqa: BLE001, S110 — a transcript must never
+                # fail the thing it is transcribing. A non-JSON body (SSE, a
+                # redirect) is normal and not worth a log line per request.
+                pass
+            return response
+
+        c.request = recording  # type: ignore[method-assign]
         yield c
 
     app.dependency_overrides.clear()
@@ -170,3 +191,33 @@ def _hermetic_settings() -> Iterator[None]:
     Settings.model_config["env_file"] = None
     yield
     Settings.model_config["env_file"] = original
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Run the contract comparison LAST.
+
+    It compares against what the rest of the suite recorded, and pytest
+    collects alphabetically — so by default it ran near the front, saw an
+    almost empty transcript, and reported the entire API as deleted. A check
+    whose result depends on collection order is not a check.
+    """
+    items.sort(key=lambda item: item.fspath.basename == "test_contract_keys.py")
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Refresh the manifest when asked, never silently.
+
+    `UPDATE_CONTRACT_KEYS=1 pytest` rewrites it; otherwise
+    `test_contract_keys.py` compares and fails with the diff. A manifest that
+    regenerated itself on every run would agree with any change, including the
+    rename it exists to catch.
+
+    Guarded on a substantial transcript rather than on exit status: the drift
+    test fails by design before a regeneration, so requiring a green run would
+    make the manifest unregenerable. Requiring a full recording instead means a
+    partial run (`pytest tests/test_naukri.py`) can never truncate it.
+    """
+    import os
+
+    if os.environ.get("UPDATE_CONTRACT_KEYS") and len(_contract_recorder.RECORDED) > 20:
+        _contract_recorder.write_manifest()
