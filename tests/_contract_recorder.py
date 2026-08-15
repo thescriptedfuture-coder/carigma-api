@@ -34,21 +34,57 @@ from typing import Any
 
 MANIFEST = pathlib.Path(__file__).resolve().parents[1] / "contract_keys.json"
 
-_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+#: Set once from the app, so a recorded path resolves to its ROUTE, not to
+#: whatever id the test happened to use. `/posts/week/THU` and `/posts/week/MON`
+#: are one endpoint, and matching on the literal made them two.
+ROUTES: list[tuple[Any, str]] = []
 
 #: METHOD /path -> sorted key paths. Filled during the run.
 RECORDED: dict[str, set[str]] = {}
 
 
+def use_routes(app: Any) -> None:
+    """Teach the recorder the app's route table.
+
+    Recursive, because `app.routes` holds the router wrappers `include_router`
+    creates, not routes. Iterating one level found three entries — the docs
+    endpoints — and every real path fell through to its literal self, which is
+    the failure this whole exercise is about: a lookup that quietly matches
+    nothing looks exactly like a lookup that matches everything correctly.
+    """
+    ROUTES.clear()
+
+    def walk(routes: Any) -> None:
+        for route in routes:
+            regex = getattr(route, "path_regex", None)
+            fmt = getattr(route, "path_format", None)
+            if regex is not None and fmt:
+                ROUTES.append((regex, fmt))
+            # `include_router` wraps each router in an `_IncludedRouter` that
+            # exposes neither `.routes` nor `.path_format` — the real routes
+            # hang off `.original_router`. Walking only `.routes` found three
+            # entries (the docs endpoints) and silently matched nothing else,
+            # which looks identical to matching everything correctly.
+            nested = getattr(route, "routes", None) or getattr(
+                getattr(route, "original_router", None), "routes", None
+            )
+            if nested:
+                walk(nested)
+
+    walk(app.routes)
+
+
 def normalise(path: str) -> str:
-    """Collapse identifiers so `/agents/runs/abc` and `/agents/runs/def` agree."""
-    parts = []
-    for part in path.split("/"):
-        if part.isdigit() or _UUID.match(part):
-            parts.append("{id}")
-        else:
-            parts.append(part)
-    return "/".join(parts)
+    """A concrete path -> its route template, with parameter names dropped.
+
+    `{day}` becomes `{}` because the web spells its parameters differently
+    (`/posts/week/${day}` vs `${slot}`), and a boundary check that depended on
+    two sides choosing the same variable name would fail on correct code.
+    """
+    for regex, fmt in ROUTES:
+        if regex.match(path):
+            return re.sub(r"\{[^}]+\}", "{}", fmt)
+    return path
 
 
 def key_paths(value: Any, prefix: str = "") -> set[str]:

@@ -129,6 +129,7 @@ def client(settings: Settings) -> Iterator[TestClient]:
     with TestClient(app) as c:
         # Rebuild against the test settings (lifespan built it from real env).
         app.state.jwt_verifier = JWTVerifier(settings)
+        _contract_recorder.use_routes(app)
 
         # Transcribe every response shape this suite produces. The web checks
         # its TypeScript interfaces against the result, because types and

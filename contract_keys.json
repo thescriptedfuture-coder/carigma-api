@@ -218,7 +218,7 @@
     "streak.weeks",
     "week_start"
   ],
-  "GET /posts/week/THU": [
+  "GET /posts/week/{}": [
     "disclaimer",
     "flow",
     "flow[].label",
@@ -329,7 +329,7 @@
     "items",
     "state"
   ],
-  "POST /admin/market/mkt_w33/publish": [
+  "POST /admin/market/{}/publish": [
     "batch_key",
     "expires_at",
     "items",
@@ -340,12 +340,7 @@
     "published_at",
     "state"
   ],
-  "POST /admin/users/u1/credits": [
-    "balance",
-    "clamped",
-    "delta"
-  ],
-  "POST /admin/users/u2/credits": [
+  "POST /admin/users/{}/credits": [
     "balance",
     "clamped",
     "delta"
@@ -396,7 +391,7 @@
     "state",
     "total_weight"
   ],
-  "POST /posts/week/MON/mark-published": [
+  "POST /posts/week/{}/mark-published": [
     "charged",
     "slot",
     "slot.date",
@@ -415,27 +410,7 @@
     "streak.sentence",
     "streak.weeks"
   ],
-  "POST /posts/week/MON/skip": [
-    "charged",
-    "retrains",
-    "slot",
-    "slot.date",
-    "slot.day",
-    "slot.drafts",
-    "slot.optional",
-    "slot.published_at",
-    "slot.skip_note",
-    "slot.skip_reason",
-    "slot.state",
-    "slot.time_label",
-    "slot.variant_count",
-    "streak",
-    "streak.paused",
-    "streak.paused_because",
-    "streak.sentence",
-    "streak.weeks"
-  ],
-  "POST /posts/week/SAT/skip": [
+  "POST /posts/week/{}/skip": [
     "charged",
     "retrains",
     "slot",
@@ -471,7 +446,7 @@
     "proposal.projected_note",
     "state"
   ],
-  "POST /profile/updates/{id}/decide": [
+  "POST /profile/updates/{}/decide": [
     "applied_at",
     "decided_at",
     "id",

@@ -63,9 +63,15 @@ def test_error_bodies_are_not_recorded_as_the_success_shape() -> None:
     assert rec.RECORDED == before
 
 
-def test_identifiers_collapse_so_two_runs_describe_one_endpoint() -> None:
-    assert rec.normalise("/agents/runs/11111111-1111-1111-1111-111111111111") == "/agents/runs/{id}"
-    assert rec.normalise("/admin/users/42/credits") == "/admin/users/{id}/credits"
+def test_paths_collapse_to_routes_so_two_runs_describe_one_endpoint() -> None:
+    """Resolved against the real route table, not guessed from the shape of a
+    segment. `/posts/week/THU` is not a uuid and not a digit — a heuristic
+    normaliser left it as its own endpoint, so the manifest grew one entry per
+    weekday the tests happened to use."""
+    assert rec.ROUTES, "the route table was never handed to the recorder"
+
+    assert rec.normalise("/admin/users/42/credits") == "/admin/users/{}/credits"
+    assert rec.normalise("/posts/week/THU") == "/posts/week/{}"
     assert rec.normalise("/naukri/score") == "/naukri/score"
 
 
