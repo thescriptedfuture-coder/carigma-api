@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,14 +23,76 @@ from carigma_api.services.posts import (
     default_week,
     mark_published,
 )
+from carigma_api.services.posts_store import slot_from_row, slot_to_row, week_to_row
 from tests.conftest import USER_ID, auth, make_token
 
 
+class FakePlanStore:
+    """An in-memory store that goes through the REAL row mapping.
+
+    Not a dict of `WeekPlan` objects. `slot_to_row` / `slot_from_row` run on
+    every write and read, so a mapping that drops a field fails here rather
+    than in production — the fake-simpler-than-reality trap that hid the
+    profile-retention bug.
+
+    Keyed on `(user_id, week_start, day)`, the real unique constraint, so a
+    duplicate day is impossible here exactly as it is impossible there.
+    """
+
+    def __init__(self) -> None:
+        self.slot_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.week_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self.slot_writes = 0
+
+    def load(self, user_id: str, week_start: date) -> WeekPlan | None:
+        rows = [
+            r
+            for (u, w, _d), r in self.slot_rows.items()
+            if u == user_id and w == week_start.isoformat()
+        ]
+        week = self.week_rows.get((user_id, week_start.isoformat()), {})
+        # Existence is the WEEK row, not the slots — matching the real store.
+        # A paused week has zero slots legitimately, and a fake that returned
+        # None here would disagree with production about what absence means.
+        if not rows and not week:
+            return None
+        base = default_week(week_start)
+        slots = tuple(sorted((slot_from_row(r) for r in rows), key=lambda s: s.slot_date))
+        return WeekPlan(
+            week_start=week_start,
+            slots=slots,
+            cadence_per_week=(
+                int(raw)
+                if (raw := week.get("cadence_per_week")) is not None
+                else base.cadence_per_week
+            ),
+            cadence_days=tuple(week.get("cadence_days") or base.cadence_days),
+            streak_weeks=int(week.get("streak_weeks") or 0),
+            paused_until=(
+                date.fromisoformat(str(week["paused_until"])) if week.get("paused_until") else None
+            ),
+        )
+
+    def save_slot(self, user_id: str, week_start: date, slot: Slot) -> None:
+        self.slot_writes += 1
+        row = slot_to_row(user_id, week_start, slot)
+        self.slot_rows[(user_id, week_start.isoformat(), slot.day)] = row
+
+    def save_week(self, user_id: str, plan: WeekPlan) -> None:
+        self.week_rows[(user_id, plan.week_start.isoformat())] = week_to_row(user_id, plan)
+        for slot in plan.slots:
+            self.save_slot(user_id, plan.week_start, slot)
+
+
+STORE = FakePlanStore()
+
+
 @pytest.fixture(autouse=True)
-def _clean() -> Iterator[None]:
-    posts_routes.reset_store()
+def _clean(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    global STORE
+    STORE = FakePlanStore()
+    monkeypatch.setattr(posts_routes, "_store", lambda request, settings: STORE)
     yield
-    posts_routes.reset_store()
 
 
 def monday() -> date:
@@ -46,15 +109,12 @@ def seed_week(**kw: object) -> WeekPlan:
         cadence_per_week=base.cadence_per_week,
         **kw,  # type: ignore[arg-type]
     )
-    posts_routes.seed(USER_ID, plan)
+    STORE.save_week(USER_ID, plan)
     return plan
 
 
 def seed_with(*slots: Slot, streak: int = 0) -> None:
-    posts_routes.seed(
-        USER_ID,
-        WeekPlan(week_start=monday(), slots=slots, streak_weeks=streak),
-    )
+    STORE.save_week(USER_ID, WeekPlan(week_start=monday(), slots=slots, streak_weeks=streak))
 
 
 # ── There is no publish endpoint ───────────────────────────────────────────
@@ -101,9 +161,8 @@ def test_the_week_carries_its_cadence_and_provenance(client: TestClient) -> None
 def test_a_paused_week_is_an_honest_nothing_not_an_empty_list(
     client: TestClient,
 ) -> None:
-    posts_routes.seed(
-        USER_ID,
-        WeekPlan(week_start=monday(), slots=(), cadence_per_week=0, streak_weeks=6),
+    STORE.save_week(
+        USER_ID, WeekPlan(week_start=monday(), slots=(), cadence_per_week=0, streak_weeks=6)
     )
     body = client.get("/posts/week", headers=auth(make_token())).json()
 
@@ -204,7 +263,7 @@ def test_the_change_persists_across_requests(client: TestClient) -> None:
 
 
 def test_one_users_week_is_invisible_to_another(client: TestClient) -> None:
-    posts_routes.seed(
+    STORE.save_week(
         "other-user-id",
         WeekPlan(week_start=monday(), slots=(mark_published(Slot("MON", monday()), at="09:02"),)),
     )
@@ -235,7 +294,10 @@ def test_the_skip_response_says_whether_it_retrains(client: TestClient) -> None:
     ).json()
     assert weak["retrains"] is True
 
-    posts_routes.reset_store()
+    # A fresh store rather than a reset: the second half of this test needs a
+    # week with no skip on it, and clearing is what the old module dict offered.
+    STORE.slot_rows.clear()
+    STORE.week_rows.clear()
     seed_week()
     away = client.post(
         "/posts/week/MON/skip", json={"reason": "no_time"}, headers=auth(make_token())

@@ -42,6 +42,7 @@ from carigma_api.services.posts import (
     mark_published,
     skip,
 )
+from carigma_api.services.posts_store import SupabasePlanStore
 from carigma_api.services.repository import SupabaseCreditStore, user_client
 from carigma_api.services.run_store import SupabaseRunStore
 from carigma_api.services.runs import RunReporter
@@ -62,25 +63,35 @@ class MarkPublishedRequest(BaseModel):
     at: str | None = None
 
 
-# ── Storage seam (see routes/weekly.py — same note applies) ────────────────
+# ── Storage ────────────────────────────────────────────────────────────────
+#
+# This was `_PLANS: dict[str, dict[str, WeekPlan]]` — a module dict, with a
+# comment promising persistence would land in P4-2. It did not, so every draft,
+# publish mark and skip reason lived until the next restart.
+#
+# The rule the schema enforces: **a single-slot edit writes a single row.**
+# `save_week` is for planning a week; everything a user does to one day goes
+# through `save_slot`, so two tabs editing different days cannot erase each
+# other.
 
-_PLANS: dict[str, dict[str, WeekPlan]] = {}
+
+def _store(request: Request, settings: Settings) -> SupabasePlanStore:
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    return SupabasePlanStore(user_client(settings, token))
 
 
-def reset_store() -> None:
-    _PLANS.clear()
+def _load_or_default(store: SupabasePlanStore, user_id: str, week_start: date) -> WeekPlan:
+    """The stored week, or a fresh default.
 
-
-def seed(user_id: str, plan: WeekPlan) -> None:
-    _PLANS.setdefault(user_id, {})[plan.week_start.isoformat()] = plan
+    The store returns None for a week never planned; seeding the default is the
+    CALLER's decision, made here, so "no week yet" stays distinguishable inside
+    the store itself.
+    """
+    return store.load(user_id, week_start) or default_week(week_start)
 
 
 def _monday_of(value: date) -> date:
     return value - timedelta(days=value.weekday())
-
-
-def _plan(user_id: str, week_start: date) -> WeekPlan:
-    return _PLANS.get(user_id, {}).get(week_start.isoformat()) or default_week(week_start)
 
 
 def _replace_slot(plan: WeekPlan, day: str, updated: Slot) -> WeekPlan:
@@ -103,10 +114,15 @@ def _find(plan: WeekPlan, day: str) -> Slot:
 
 
 @router.get("/week")
-def get_week(user: CurrentUser) -> dict[str, Any]:
+def get_week(
+    user: CurrentUser,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
     """The week plan. Contract §8."""
     week_start = _monday_of(datetime.now(UTC).date())
-    plan = _plan(user.id, week_start)
+    store = _store(request, settings)
+    plan = _load_or_default(store, user.id, week_start)
 
     payload = plan.as_dict()
     payload["provenance"] = {
@@ -130,10 +146,16 @@ def get_week(user: CurrentUser) -> dict[str, Any]:
 
 
 @router.get("/week/{day}")
-def get_slot(day: str, user: CurrentUser) -> dict[str, Any]:
+def get_slot(
+    day: str,
+    user: CurrentUser,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
     """One slot — the editor. Each artifact owns a real URL."""
     week_start = _monday_of(datetime.now(UTC).date())
-    slot = _find(_plan(user.id, week_start), day)
+    store = _store(request, settings)
+    slot = _find(_load_or_default(store, user.id, week_start), day)
 
     return {
         "slot": slot.as_dict(),
@@ -157,10 +179,17 @@ def get_slot(day: str, user: CurrentUser) -> dict[str, Any]:
 
 
 @router.post("/week/{day}/mark-published")
-def post_mark_published(day: str, body: MarkPublishedRequest, user: CurrentUser) -> dict[str, Any]:
+def post_mark_published(
+    day: str,
+    body: MarkPublishedRequest,
+    user: CurrentUser,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
     """The honest verb. Free — this is our record-keeping, not their purchase."""
     week_start = _monday_of(datetime.now(UTC).date())
-    plan = _plan(user.id, week_start)
+    store = _store(request, settings)
+    plan = _load_or_default(store, user.id, week_start)
     slot = _find(plan, day)
 
     try:
@@ -172,16 +201,25 @@ def post_mark_published(day: str, body: MarkPublishedRequest, user: CurrentUser)
             detail={"error": "already_settled", "message": "That slot is already settled."},
         ) from exc
 
+    # One row. `_replace_slot` still rebuilds the in-memory plan for the
+    # response, but only the edited day is written — see the module note.
     plan = _replace_slot(plan, slot.day, updated)
-    seed(user.id, plan)
+    store.save_slot(user.id, week_start, updated)
     return {"slot": updated.as_dict(), "streak": plan.as_dict()["streak"], "charged": 0}
 
 
 @router.post("/week/{day}/skip")
-def post_skip(day: str, body: SkipRequest, user: CurrentUser) -> dict[str, Any]:
+def post_skip(
+    day: str,
+    body: SkipRequest,
+    user: CurrentUser,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
     """Declining is free and it teaches. Never charged, never guilted."""
     week_start = _monday_of(datetime.now(UTC).date())
-    plan = _plan(user.id, week_start)
+    store = _store(request, settings)
+    plan = _load_or_default(store, user.id, week_start)
     slot = _find(plan, day)
 
     try:
@@ -195,8 +233,10 @@ def post_skip(day: str, body: SkipRequest, user: CurrentUser) -> dict[str, Any]:
             },
         ) from exc
 
+    # One row. `_replace_slot` still rebuilds the in-memory plan for the
+    # response, but only the edited day is written — see the module note.
     plan = _replace_slot(plan, slot.day, updated)
-    seed(user.id, plan)
+    store.save_slot(user.id, week_start, updated)
 
     return {
         "slot": updated.as_dict(),
@@ -243,7 +283,8 @@ async def post_regenerate(
         ) from exc
 
     week_start = _monday_of(datetime.now(UTC).date())
-    plan = _plan(user.id, week_start)
+    store = _store(request, settings)
+    plan = _load_or_default(store, user.id, week_start)
     slot = _find(plan, day)
     if slot.state is SlotState.PUBLISHED:
         raise HTTPException(
@@ -286,7 +327,7 @@ async def post_regenerate(
     from dataclasses import replace as dc_replace
 
     updated = dc_replace(slot, drafts=drafts, state=SlotState.DRAFT_READY)
-    seed(user.id, _replace_slot(plan, slot.day, updated))
+    store.save_slot(user.id, week_start, updated)
 
     return {
         "slot": updated.as_dict(),
@@ -311,4 +352,4 @@ def _review_notes(slot: Slot) -> list[ReviewNote]:
     ]
 
 
-__all__ = ["router", "reset_store", "seed"]
+__all__ = ["router"]
