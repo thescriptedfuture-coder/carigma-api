@@ -17,6 +17,7 @@ from carigma_api.auth.jwt_verifier import JWTVerifier
 from carigma_api.config import get_settings
 from carigma_api.routes import admin as admin_routes
 from carigma_api.routes import auth as auth_routes
+from carigma_api.routes import credits as credits_routes
 from carigma_api.routes import health as health_routes
 from carigma_api.routes import jobs as jobs_routes
 from carigma_api.routes import market as market_routes
@@ -86,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(market_routes.router)
     app.include_router(naukri_routes.router)
     app.include_router(jobs_routes.router)
+    app.include_router(credits_routes.router)
     return app
 
 

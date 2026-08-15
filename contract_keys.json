@@ -141,6 +141,10 @@
   "GET /auth/service-probe": [
     "status"
   ],
+  "GET /credits": [
+    "balance",
+    "known"
+  ],
   "GET /health": [
     "service",
     "status",
