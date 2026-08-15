@@ -341,6 +341,21 @@
     "unavailable.next",
     "unavailable.why"
   ],
+  "GET /profile": [
+    "currentRole",
+    "cvTemplate",
+    "education",
+    "lastSeenJobsAt",
+    "linkedinHeadline",
+    "location",
+    "name",
+    "onboarded",
+    "plan",
+    "platforms",
+    "resumeRetentionOptIn",
+    "skills",
+    "targetRoles"
+  ],
   "GET /profile/email-preferences": [
     "daily_brief",
     "effective",
@@ -653,6 +668,6 @@
     "deletion.message",
     "deletion.requested",
     "explainer",
-    "resume_retention_opt_in"
+    "resumeRetentionOptIn"
   ]
 }

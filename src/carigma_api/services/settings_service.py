@@ -161,7 +161,10 @@ class RetentionChange:
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "resume_retention_opt_in": self.opt_in,
+            # camelCase, matching `GET /profile`. The two endpoints reported
+            # the same fact under two names, so a client reading both got it
+            # right for one of them.
+            "resumeRetentionOptIn": self.opt_in,
             "explainer": (
                 "Kept so parse checks can re-run without a re-upload. You can "
                 "delete it any time, and we delete it if you turn this off."

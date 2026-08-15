@@ -24,6 +24,7 @@ from carigma_api.routes import market as market_routes
 from carigma_api.routes import naukri as naukri_routes
 from carigma_api.routes import payments as payments_routes
 from carigma_api.routes import posts as posts_routes
+from carigma_api.routes import profile as profile_routes
 from carigma_api.routes import profile_updates as profile_update_routes
 from carigma_api.routes import score as score_routes
 from carigma_api.routes import settings as settings_routes
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(naukri_routes.router)
     app.include_router(jobs_routes.router)
     app.include_router(credits_routes.router)
+    app.include_router(profile_routes.router)
     return app
 
 

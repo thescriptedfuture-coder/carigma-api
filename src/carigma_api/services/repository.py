@@ -55,12 +55,42 @@ _PROFILE_COLUMNS: dict[str, str] = {
     "headshotUrl": "headshot_url",
     "platforms": "platforms",
     "resumeRetentionOptIn": "resume_retention_opt_in",
+    # Real data the API could not read: 8 of 12 live profiles carry it, and
+    # nothing mapped it, so "new since you last looked" had no source.
+    "lastSeenJobsAt": "last_seen_jobs_at",
 }
 _DB_TO_JSON = {v: k for k, v in _PROFILE_COLUMNS.items()}
 
 
+class UnknownProfileField(KeyError):
+    """A caller used a name this mapping does not know."""
+
+
 def profile_to_db(profile: dict[str, Any]) -> dict[str, Any]:
-    return {_PROFILE_COLUMNS[k]: v for k, v in profile.items() if k in _PROFILE_COLUMNS}
+    """Translate the JSON shape into columns, REFUSING anything unrecognised.
+
+    It used to filter silently — `if k in _PROFILE_COLUMNS` — and that is how
+    `profiles.save(user_id, {"resume_retention_opt_in": ...})` became a no-op
+    that returned successfully. The key is a COLUMN name, and this mapping is
+    keyed on the JSON names, so the whole payload was dropped on the floor and
+    the caller was told it saved. A user turning resume retention off had their
+    files deleted and their stated preference discarded.
+
+    Silently ignoring an unknown key is indistinguishable from honouring it,
+    which is the same failure mode as every other rename in this codebase.
+    Raising makes the mistake impossible to have without noticing.
+    """
+    unknown = sorted(set(profile) - set(_PROFILE_COLUMNS))
+    if unknown:
+        near = {
+            k: next((j for j in _PROFILE_COLUMNS if _PROFILE_COLUMNS[j] == k), None)
+            for k in unknown
+        }
+        hints = ", ".join(
+            f"{k!r}" + (f" (did you mean {v!r}?)" if v else "") for k, v in near.items()
+        )
+        raise UnknownProfileField(f"not profile fields: {hints}")
+    return {_PROFILE_COLUMNS[k]: v for k, v in profile.items()}
 
 
 def db_to_profile(row: dict[str, Any]) -> dict[str, Any]:

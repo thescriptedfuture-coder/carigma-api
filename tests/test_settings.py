@@ -184,7 +184,7 @@ def test_the_default_is_discard() -> None:
     """§21 Q5: analyze-and-discard by default; retention is the opt-IN."""
     from carigma_api.services.settings_service import RetentionChange
 
-    assert RetentionChange(opt_in=False).as_dict()["resume_retention_opt_in"] is False
+    assert RetentionChange(opt_in=False).as_dict()["resumeRetentionOptIn"] is False
 
 
 # ── Password reset ─────────────────────────────────────────────────────────

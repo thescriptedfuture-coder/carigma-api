@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from carigma_api.routes import settings as settings_routes
+from carigma_api.services.repository import profile_to_db
 from tests.conftest import auth, make_token
 
 
@@ -23,14 +24,25 @@ class FakeProfiles:
     def __init__(self, profile: dict[str, Any] | None = None, fail: bool = False):
         self.profile = profile if profile is not None else {"platforms": ["linkedin"]}
         self.saved: dict[str, Any] = {}
+        #: What would actually land in the table.
+        self.columns: dict[str, Any] = {}
         self.fail = fail
 
     def load(self, user_id: str) -> dict[str, Any]:
         return self.profile
 
     def save(self, user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
+        """Goes through the REAL mapping, deliberately.
+
+        The previous version recorded whatever it was handed, so a test could
+        assert a value reached `save()` while the real `profile_to_db` dropped
+        it on the floor. That is exactly what happened to the resume-retention
+        flag: the test passed, the column never changed. A fake that is easier
+        than reality tests nothing.
+        """
         if self.fail:
             raise RuntimeError("db down")
+        self.columns.update(profile_to_db(profile))
         self.saved.update(profile)
         return self.saved
 
@@ -150,10 +162,12 @@ def test_opting_out_deletes_and_returns_a_real_count(
     )
 
     body = res.json()
-    assert body["resume_retention_opt_in"] is False
+    assert body["resumeRetentionOptIn"] is False
     assert body["deletion"]["deleted"] == 1
     assert body["deletion"]["complete"] is True
-    assert profiles.saved["resume_retention_opt_in"] is False
+    # Asserted on the COLUMNS, not on the argument. The argument reaching
+    # `save()` proves nothing about what the database received.
+    assert profiles.columns["resume_retention_opt_in"] is False
 
 
 def test_opting_out_with_nothing_stored_says_so_honestly(
@@ -173,7 +187,7 @@ def test_opting_in_deletes_nothing(client: TestClient, profiles: FakeProfiles) -
 
     res = client.put("/profile/resume-retention", json={"opt_in": True}, headers=auth(make_token()))
 
-    assert res.json()["resume_retention_opt_in"] is True
+    assert res.json()["resumeRetentionOptIn"] is True
     assert "deletion" not in res.json()
     assert profiles.store.deleted == []  # type: ignore[attr-defined]
 

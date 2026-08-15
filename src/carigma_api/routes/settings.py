@@ -158,7 +158,7 @@ def put_retention(
     change = set_retention(store, user.id, opt_in=body.opt_in)
 
     try:
-        profiles.save(user.id, {"resume_retention_opt_in": change.opt_in})
+        profiles.save(user.id, {"resumeRetentionOptIn": change.opt_in})
     except Exception:
         logger.exception("retention flag save failed for %s", user.id)
         # The files may already be gone. Say so rather than implying nothing
