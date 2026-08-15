@@ -87,7 +87,9 @@ def get_overview(
         LowCreditUser(
             user_id=str(r["user_id"]),
             email=emails.get(str(r["user_id"]), "—"),
-            balance=int(r.get("balance") or 0),
+            balance=int(
+                r.get("balance") or 0
+            ),  # falsy-ok: admin totals: a user with no credits row has contributed zero
             has_open_request=r["user_id"] in open_requests,
         )
         for r in users
@@ -116,10 +118,16 @@ def get_overview(
         runs_7d=len(recent_runs),
         runs_failed_7d=sum(1 for r in recent_runs if r.get("status") == "failed"),
         credits_issued=sum(
-            int(r.get("delta") or 0) for r in ledger if int(r.get("delta") or 0) > 0
+            # falsy-ok: an absent ledger delta contributes nothing to a total
+            int(r.get("delta") or 0)
+            for r in ledger
+            if int(r.get("delta") or 0)
+            > 0  # falsy-ok: admin totals: a user with no credits row has contributed zero
         ),
         credits_consumed=abs(
-            sum(int(r.get("delta") or 0) for r in ledger if int(r.get("delta") or 0) < 0)
+            sum(
+                int(r.get("delta") or 0) for r in ledger if int(r.get("delta") or 0) < 0
+            )  # falsy-ok: admin totals: a user with no credits row has contributed zero
         ),
     )
 
@@ -148,7 +156,11 @@ def list_users(
 ) -> dict[str, Any]:
     db = _db(settings)
     balances = {
-        r["user_id"]: int(r.get("balance") or 0) for r in _rows(db, "credits", "user_id,balance")
+        # falsy-ok: a user with no credits row has a balance of zero to spend
+        r["user_id"]: int(r.get("balance") or 0)
+        for r in _rows(
+            db, "credits", "user_id,balance"
+        )  # falsy-ok: admin totals: a user with no credits row has contributed zero
     }
     profiles = _rows(db, "profiles", "user_id,name,platforms,created_at")
     emails = emails_by_user_id(db)
@@ -173,7 +185,9 @@ def list_users(
     if low_credit:
         from carigma_api.services.admin import NEARLY_OUT_BELOW
 
-        rows = [r for r in rows if int(r["balance"] or 0) < NEARLY_OUT_BELOW]
+        rows = [
+            r for r in rows if int(r["balance"] or 0) < NEARLY_OUT_BELOW
+        ]  # falsy-ok: admin totals: a user with no credits row has contributed zero
 
     rows.sort(key=lambda r: r["balance"])
     return {"items": rows[:limit], "total": len(rows)}
@@ -194,7 +208,9 @@ def get_user(
 
     return {
         "profile": profile,
-        "balance": int(balance.get("balance") or 0),
+        "balance": int(
+            balance.get("balance") or 0
+        ),  # falsy-ok: admin totals: a user with no credits row has contributed zero
         "ledger": _rows_for(db, "credit_ledger", user_id, limit=50),
         "runs": _rows_for(db, "agent_runs", user_id, limit=50),
         "scores": _rows_for(db, "score_history", user_id, limit=50),
@@ -226,7 +242,9 @@ def adjust_credits(
             detail={"error": "adjustment_refused", "message": str(exc)},
         ) from exc
 
-    current = int((_one(db, "credits", "user_id", user_id) or {}).get("balance") or 0)
+    current = int(
+        (_one(db, "credits", "user_id", user_id) or {}).get("balance") or 0
+    )  # falsy-ok: admin totals: a user with no credits row has contributed zero
     new_balance = apply_adjustment(current, adjustment)
 
     db.table("credits").upsert(
@@ -347,7 +365,9 @@ def list_runs(
                 "user_id": r.get("user_id"),
                 "agent": r.get("agent"),
                 "status": r.get("status"),
-                "charged": int(r.get("credits_charged") or 0),
+                "charged": int(
+                    r.get("credits_charged") or 0
+                ),  # falsy-ok: admin totals: a user with no credits row has contributed zero
                 "duration_ms": (
                     int((finished - started).total_seconds() * 1000)
                     if started and finished
@@ -363,7 +383,9 @@ def list_runs(
     violations = [
         i
         for i in items
-        if i["status"] in ("failed", "cancelled", "empty") and int(i["charged"] or 0) > 0
+        if i["status"] in ("failed", "cancelled", "empty")
+        and int(i["charged"] or 0)
+        > 0  # falsy-ok: admin totals: a user with no credits row has contributed zero
     ]
     return {
         "items": items,

@@ -115,7 +115,9 @@ class Sequence:
         return cls(
             id=int(row["id"]),
             user_id=str(row["user_id"]),
-            sends_made=int(row.get("sends_made") or 0),
+            sends_made=int(
+                row.get("sends_made") or 0
+            ),  # falsy-ok: a new sequence has made zero sends
             state=State(row.get("state") or "active"),
             next_due_at=_parse(row.get("next_due_at")),
             last_sent_at=_parse(row.get("last_sent_at")),

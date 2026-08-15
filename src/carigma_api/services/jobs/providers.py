@@ -124,7 +124,9 @@ def _jsearch_salary(raw: dict[str, Any]) -> str | None:
     period = (raw.get("job_salary_period") or "YEAR").lower()
     if lo and hi:
         return f"{currency} {int(lo):,} – {int(hi):,} per {period}"
-    value = int(lo or hi or 0)
+    value = int(
+        lo or hi or 0
+    )  # falsy-ok: a salary of zero is not a salary; absence and zero are one answer
     return f"{currency} {value:,} per {period}"
 
 
@@ -213,4 +215,4 @@ def _adzuna_salary(raw: dict[str, Any]) -> str | None:
         return None
     if lo and hi:
         return f"INR {int(lo):,} – {int(hi):,} per year"
-    return f"INR {int(lo or hi or 0):,} per year"
+    return f"INR {int(lo or hi or 0):,} per year"  # falsy-ok: a salary of zero is not a salary; absence and zero are one answer

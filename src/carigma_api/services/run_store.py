@@ -77,7 +77,9 @@ def _from_row(row: dict[str, Any]) -> AgentRun:
     ]
     # Balance is not stored — it is a property of the ledger, not of this run,
     # and a stale copy would be worse than None.
-    run.credits = CreditReceipt(int(row.get("credits_charged") or 0), None, "")
+    run.credits = CreditReceipt(
+        int(row.get("credits_charged") or 0), None, ""
+    )  # falsy-ok: an unrecorded charge IS no charge
     return run
 
 

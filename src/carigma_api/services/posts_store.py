@@ -82,7 +82,9 @@ def slot_from_row(row: dict[str, Any]) -> Slot:
     raw_drafts = row.get("drafts")
     drafts = tuple(
         Draft(
-            index=int(d.get("index") or 0),
+            index=int(
+                d.get("index") or 0
+            ),  # falsy-ok: draft index 0 is the first draft; a missing index means the first
             body=str(d.get("body") or ""),
             note=d.get("note"),
         )
@@ -192,7 +194,9 @@ class SupabasePlanStore:
                 if isinstance(cadence_days, list) and cadence_days
                 else defaults.cadence_days
             ),
-            streak_weeks=int(week.get("streak_weeks") or 0),  # 0 IS the default here
+            streak_weeks=int(
+                week.get("streak_weeks") or 0
+            ),  # 0 IS the default here  # falsy-ok: no streak recorded IS a streak of zero
             paused_until=date.fromisoformat(str(paused_until)) if paused_until else None,
         )
 

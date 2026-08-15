@@ -295,6 +295,7 @@ def verify(
             granter,
             user_id=user.id,
             sub_id=body.subscription_id,
+            # falsy-ok: a subscription that has never billed has paid zero times
             provider_paid_count=int(sub.get("paid_count") or 0),
             provider_status=str(sub.get("status") or ""),
         )

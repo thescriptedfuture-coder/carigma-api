@@ -354,7 +354,9 @@ class NaukriScore:
         assessable = self.assessable_weight
         if assessable == 0:
             return None
-        earned = sum(d.weight * (d.score or 0) for d in self.dimensions if d.score is not None)
+        earned = sum(
+            d.weight * (d.score or 0) for d in self.dimensions if d.score is not None
+        )  # falsy-ok: guarded by `if d.score is not None` in the same comprehension
         return round(earned / assessable)
 
     @property

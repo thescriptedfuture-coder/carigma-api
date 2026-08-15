@@ -98,8 +98,12 @@ def from_row(row: dict[str, Any]) -> WeeklyContract:
             kind=str(item.get("kind") or ""),
             day=str(item.get("day") or ""),
             summary=str(item.get("summary") or ""),
-            minutes=int(item.get("minutes") or 0),
-            cost_credits=int(item.get("cost_credits") or 0),
+            minutes=int(
+                item.get("minutes") or 0
+            ),  # falsy-ok: an item with no minutes costs zero minutes
+            cost_credits=int(
+                item.get("cost_credits") or 0
+            ),  # falsy-ok: an item with no cost IS free
         )
         for item in (raw_items if isinstance(raw_items, list) else [])
         if isinstance(item, dict)

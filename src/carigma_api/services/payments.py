@@ -293,7 +293,7 @@ def verify_topup(
             message="Already added — you were charged once.",
         )
 
-    amount = int(row.get("credits") or 0)
+    amount = int(row.get("credits") or 0)  # falsy-ok: no credits recorded on a pack IS zero credits
     label = row.get("pack_key") or "top-up"
     balance = credits.grant(user_id, amount, f"Top-up · {label} (Razorpay)")
     return VerificationResult(
@@ -332,7 +332,7 @@ def verify_subscription_cycles(
             GrantOutcome.FAILED, message="We couldn't read that plan. Nothing was changed."
         )
 
-    seen = int(row.get("cycles_credited") or 0)
+    seen = int(row.get("cycles_credited") or 0)  # falsy-ok: nothing credited yet IS zero cycles
     owed = max(0, provider_paid_count - seen)
     if owed == 0:
         return VerificationResult(

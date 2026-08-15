@@ -207,7 +207,12 @@ class SupabaseCreditStore:
         if not row:
             return None
         try:
-            return int(row.get("balance", 0) or 0)
+            # Was `int(row.get("balance", 0) or 0)`. Both defaults were
+            # unreachable — the column is NOT NULL and a missing row already
+            # returned None above — and both encoded "treat an absent balance
+            # as zero", which is exactly what the comment below rejects. Dead
+            # code that reads as a policy decision is worse than no code.
+            return int(row["balance"])
         except (TypeError, ValueError):
             # A non-numeric balance is corrupt data. Returning None (fail open)
             # beats guessing 0, which would wrongly block every paid action.

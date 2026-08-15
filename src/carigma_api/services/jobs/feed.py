@@ -167,7 +167,9 @@ def present_feed(rows: list[dict[str, Any]], *, now: datetime | None = None) -> 
     today = (now or datetime.now(UTC)).date()
     items = [present_job(row, today=today) for row in rows]
     # Best match first, and a row with no score sorts last rather than as zero.
-    items.sort(key=lambda item: (item["match_score"] is None, -(item["match_score"] or 0)))
+    items.sort(
+        key=lambda item: (item["match_score"] is None, -(item["match_score"] or 0))
+    )  # falsy-ok: None already sorts last via the first tuple element
     return {"items": items, "scan": scan_summary(rows, today=today)}
 
 
