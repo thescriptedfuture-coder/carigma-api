@@ -67,7 +67,16 @@ class Signals:
     #: A fix the user has been offered and not applied.
     pending_fix: str | None = None
     #: Jobs surfaced since `last_seen_jobs_at`.
-    new_match_count: int = 0
+    #:
+    #: `None` means we do NOT KNOW — the profile has no `last_seen_jobs_at`, so
+    #: there is no point to measure "since". Four of twelve live profiles are in
+    #: that state. Treating it as "everything is new" would greet someone with
+    #: "15 new matches" on their first ever load; treating it as zero would hide
+    #: a full feed. Neither is true, so it is neither.
+    new_match_count: int | None = None
+    #: Everything currently active in the feed. Always knowable, and it is what
+    #: the rung falls back to describing when novelty cannot be claimed.
+    open_match_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,14 +137,34 @@ def _fix(s: Signals) -> dict[str, Any]:
 
 
 def _matches_apply(s: Signals) -> bool:
-    return s.new_match_count > 0
+    """Something to say about jobs — whether or not we can call it new."""
+    if s.new_match_count is not None:
+        return s.new_match_count > 0
+    return s.open_match_count > 0
 
 
 def _matches(s: Signals) -> dict[str, Any]:
-    plural = "match" if s.new_match_count == 1 else "matches"
+    """Two sentences, and only one of them claims novelty.
+
+    With no `last_seen_jobs_at` there is no "since" to measure from, so the
+    honest line is a count of what is waiting rather than a count of what is
+    new. "15 new matches" on a first load would be a claim about a comparison
+    we never made.
+    """
+    if s.new_match_count is not None:
+        count = s.new_match_count
+        plural = "match" if count == 1 else "matches"
+        return {
+            "title": f"{count} new {plural}",
+            "body": "Surfaced since you last looked.",
+            "primary": {"label": "Open Jobs", "route": "/jobs"},
+        }
+
+    count = s.open_match_count
+    plural = "match" if count == 1 else "matches"
     return {
-        "title": f"{s.new_match_count} new {plural}",
-        "body": "Surfaced since you last looked.",
+        "title": f"{count} {plural} waiting",
+        "body": "Your feed, as it stands.",
         "primary": {"label": "Open Jobs", "route": "/jobs"},
     }
 

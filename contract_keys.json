@@ -373,6 +373,29 @@
     "items[].created_at",
     "items[].score"
   ],
+  "GET /thread": [
+    "items",
+    "items[].body",
+    "items[].key",
+    "items[].primary",
+    "items[].primary.label",
+    "items[].primary.route",
+    "items[].time_bound",
+    "items[].title"
+  ],
+  "GET /today": [
+    "deferred",
+    "greeting",
+    "onboarded",
+    "primary_action",
+    "primary_action.body",
+    "primary_action.key",
+    "primary_action.primary",
+    "primary_action.primary.label",
+    "primary_action.primary.route",
+    "primary_action.time_bound",
+    "primary_action.title"
+  ],
   "GET /weekly/contract": [
     "contract",
     "contract.accepted_kinds",
@@ -601,6 +624,11 @@
     "profile.name",
     "profile.skills",
     "profile.targetRoles"
+  ],
+  "POST /thread/{}/decide": [
+    "decision",
+    "item_key",
+    "snooze_until"
   ],
   "POST /weekly/contract/approve": [
     "confirmation",

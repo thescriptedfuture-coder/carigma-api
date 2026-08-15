@@ -258,3 +258,50 @@ def test_the_interview_builder_refuses_to_invent_an_interview() -> None:
     interview = next(r for r in _P if r.key == "interview_soon")
     with pytest.raises(ValueError, match="no interview"):
         interview.build(signals())
+
+
+# ── "We do not know when you last looked" is its own state ─────────────────
+
+
+def test_an_unknown_last_seen_never_claims_everything_is_new() -> None:
+    """Four of twelve live profiles have no `last_seen_jobs_at`.
+
+    With no point to measure "since" from, "15 new matches" is a claim about a
+    comparison that was never made — and it would be the FIRST thing a new
+    user ever read on Today.
+    """
+    decision = choose(signals(new_match_count=None, open_match_count=15))
+
+    assert decision.primary["key"] == "new_matches"
+    assert "new" not in decision.primary["title"]
+    assert "15 matches waiting" == decision.primary["title"]
+
+
+def test_an_unknown_last_seen_does_not_hide_a_full_feed_either() -> None:
+    """The other direction. Treating unknown as zero would show "nothing needs
+    you" to someone with fifteen jobs sitting there."""
+    decision = choose(signals(new_match_count=None, open_match_count=15))
+
+    assert decision.primary["key"] != "standing"
+
+
+def test_a_known_zero_is_still_a_known_zero() -> None:
+    """`0` and `None` are different answers and must not converge: having
+    looked and found nothing new is not the same as never having looked."""
+    decision = choose(signals(new_match_count=0, open_match_count=15))
+
+    assert decision.primary["key"] == "standing"
+
+
+def test_a_known_count_says_new():  # type: ignore[no-untyped-def]
+    decision = choose(signals(new_match_count=3, open_match_count=15))
+
+    assert decision.primary["title"] == "3 new matches"
+
+
+def test_one_match_is_singular_in_both_phrasings() -> None:
+    known = choose(signals(new_match_count=1, open_match_count=9))
+    unknown = choose(signals(new_match_count=None, open_match_count=1))
+
+    assert known.primary["title"] == "1 new match"
+    assert unknown.primary["title"] == "1 match waiting"

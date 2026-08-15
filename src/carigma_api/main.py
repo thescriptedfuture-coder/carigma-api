@@ -28,6 +28,7 @@ from carigma_api.routes import profile as profile_routes
 from carigma_api.routes import profile_updates as profile_update_routes
 from carigma_api.routes import score as score_routes
 from carigma_api.routes import settings as settings_routes
+from carigma_api.routes import today as today_routes
 from carigma_api.routes import weekly as weekly_routes
 
 logging.basicConfig(level=logging.INFO)
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_routes.router)
     app.include_router(credits_routes.router)
     app.include_router(profile_routes.router)
+    app.include_router(today_routes.router)
     return app
 
 
