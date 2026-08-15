@@ -37,14 +37,25 @@ from typing import Any
 
 
 class ContractState(StrEnum):
-    """Mirrors `weekly_contracts_state_check` in V2_001. Keep them in step."""
+    """Mirrors `weekly_contracts_state_check` in V2_001. Keep them in step.
+
+    `expired` and `lapsed` used to be here and **nothing could ever write
+    them**. `count_lapses` counted three states of which two were dead, so it
+    could only ever return what `auto_adopted` gave it — and `auto_adopt()`
+    had no caller either, so the answer was always zero and the entire lapse
+    escalation was unreachable.
+
+    They are gone rather than ported. A state machine carried into a database
+    with unreachable states puts values in a check constraint that nothing can
+    produce, and invites the next reader to handle cases that cannot happen.
+    """
 
     PROPOSED = "proposed"
     APPROVED = "approved"
+    #: Sunday passed unanswered and the conservative plan continued. In force,
+    #: NOT agreed — the distinction this module exists to keep.
     AUTO_ADOPTED = "auto_adopted"
     DECLINED = "declined"
-    EXPIRED = "expired"
-    LAPSED = "lapsed"
 
     @property
     def is_decided(self) -> bool:
@@ -276,11 +287,10 @@ def consecutive_lapses(history: list[WeeklyContract], *, upto: date) -> int:
     )
     lapses = 0
     for contract in past:
-        if contract.state in (
-            ContractState.AUTO_ADOPTED,
-            ContractState.EXPIRED,
-            ContractState.LAPSED,
-        ):
+        # One state, because one state is what exists. This read
+        # `(AUTO_ADOPTED, EXPIRED, LAPSED)` while two of the three were
+        # unwritable — a list that looked thorough and was a single term.
+        if contract.state is ContractState.AUTO_ADOPTED:
             lapses += 1
             continue
         break

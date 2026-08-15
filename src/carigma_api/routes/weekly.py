@@ -253,11 +253,7 @@ def get_standing_by(user: CurrentUser) -> dict[str, Any]:
     if lapses == 0:
         return {"presentation": "none", "lapsed_weeks": 0}
 
-    lapsed_weeks = [
-        c
-        for c in history
-        if c.state in (ContractState.AUTO_ADOPTED, ContractState.EXPIRED, ContractState.LAPSED)
-    ]
+    lapsed_weeks = [c for c in history if c.state is ContractState.AUTO_ADOPTED]
     since = lapsed_weeks[0].week_start if lapsed_weeks else _monday_of(today)
 
     # In P4 the facts come from the surfaces that produced them. Until the

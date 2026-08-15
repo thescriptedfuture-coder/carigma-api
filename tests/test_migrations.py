@@ -334,3 +334,58 @@ def test_no_blended_career_score_table() -> None:
         assert "combined_score" not in sql
         assert "career_score" not in sql
         assert "overall_score" not in sql
+
+
+def test_the_state_enum_and_the_check_constraints_agree() -> None:
+    """`ContractState` and the SQL that stores it, compared.
+
+    `weekly_contracts_state_check` permitted 'expired' and 'lapsed' that the
+    application could never write, and `weekly_review_state_check` — written
+    three commits before this test — **omitted 'auto_adopted'**, the one state
+    the Sunday sweep produces. It would have rejected every auto-adopted week.
+
+    The enum's docstring said "keep them in step". That was the entire
+    mechanism, and a comment is not a mechanism. This is.
+    """
+    import pathlib
+    import re
+
+    from carigma_api.services.posts import SlotState
+    from carigma_api.services.weekly import ContractState
+
+    # Each constraint against ITS OWN enum. The first version compared every
+    # `*state_check` to `ContractState` and tripped on `content_loop`, which
+    # stores slot states — a guard that fires on correct code gets deleted.
+    owners: dict[str, set[str]] = {
+        "weekly_contracts_state_check": {str(s) for s in ContractState},
+        "weekly_review_state_check": {str(s) for s in ContractState},
+        "content_loop_state_check": {str(s) for s in SlotState},
+    }
+    migrations = pathlib.Path(__file__).resolve().parents[1] / "migrations"
+
+    # The LAST definition of each constraint wins, because a later migration
+    # drops and replaces an earlier one. Comparing against the first would
+    # check a constraint that is no longer in the database.
+    latest: dict[str, set[str]] = {}
+    for path in sorted(migrations.glob("*.sql")):
+        for match in re.finditer(
+            r"add constraint (\w*state_check)\s*\n?\s*check \(state in \(([^)]*)\)\)",
+            path.read_text(encoding="utf-8"),
+            re.I,
+        ):
+            latest[match.group(1)] = {v.strip().strip("'") for v in match.group(2).split(",")}
+
+    assert latest, "no state check constraints found — this guard is checking nothing"
+    unowned = sorted(set(latest) - set(owners))
+    assert not unowned, (
+        f"{unowned} has no enum to check against — add it to `owners` rather "
+        f"than letting a constraint go uncompared"
+    )
+
+    for name, allowed in sorted(latest.items()):
+        expected = owners[name]
+        assert allowed == expected, (
+            f"{name} permits {sorted(allowed)} but its enum is "
+            f"{sorted(expected)}; missing={sorted(expected - allowed)} "
+            f"unwritable={sorted(allowed - expected)}"
+        )
