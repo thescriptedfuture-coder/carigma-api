@@ -316,3 +316,85 @@ def test_an_approved_week_stops_the_lapse_count() -> None:
     ]
 
     assert consecutive_lapses(history, upto=THIS_WEEK) == 1
+
+
+# ── The surface copy: the user-facing half of the decision ─────────────────
+
+
+def test_an_adopted_week_says_plainly_it_was_not_agreed() -> None:
+    """The state refuses to claim agreement. The sentence has to match it."""
+    from carigma_api.services.weekly import auto_adopt, carried_forward_copy
+
+    copy = carried_forward_copy(auto_adopt(contract(LAST_WEEK), now=NOW))
+
+    assert copy is not None
+    assert copy["agreed"] is False
+    assert "haven't chosen" in copy["body"]
+
+
+def test_the_copy_offers_approve_and_change_both():  # type: ignore[no-untyped-def]
+    """An honest statement with nowhere to go is the dead end this codebase
+    keeps deleting."""
+    from carigma_api.services.weekly import auto_adopt, carried_forward_copy
+
+    copy = carried_forward_copy(auto_adopt(contract(LAST_WEEK), now=NOW))
+
+    assert copy is not None
+    labels = " ".join(a["label"] for a in copy["actions"]).lower()
+    assert "approve" in labels
+    assert "change" in labels
+
+
+def test_the_copy_names_what_actually_carried() -> None:
+    """Built from the adopted items, so it cannot claim something that did not
+    continue. `content` pauses under the conservative plan, so it must not
+    appear."""
+    from carigma_api.services.weekly import auto_adopt, carried_forward_copy
+
+    copy = carried_forward_copy(auto_adopt(contract(LAST_WEEK), now=NOW))
+
+    assert copy is not None
+    assert "jobs" in copy["carried_kinds"]
+    assert "content" not in copy["carried_kinds"], "post drafts pause; the copy said otherwise"
+    for kind in copy["carried_kinds"]:
+        assert kind in copy["body"]
+
+
+def test_the_copy_does_not_reprimand() -> None:
+    """A week not answered is a week someone was busy."""
+    from carigma_api.services.weekly import auto_adopt, carried_forward_copy
+
+    copy = carried_forward_copy(auto_adopt(contract(LAST_WEEK), now=NOW))
+
+    assert copy is not None
+    blob = f"{copy['headline']} {copy['body']}".lower()
+    for banned in ("you missed", "don't lose", "falling behind", "inactive", "should have"):
+        assert banned not in blob
+
+
+def test_the_guilt_check_runs_on_the_ASSEMBLED_sentence() -> None:
+    """Not on literals. `carried_kinds` comes from data, so a guard over source
+    strings would never see it."""
+    from carigma_api.services.weekly import GuiltyCopy, carried_forward_copy
+
+    guilty = WeeklyContract(
+        week_start=LAST_WEEK,
+        state=ContractState.AUTO_ADOPTED,
+        # An actual entry from BANNED_PHRASES, read rather than invented. The
+        # first version used "you missed the deadline", which is not on the
+        # list — so the test asserted the guard catches a string the guard was
+        # never asked about, and the failure was mine, not the guard's.
+        items=(ContractItem(kind="falling behind", day="MON", summary="x", minutes=1),),
+    )
+
+    with pytest.raises(GuiltyCopy):
+        carried_forward_copy(guilty)
+
+
+def test_a_week_the_user_actually_decided_gets_no_carried_forward_notice() -> None:
+    """Telling someone their approved plan "carried forward" would erase the
+    fact that they chose it."""
+    from carigma_api.services.weekly import carried_forward_copy
+
+    for decided in (ContractState.APPROVED, ContractState.DECLINED, ContractState.PROPOSED):
+        assert carried_forward_copy(contract(LAST_WEEK, decided)) is None

@@ -297,6 +297,55 @@ def consecutive_lapses(history: list[WeeklyContract], *, upto: date) -> int:
     return lapses
 
 
+def carried_forward_copy(contract: WeeklyContract) -> dict[str, Any] | None:
+    """What an auto-adopted week says for itself.
+
+    The user-facing half of the auto-adopt decision, and it carries the weight:
+    the system continued a plan the person never agreed to, so the screen has
+    to say exactly that, without a tone.
+
+    Three rules, in order of how easily they are broken:
+
+    1. **Say it was not agreed.** Not "your plan" — the plan. The state
+       already refuses to claim agreement (`user_actually_agreed` is False);
+       the sentence has to match the state.
+    2. **No reprimand.** The lapsed grammar bans "you missed", "don't lose",
+       "falling behind" and the rest. A week not answered is a week someone was
+       busy, and a product that scolds them for it has misunderstood its job.
+       `assert_no_guilt` runs on the assembled strings, not on literals, so
+       nothing added later escapes it.
+    3. **One action away.** Approve or change, both present, neither buried.
+       An honest statement with nowhere to go is the dead end this codebase
+       keeps deleting.
+    """
+    if contract.state is not ContractState.AUTO_ADOPTED:
+        return None
+
+    kinds = sorted({item.kind for item in contract.items})
+    what = ", ".join(kinds) if kinds else "nothing"
+
+    headline = "Last week's plan carried forward"
+    body = (
+        f"You haven't chosen this week yet, so the standing plan continued: {what}. "
+        f"Nothing is locked in — change it or approve it whenever you like."
+    )
+
+    # Checked here, where the sentence is BUILT. A guard over literals would
+    # miss `what`, which is assembled from data.
+    assert_no_guilt(headline, body)
+
+    return {
+        "headline": headline,
+        "body": body,
+        "agreed": False,
+        "carried_kinds": kinds,
+        "actions": [
+            {"label": "Approve this week", "endpoint": "/weekly/contract/approve"},
+            {"label": "Change it", "route": "/progress"},
+        ],
+    }
+
+
 def presentation_for(lapses: int) -> str:
     """How the lapse is shown. Escalation is deliberate and bounded.
 
