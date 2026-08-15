@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.routes._guards import enforce_public_rate_limit
 from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.settings_service import (
     EMAIL_PREFS_KEY,
@@ -241,12 +242,19 @@ def put_email_preferences(
 
 
 @router.post("/auth/reset-password")
-def post_reset_password(body: ResetRequest) -> dict[str, Any]:
-    """Send a reset link. Deliberately unauthenticated.
+def post_reset_password(body: ResetRequest, request: Request) -> dict[str, Any]:
+    """Send a reset link. Deliberately unauthenticated, and rate limited.
 
     Answers identically whether or not the address is registered — confirming
     "no account with that email" turns this into an account-enumeration oracle.
+
+    **Throttled per IP.** This sends mail to an address the caller chooses, with
+    no token, so unthrottled it is an email bomb aimed at anyone and a cheap
+    enumeration probe besides. The per-IP limiter had been built and tested
+    since P4-2 and applied to nothing — the bucket existed, the guard existed,
+    and no route called it.
     """
+    enforce_public_rate_limit(request)
     # Supabase sends the mail. Failures are logged, never surfaced, because a
     # different response for a failed send is the same oracle by another route.
     logger.info("password reset requested")

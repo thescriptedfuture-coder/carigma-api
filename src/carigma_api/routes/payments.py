@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.routes._guards import enforce_public_rate_limit
 from carigma_api.services import payments as pay
 from carigma_api.services.repository import SupabaseCreditStore, user_client
 
@@ -166,13 +167,18 @@ def _require_live(settings: Settings) -> None:
 
 
 @router.get("/pricing")
-def get_pricing(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, Any]:
+def get_pricing(
+    request: Request, settings: Annotated[Settings, Depends(get_settings)]
+) -> dict[str, Any]:
     """Always reachable, dormant or not.
 
     When dormant it carries the honest-nothing block instead of a dead button,
     and names the real alternative: message us and we top you up, free, during
     beta.
     """
+    # Public and uncached, so it is worth a per-IP ceiling even though it is
+    # only a read.
+    enforce_public_rate_limit(request)
     return pay.pricing_payload(enabled=settings.payments_live)
 
 

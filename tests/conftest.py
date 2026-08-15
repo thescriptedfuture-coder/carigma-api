@@ -194,6 +194,20 @@ def _hermetic_settings() -> Iterator[None]:
     Settings.model_config["env_file"] = original
 
 
+@pytest.fixture
+def frozen_public_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the per-IP bucket refilling mid-burst.
+
+    Same reason as `frozen_limiter_clock` in test_deferred.py: a burst of HTTP
+    requests takes real time, and a test that depends on being faster than a
+    refill is measuring the machine rather than the limiter.
+    """
+    from carigma_api.services import ratelimit
+
+    ratelimit.limiter.reset()
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: 2_000.0)
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Run the contract comparison LAST.
 
