@@ -7,6 +7,7 @@ be ZERO, or a client that sums receipts double-counts a single debit.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -394,10 +395,34 @@ def test_an_idempotency_lookup_is_scoped_to_the_user() -> None:
 # actually connected — a limiter nobody calls is a module, not a limit.
 
 
-def test_the_rate_limit_fires_on_a_real_endpoint(client: Any, monkeypatch: Any) -> None:
+@pytest.fixture
+def frozen_limiter_clock(monkeypatch: Any):  # type: ignore[no-untyped-def]
+    """Stop the token bucket refilling while a burst is in flight.
+
+    The limiter reads `time.monotonic()`. A burst of six HTTP requests through
+    TestClient takes real time, and as the suite grew past 800 tests that
+    became enough for the bucket to refill mid-burst — so the sixth request was
+    allowed and "the limiter never fired".
+
+    CONTRIBUTING already says "no test may depend on being faster than a
+    timer", and this one did anyway: it was written before the rule and never
+    revisited, because an intermittent failure looks like noise. Freezing the
+    clock makes the outcome a property of the limiter rather than of how busy
+    the machine is.
+    """
+    from carigma_api.services import ratelimit
+    from carigma_api.services.ratelimit import limiter as live_limiter
+
+    live_limiter.reset()
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: 1_000.0)
+    return live_limiter
+
+
+def test_the_rate_limit_fires_on_a_real_endpoint(
+    client: Any, monkeypatch: Any, frozen_limiter_clock: Any
+) -> None:
     """Sixth request in a burst gets a 429 with a usable Retry-After."""
     from carigma_api.routes import score as score_routes
-    from carigma_api.services.ratelimit import limiter as live_limiter
     from tests.conftest import auth, make_token
     from tests.test_score_endpoint import (  # type: ignore[attr-defined]
         FakeCredits,
@@ -416,8 +441,6 @@ def test_the_rate_limit_fires_on_a_real_endpoint(client: Any, monkeypatch: Any) 
             _NullRunStore(),
         ),
     )
-    live_limiter.reset()
-
     codes = [
         client.post(
             "/score/compute", json={"onboarding": True}, headers=auth(make_token())
@@ -432,10 +455,9 @@ def test_the_rate_limit_fires_on_a_real_endpoint(client: Any, monkeypatch: Any) 
 
 
 def test_the_429_carries_a_retry_after_header_and_charges_nothing(
-    client: Any, monkeypatch: Any
+    client: Any, monkeypatch: Any, frozen_limiter_clock: Any
 ) -> None:
     from carigma_api.routes import score as score_routes
-    from carigma_api.services.ratelimit import limiter as live_limiter
     from tests.conftest import auth, make_token
     from tests.test_score_endpoint import (  # type: ignore[attr-defined]
         FakeCredits,
@@ -455,7 +477,6 @@ def test_the_429_carries_a_retry_after_header_and_charges_nothing(
             _NullRunStore(),
         ),
     )
-    live_limiter.reset()
 
     # FREEZE THE CLOCK. The bucket refills continuously against
     # time.monotonic(), so on a slow enough machine the loop below outlasts one
@@ -482,3 +503,49 @@ def test_the_429_carries_a_retry_after_header_and_charges_nothing(
     assert res.json()["detail"]["error"] == "rate_limited"
     # A throttled request is not a charged one.
     assert "Traceback" not in str(res.json())
+
+
+def test_the_limiter_test_no_longer_depends_on_being_fast(
+    client: Any, monkeypatch: Any, frozen_limiter_clock: Any
+) -> None:
+    """Advance the clock a full hour BETWEEN requests and the burst still hits
+    the ceiling — because the frozen clock is the one the limiter reads.
+
+    Verifies the fixture rather than trusting it. Before this, the test passed
+    or failed depending on how busy the machine was, which is the definition of
+    a result that measures the wrong thing.
+    """
+    from carigma_api.routes import score as score_routes
+    from carigma_api.services import ratelimit
+    from carigma_api.services.ratelimit import AGENT_BURST
+    from tests.conftest import auth, make_token
+    from tests.test_score_endpoint import (  # type: ignore[attr-defined]
+        FakeCredits,
+        FakeProfiles,
+        FakeScores,
+        _NullRunStore,
+    )
+
+    monkeypatch.setattr(
+        score_routes,
+        "_deps",
+        lambda request, user, settings: (
+            FakeProfiles({"name": "Ravi"}),
+            FakeScores(),
+            FakeCredits(balance=1000),
+            _NullRunStore(),
+        ),
+    )
+
+    # Real time passes; the limiter's clock does not.
+    codes = []
+    for _ in range(AGENT_BURST + 1):
+        time.sleep(0.01)
+        codes.append(
+            client.post(
+                "/score/compute", json={"onboarding": True}, headers=auth(make_token())
+            ).status_code
+        )
+
+    assert codes[-1] == 429, f"the limiter refilled despite a frozen clock: {codes}"
+    assert ratelimit.time.monotonic() == 1_000.0, "the clock was not actually frozen"
