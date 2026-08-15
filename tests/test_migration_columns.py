@@ -19,11 +19,11 @@ against the code that reads them**, which is this.
 Static, so it sees `.table("x").insert({...})` payload keys and literal
 `.eq("col", ...)` / `.select("a,b")` arguments for V2-owned tables.
 
-It CANNOT see:
+Tables come from two places and NOTHING is exempt: ours from the migrations,
+V1's from `schema_snapshot.json`. A table in neither is a hard failure.
 
-- **V1's tables.** Their DDL is not in this repo, so there is nothing to check
-  against. They are listed in `NOT_OURS` rather than skipped silently.
-- Column names built at runtime, or reached through `**payload`.
+It still cannot see column names built at runtime, or reached through
+`**payload`. That limit is stated here rather than implied by a green tick.
 
 Where it cannot see, it says so here rather than letting a green tick imply
 coverage.
@@ -32,36 +32,31 @@ coverage.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import re
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "carigma_api"
 MIGRATIONS = pathlib.Path(__file__).resolve().parents[1] / "migrations"
 
-#: Tables whose DDL lives in V1's repo. We may ALTER them — migrations are
-#: additive — but we did not declare them, so we do not know their columns and
-#: this guard says so instead of guessing.
-#:
-#: The list is policed: a table that gains a `create table` here must come out,
-#: or its columns would go unchecked forever behind a name on a list.
-NOT_OURS = {
-    "profiles",
-    "credits",
-    "credit_ledger",
-    "score_history",
-    "content_loop",
-    "jobs_feed",
-    "jobs_cache",
-    "feedback",
-    "digest_log",
-    "tracker",
-    "weekly_review",
-    "milestones",
-    "ai_memory",
-    "payments",
-    "user_subscriptions",
-    "users",
-}
+SNAPSHOT = pathlib.Path(__file__).resolve().parents[1] / "schema_snapshot.json"
+
+
+def live_tables() -> dict[str, set[str]]:
+    """The real database's shape, recorded by `scripts/snapshot_schema.py`.
+
+    This replaces a `NOT_OURS` exemption list that named sixteen tables as
+    "V1's, so unchecked". **Five of them existed nowhere at all** —
+    `content_loop`, `tracker`, `weekly_review`, `ai_memory`, `users`. The list
+    was an assumption wearing a fact's costume, and it turned a mistaken belief
+    into a permanent pass for five names that deserved to fail.
+
+    With the snapshot nothing is exempt: our tables come from the migrations,
+    V1's come from here, and a table in neither is a hard failure.
+    """
+    raw = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    return {table: set(columns) for table, columns in raw.items()}
+
 
 #: PostgREST adds these to every row.
 IMPLICIT = {"id", "created_at", "updated_at"}
@@ -186,13 +181,12 @@ def _chain_root(tree: ast.AST, table_call: ast.Call) -> ast.AST:
     return table_call
 
 
-def test_every_column_we_reference_exists_in_a_migration() -> None:
-    tables = v2_tables()
+def test_every_column_we_reference_exists() -> None:
+    """Ours from the migrations, V1's from the live snapshot, nothing exempt."""
+    tables = {**live_tables(), **v2_tables()}
     offenders: list[str] = []
 
     for table, refs in sorted(code_columns().items()):
-        if table in NOT_OURS:
-            continue
         if table not in tables:
             offenders.append(f"{table}: referenced in code, created by no migration")
             continue
@@ -232,32 +226,31 @@ def test_the_code_scan_actually_found_something() -> None:
     )
 
 
-def test_the_unchecked_list_cannot_outlive_its_reason() -> None:
-    """Their DDL is not in this repo. Saying so beats a green tick that implies
-    they were checked — and the moment we DO declare one, it must come off the
-    list rather than sit there unchecked behind a name."""
-    tables = v2_tables()
+def test_the_snapshot_is_real_and_not_truncated() -> None:
+    """Assert the input before asserting anything about it. A snapshot that
+    failed to load would make every table look unknown — or, with the merge
+    order reversed, make every column look fine."""
+    live = live_tables()
 
-    for table in NOT_OURS:
-        assert table not in tables, (
-            f"{table} IS created by one of our migrations now — take it out of "
-            f"NOT_OURS so its columns get checked"
-        )
+    assert len(live) >= 25, f"only {len(live)} tables in the snapshot"
+    assert "resume_retention_opt_in" in live["profiles"]
 
 
-def test_no_table_we_reference_is_silently_unchecked() -> None:
-    """The gap this guard could hide.
+def test_the_snapshot_records_the_tables_that_do_not_exist() -> None:
+    """The five that broke the old exemption list.
 
-    A table that is neither declared here nor named in `NOT_OURS` gets skipped
-    by nothing and checked by nothing. Listing it is a decision; falling
-    through is an accident.
+    Named here so their absence is a stated fact rather than a discovery
+    someone makes again. `content_loop`, `tracker` and `weekly_review` back
+    Posts, the Tracker and the weekly review — all three of which currently
+    keep their state in process memory.
     """
-    tables = v2_tables()
-    unaccounted = sorted(set(code_columns()) - set(tables) - NOT_OURS)
+    live = live_tables()
 
-    assert not unaccounted, (
-        f"referenced but neither declared here nor listed as V1's: {unaccounted}"
-    )
+    for missing in ("content_loop", "tracker", "weekly_review", "ai_memory", "users"):
+        assert missing not in live, (
+            f"{missing} EXISTS now — re-snapshot and take it off this list, "
+            f"because its absence is no longer the fact being recorded"
+        )
 
 
 def test_the_guard_catches_a_column_that_does_not_exist() -> None:

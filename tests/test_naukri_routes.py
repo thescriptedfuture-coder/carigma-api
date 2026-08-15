@@ -91,16 +91,14 @@ class FakeDB:
 
 
 class FakeProfiles:
+    """Read-only. Nothing on the Naukri path writes a profile any more —
+    `/naukri/fix` was the only writer and it is gone, so a `save` here would be
+    a fake for a capability that no longer exists."""
+
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
         self.profile = dict(PROFILE if profile is None else profile)
-        self.saved: dict[str, Any] | None = None
 
     def load(self, user_id: str) -> dict[str, Any]:
-        return dict(self.profile)
-
-    def save(self, user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
-        self.profile.update(profile)
-        self.saved = dict(profile)
         return dict(self.profile)
 
 

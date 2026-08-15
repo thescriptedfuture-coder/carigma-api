@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from carigma_api.services.repository import profile_to_db
 from tests.conftest import USER_ID, auth, make_token
 
 
@@ -62,11 +63,18 @@ class FakeProfiles:
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
         self.profile = dict(profile) if profile is not None else dict(SAMPLE_PROFILE)
         self.saved: dict[str, Any] | None = None
+        #: What would actually land in the table.
+        self.columns: dict[str, Any] = {}
 
     def load(self, user_id: str) -> dict[str, Any]:
         return dict(self.profile)
 
     def save(self, user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
+        """Runs the REAL mapping, so an unmapped key fails here as it would in
+        production. A fake simpler than the thing it replaces hides exactly the
+        bugs that live in the difference — which is how a profile save that
+        silently dropped its entire payload passed for a whole phase."""
+        self.columns = profile_to_db(profile)
         self.profile = dict(profile)
         self.saved = dict(profile)
         return dict(profile)

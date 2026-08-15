@@ -193,3 +193,47 @@ def test_the_retention_flag_reaches_a_real_column() -> None:
     from carigma_api.services.repository import profile_to_db
 
     assert profile_to_db({"resumeRetentionOptIn": False}) == {"resume_retention_opt_in": False}
+
+
+def test_every_key_any_route_saves_is_a_real_profile_field() -> None:
+    """Checked against the SOURCE, so no fake can hide it.
+
+    The retention bug lived in the gap between a fake that recorded its
+    argument and a mapping that discarded it. Closing that gap in the fakes
+    helps; not depending on fakes at all is better. This walks every
+    `.save(user_id, {...})` in the route layer and resolves each literal key.
+    """
+    import ast
+    import pathlib
+
+    from carigma_api.services.repository import _PROFILE_COLUMNS
+
+    routes_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "carigma_api" / "routes"
+    offenders: list[str] = []
+    checked = 0
+
+    for path in sorted(routes_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "save" or len(node.args) < 2:
+                continue
+            payload = node.args[1]
+            if not isinstance(payload, ast.Dict):
+                continue
+            for key in payload.keys:
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    continue
+                checked += 1
+                if key.value not in _PROFILE_COLUMNS:
+                    meant = next(
+                        (j for j, col in _PROFILE_COLUMNS.items() if col == key.value), None
+                    )
+                    hint = f" (did you mean {meant!r}?)" if meant else ""
+                    offenders.append(f"{path.name}:{node.lineno} saves {key.value!r}{hint}")
+
+    # Assert the precondition: a walk that found no save calls would pass while
+    # checking nothing at all.
+    assert checked >= 3, f"only found {checked} literal save keys — the walk is not seeing them"
+    assert not offenders, "profile saves that would be dropped:\n  " + "\n  ".join(offenders)
