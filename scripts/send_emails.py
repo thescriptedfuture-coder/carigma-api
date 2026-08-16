@@ -20,7 +20,7 @@ import json
 import logging
 import smtplib
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -478,7 +478,80 @@ def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> An
             facts.sources_unavailable = (*facts.sources_unavailable, "Career Scout")
         return facts
 
-    return mail.WeeklyFacts()
+    # ── weekly ────────────────────────────────────────────────────────────
+    #
+    # This returned an EMPTY `WeeklyFacts()` unconditionally, which meant
+    # `has_anything` was always False, which meant the weekly review NEVER
+    # SENT. And it failed silently in the safe direction — skip-when-nothing
+    # reported "nothing to report" rather than an error — so a capability V1
+    # users receive every Sunday was simply absent from V2 with nothing in the
+    # logs to say so.
+    #
+    # It is closeable now because the pieces exist: `content_loop` holds the
+    # week's slots, `weekly_review` holds the contract, and `score_history`
+    # holds the movement. Every read degrades to leaving a line out, never to
+    # inventing one.
+    facts = mail.WeeklyFacts()
+    monday = _monday_of(datetime.now(UTC).date()) - timedelta(weeks=1)
+    sunday = monday + timedelta(days=6)
+    facts.week_label = f"{monday.day:02d}–{sunday.day:02d} {sunday:%b}"
+
+    try:
+        slots = (
+            db.table("content_loop")
+            .select("state")
+            .eq("user_id", user_id)
+            .eq("week_start", monday.isoformat())
+            .execute()
+            .data
+            or []
+        )
+        facts.committed = len(slots)
+        facts.shipped = sum(1 for s_ in slots if str(s_.get("state")) == "published")
+    except Exception:
+        logger.exception("content_loop read failed for %s", user_id)
+
+    try:
+        scores = (
+            db.table("score_history")
+            .select("score,created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(2)
+            .execute()
+            .data
+            or []
+        )
+        if len(scores) >= 2:
+            newest, previous = int(scores[0]["score"]), int(scores[1]["score"])
+            if newest != previous:
+                # The direction is stated, never dressed up. A fall is a fall.
+                move = "up" if newest > previous else "down"
+                facts.score_lines = (f"Your profile score moved {move}: {previous} → {newest}.",)
+    except Exception:
+        logger.exception("score_history read failed for %s", user_id)
+
+    try:
+        contract = (
+            db.table("weekly_review")
+            .select("state")
+            .eq("user_id", user_id)
+            .eq("week_start", (monday + timedelta(weeks=1)).isoformat())
+            .execute()
+            .data
+            or []
+        )
+        # An unsigned plan is the one thing that makes a quiet week worth an
+        # email: it is waiting on THEM, not on us.
+        facts.contract_pending = bool(contract) and str(contract[0].get("state")) == "proposed"
+    except Exception:
+        logger.exception("weekly_review read failed for %s", user_id)
+
+    return facts
+
+
+def _monday_of(value: date) -> date:
+    return value - timedelta(days=value.weekday())
 
 
 def main() -> int:
