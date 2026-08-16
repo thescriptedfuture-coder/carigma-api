@@ -261,6 +261,17 @@
     "state",
     "total_weight"
   ],
+  "GET /onboarding": [
+    "cadences",
+    "default_cadence",
+    "has_profile",
+    "onboarded",
+    "platforms",
+    "step",
+    "suggested",
+    "suggested.location",
+    "suggested.target_roles"
+  ],
   "GET /posts/week": [
     "cadence_days",
     "cadence_label",
@@ -548,6 +559,19 @@
     "score",
     "state",
     "total_weight"
+  ],
+  "POST /onboarding/complete": [
+    "cadence",
+    "onboarded",
+    "platforms",
+    "referral",
+    "step",
+    "target_roles"
+  ],
+  "POST /onboarding/extract": [
+    "extracted",
+    "field_count",
+    "next"
   ],
   "POST /payments/topup": [
     "checkout_url",

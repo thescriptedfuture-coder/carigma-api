@@ -14,6 +14,11 @@ dependencies = [
     # Payments are BUILT but dormant (P5). The SDK ships now so the path is
     # real code rather than a sketch to be written under time pressure later.
     "razorpay>=2.0",
+    # Onboarding extraction. Same libraries V1 uses, deliberately: the parsing
+    # is the IP, and a different PDF library extracts subtly different text,
+    # which would change what the analyst sees for the same file.
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]
@@ -73,6 +78,13 @@ disallow_untyped_defs = false
 # else silently loses type checking.
 [[tool.mypy.overrides]]
 module = ["razorpay.*"]
+ignore_missing_imports = true
+
+# Neither PDF library ships stubs. Scoped to the two modules, and both are
+# imported inside functions so a missing wheel is an extraction failure the
+# user is told about rather than an import error that takes the app down.
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "docx.*"]
 ignore_missing_imports = true
 
 # ── Tests ───────────────────────────────────────────────────────────────────

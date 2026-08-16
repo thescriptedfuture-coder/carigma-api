@@ -186,21 +186,31 @@ def store(db: PostgresLike) -> SupabaseReferralStore:
 # ── The decision: never on signup ──────────────────────────────────────────
 
 
-def test_no_route_can_reach_the_grant() -> None:
-    """The second door.
+#: The ONE route allowed to reach the grant, because it is the one that
+#: completes a profile. Named rather than inferred: "whichever module happens
+#: to import it" is not a rule.
+ACTIVATION_CALLER = "onboarding.py"
+
+
+def test_only_the_profile_upload_route_can_reach_the_grant() -> None:
+    """The second door, now that the first one exists.
 
     `Activation` makes "never on signup" structural in the service. It does not
-    stop a ROUTE from constructing one and calling `activate` — a handler that
-    did would be a request-triggered grant, which is exactly the thing the type
-    was chosen to prevent.
+    stop a ROUTE from constructing one — a handler that did would be a
+    request-triggered grant, which is what the type was chosen to prevent.
 
-    Walks every route module's AST for either name. Neither may appear.
+    Until onboarding landed this asserted that NO route could reach it. That
+    was the honest statement then and it is the wrong one now: completing a
+    profile IS the trigger, so the rule is that exactly one route may, and it
+    is the one named above.
     """
     forbidden = {"activate", "activation_from_profile_upload", "grant_for_activation"}
     routes_dir = Path(routes.__file__).parent
     offenders: list[str] = []
 
     for path in sorted(routes_dir.glob("*.py")):
+        if path.name == ACTIVATION_CALLER:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in forbidden:
@@ -213,32 +223,30 @@ def test_no_route_can_reach_the_grant() -> None:
                         offenders.append(f"{path.name}: imports {alias.name}")
 
     assert offenders == [], (
-        "a route can reach the referral grant — the reward must be triggered by "
-        f"a profile upload, never by a request: {offenders}"
+        "a second route can reach the referral grant — the reward must be "
+        f"triggered by completing a profile, never by anything else: {offenders}"
     )
 
 
-def test_the_grant_has_no_caller_yet_and_that_is_recorded() -> None:
-    """V2 has no profile-upload path, so nothing activates a referral.
+def test_the_grant_is_wired_to_the_profile_upload_and_nothing_else() -> None:
+    """This test used to record that `activate` had NO caller.
 
-    This test exists so the gap is a FACT in the suite rather than something
-    someone notices later. When onboarding lands, `activate` must be wired into
-    it — and this test is where that wiring gets asserted, by being changed to
-    require the caller instead of recording its absence.
+    V2 had no profile-upload path at all, so the referral programme's central
+    promise — "credits land when you upload a profile" — could never fire. The
+    absence was kept as a fact in the suite rather than a note, precisely so
+    that the day onboarding landed, wiring it could not be the thing everyone
+    assumed someone else had done.
 
-    Kept deliberately: a surface promising "credits land when you upload a
-    profile" while nothing can grant them is a promise the product cannot keep,
-    and the referral page says so in those words.
+    Onboarding landed. This is now the assertion the docstring promised.
     """
     src = Path(store_mod.__file__).parents[2]
-    callers = [
+    callers = sorted(
         path.name
         for path in src.rglob("*.py")
         if path.name != "referral_store.py" and ".activate(" in path.read_text(encoding="utf-8")
-    ]
-    assert callers == [], (
-        "`activate` now has a caller — good. Rewrite this test to assert the "
-        f"caller is the profile-upload path and nothing else: {callers}"
+    )
+    assert callers == [ACTIVATION_CALLER], (
+        f"the referral grant must be reachable from {ACTIVATION_CALLER} alone: {callers}"
     )
 
 
