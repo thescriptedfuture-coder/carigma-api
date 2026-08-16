@@ -28,8 +28,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from carigma_api.config import Settings  # noqa: E402
-from carigma_api.services import emails as mail
-from carigma_api.services import market, reengagement  # noqa: E402
+from carigma_api.services import emails as mail  # noqa: E402
+from carigma_api.services import market, reengagement, triggers  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -268,6 +268,11 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
             recipient=recipient,
             email_type=mail.EmailType.MARKET_DIGEST,
             period_key=mail.weekly_key(now.date()),
+            # Weekly cadence, but it still consumes the day: a lapsed digest
+            # and a daily brief landing together is two emails, and "more
+            # reasons, never more frequency" does not have an exception for
+            # the ones we send to people who stopped showing up.
+            claim_as=triggers.DAILY_SLOT,
             prefs=_prefs_for_user(db, sequence.user_id),
             dry_run=dry_run,
         )
@@ -362,6 +367,9 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
             period_key=period,
             prefs=_prefs_for(row),
             dry_run=dry_run,
+            # The shared ceiling. The weekly review passes it too: a Sunday
+            # that carries both a review and a brief is still two emails.
+            claim_as=triggers.DAILY_SLOT,
         )
         summary.record(outcome, row["email"])
 

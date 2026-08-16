@@ -48,6 +48,10 @@ class EmailType(StrEnum):
     #: SAME toggle as the weekly review: someone who turned that off while
     #: active has already said no to a weekly email, and lapsing is not consent.
     MARKET_DIGEST = "market_digest"
+    #: Something specific happened (P6-5). ONE type for all five triggers, not
+    #: five types: five toggles would be five things to turn off, and five
+    #: claim namespaces would be five emails a day. See `services/triggers`.
+    EVENT = "event"
     RECEIPT = "receipt"
 
     @property
@@ -61,6 +65,7 @@ class EmailType(StrEnum):
             EmailType.DAILY_BRIEF,
             EmailType.WEEKLY_REVIEW,
             EmailType.MARKET_DIGEST,
+            EmailType.EVENT,
         )
 
 
@@ -287,7 +292,12 @@ class Preferences:
             return True
         if self.unsubscribed_all:
             return False
-        return self.daily_brief if email_type is EmailType.DAILY_BRIEF else self.weekly_review
+        # An event email is a daily-brief-shaped thing: "here is what happened".
+        # Someone who turned that off has already answered the question, and a
+        # separate toggle would be a second chance to reach them after a no.
+        if email_type in (EmailType.DAILY_BRIEF, EmailType.EVENT):
+            return self.daily_brief
+        return self.weekly_review
 
 
 def send(
@@ -301,6 +311,7 @@ def send(
     period_key: str,
     prefs: Preferences,
     dry_run: bool = False,
+    claim_as: str | None = None,
 ) -> SendOutcome:
     """The one path from a built email to an actually-sent one.
 
@@ -309,7 +320,8 @@ def send(
        consults preferences or burns a period claim.
     2. **Preferences** → unsubscribed.
     3. **Duplicate guard** → claim the period BEFORE sending, so a crash
-       mid-send cannot produce a second attempt that succeeds.
+       mid-send cannot produce a second attempt that succeeds. `claim_as`
+       shares one namespace across types where the ceiling is shared.
     4. **Dry run** → print, claim nothing, send nothing.
     """
     if email is None:
@@ -345,7 +357,13 @@ def send(
         )
         return SendOutcome(SendStatus.DRY_RUN, f"Would send: {email.subject}")
 
-    if not log.claim_period(user_id, str(email_type), period_key):
+    # `claim_as` lets several email TYPES share one claim namespace, which is
+    # how "more reasons, never more frequency" becomes a database constraint
+    # rather than a rule someone remembers. The daily brief and all five event
+    # triggers pass `triggers.DAILY_SLOT`, so whichever runs first wins the
+    # day and the rest are DUPLICATE. A trigger added next year cannot raise
+    # anyone's volume, because the index does not know how many triggers exist.
+    if not log.claim_period(user_id, claim_as or str(email_type), period_key):
         return SendOutcome(SendStatus.DUPLICATE, "Already sent this period.")
 
     try:
