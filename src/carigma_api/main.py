@@ -32,6 +32,8 @@ from carigma_api.routes import score as score_routes
 from carigma_api.routes import settings as settings_routes
 from carigma_api.routes import today as today_routes
 from carigma_api.routes import weekly as weekly_routes
+from carigma_api.services import instances
+from carigma_api.services.repository import service_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +52,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     app.state.jwt_verifier = JWTVerifier(settings)
+
+    # Count our peers. `services/ratelimit` holds its buckets in process
+    # memory, so a second instance silently doubles every ceiling — including
+    # the share of the JSearch quota live V1 users are drawing from.
+    #
+    # This WARNS rather than refuses: a rolling deploy runs old and new
+    # together for a minute, and turning every routine deploy into an outage
+    # is a worse failure than the one being prevented. The CRITICAL is the
+    # mechanism — it makes scaling a decision rather than something that
+    # happened. Never raises; a monitoring gap must not be an outage.
+    try:
+        app.state.instances = instances.check(
+            service_client(settings), version=settings.environment
+        )
+    except Exception:
+        logger.warning("instance check skipped", exc_info=True)
+        app.state.instances = None
+
     logger.info("carigma-api started (environment=%s)", settings.environment)
     yield
 

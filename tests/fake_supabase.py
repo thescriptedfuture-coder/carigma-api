@@ -43,6 +43,7 @@ class FakeTable:
         self._conflict: str | None = None
         self._single = False
         self._order: tuple[str, bool] | None = None
+        self._ranges: list[tuple[str, str, str]] = []
 
     # ── builders ───────────────────────────────────────────────────────────
 
@@ -71,6 +72,21 @@ class FakeTable:
         self._filters[column] = value
         return self
 
+    def gte(self, column: str, value: Any) -> FakeTable:
+        """`>=`, compared as STRINGS.
+
+        Every caller passes an ISO timestamp, which sorts lexicographically in
+        the same order it sorts chronologically — so a string compare is the
+        right one here and a date parse would only add a way to be wrong.
+        Anything non-ISO would compare nonsensically, so callers pass ISO.
+        """
+        self._ranges.append((column, ">=", str(value)))
+        return self
+
+    def lte(self, column: str, value: Any) -> FakeTable:
+        self._ranges.append((column, "<=", str(value)))
+        return self
+
     def order(self, column: str, **kw: Any) -> FakeTable:
         self._order = (column, bool(kw.get("desc", False)))
         return self
@@ -85,7 +101,15 @@ class FakeTable:
     # ── execution ──────────────────────────────────────────────────────────
 
     def _matches(self, row: dict[str, Any]) -> bool:
-        return all(str(row.get(k)) == str(v) for k, v in self._filters.items())
+        if not all(str(row.get(k)) == str(v) for k, v in self._filters.items()):
+            return False
+        for column, op, value in self._ranges:
+            actual = str(row.get(column) or "")
+            if op == ">=" and not actual >= value:
+                return False
+            if op == "<=" and not actual <= value:
+                return False
+        return True
 
     def execute(self) -> Result:
         if self._name in self._db.failing:
