@@ -389,6 +389,52 @@ def send(
     return SendOutcome(SendStatus.SENT)
 
 
+# ── Which email wins the day ───────────────────────────────────────────────
+
+#: The order proactive emails are ATTEMPTED in, most important first.
+#:
+#: The daily slot guarantees one email per user per day. It does not decide
+#: WHICH — and "whichever cron ran first" is not a decision, it is an accident
+#: of how two schedule entries happened to be written. On a Sunday where a
+#: review, a brief and an event all qualify, the user's inbox should not depend
+#: on that.
+#:
+#: The ranking:
+#:
+#: 1. **The weekly review.** Once a week, it is the promised artefact, and a
+#:    missed one means that week has no record at all. Everything below it
+#:    recurs.
+#: 2. **An event.** Something specific happened to THEM — a closing follow-up
+#:    window, an approval waiting, a band they moved.
+#: 3. **The daily brief.** The general roundup. Real, and the most repeatable
+#:    thing here, so it yields to anything specific.
+#: 4. **The market digest.** Lapsed users only, and by construction the least
+#:    time-sensitive thing we send: someone who has not been back in six weeks
+#:    is not waiting on today's edition.
+#:
+#: Reviewed as a list, and pinned by a test. A reordering should require
+#: someone to disagree with the reasoning above, not to notice a subtle change
+#: in a scheduler.
+PROACTIVE_ORDER: tuple[EmailType, ...] = (
+    EmailType.WEEKLY_REVIEW,
+    EmailType.EVENT,
+    EmailType.DAILY_BRIEF,
+    EmailType.MARKET_DIGEST,
+)
+
+
+def outranks(a: EmailType, b: EmailType) -> bool:
+    """True when `a` should win the day against `b`.
+
+    Raises on a type that is not proactive rather than answering False: a
+    receipt is not competing for the slot at all, and silently ranking it
+    would be a wrong answer to a question nobody should have asked.
+    """
+    if a not in PROACTIVE_ORDER or b not in PROACTIVE_ORDER:
+        raise ValueError(f"not a proactive email type: {a if a not in PROACTIVE_ORDER else b}")
+    return PROACTIVE_ORDER.index(a) < PROACTIVE_ORDER.index(b)
+
+
 # ── Period keys ────────────────────────────────────────────────────────────
 
 

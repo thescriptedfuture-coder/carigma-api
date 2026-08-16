@@ -21,12 +21,22 @@ because the constraint is not aware of how many triggers exist.
 That is deliberately not "the sender remembers to check". A rule someone can
 forget is one release away from five emails on a Tuesday.
 
-## One fires, and it is the most urgent one
+## One fires, and the order is decided rather than incidental
 
-`choose()` returns a single trigger, in priority order, like the Today ladder:
-a thing with a deadline beats a thing without, and something the user is
-waiting on beats something we noticed. The losers do not queue — an email that
-arrives two days late about a match found on Monday is worse than silence.
+`choose()` returns a single trigger from a pinned table, like the Today ladder.
+Two axes rank it: **time-bound beats browsable**, and **something they did
+beats something we found**. See `TRIGGERS` for how each entry earns its place.
+
+The losers do not queue. An email arriving Wednesday about Monday's fact is
+worse than silence.
+
+## The cross-TYPE order is decided too
+
+The daily slot means one proactive email wins the day — but "whichever cron
+ran first" is not a decision, it is an accident of scheduling. `PROACTIVE_ORDER`
+in `services/emails` ranks the TYPES, and the sender walks it. Without that,
+which email a user receives on a busy Sunday depends on the order somebody
+wrote two cron entries in.
 
 ## Every fact is checked, never inferred
 
@@ -223,24 +233,37 @@ def _update_email(to: str, facts: Facts) -> Email | None:
 
 #: Priority order, as data. The Today ladder's lesson: a branch tree cannot be
 #: asserted as a sequence, and a sequence is exactly what needs reviewing.
+#:
+#: Two axes decide it, and they were corrected after review:
+#:
+#: 1. **Time-bound beats browsable.** A follow-up window closes; a job posting
+#:    is still in the feed tomorrow. Same reasoning as interview-over-post-day
+#:    on Today.
+#: 2. **Something they did beats something we found.** A band move, an
+#:    approval waiting, a milestone — those are about them. A match is
+#:    inventory, and inventory lives in Jobs where they can look whenever.
+#:
+#: The first draft led with `strong_match`, which had it backwards on both
+#: counts: the most interruptive email was the one about a thing that had not
+#: changed and would still be there.
 TRIGGERS: tuple[Trigger, ...] = (
-    # A deadline nobody set but the market did.
-    Trigger(
-        "strong_match",
-        1,
-        _match_applies,
-        _match_email,
-        lambda f: str((f.top_match or {}).get("id")),
-    ),
-    # Something the user is already waiting on an answer about.
+    # Time-bound AND theirs. The only one with a closing window.
     Trigger(
         "stale_application",
-        2,
+        1,
         _stale_applies,
         _stale_email,
         lambda f: str((f.stale_application or {}).get("id")),
     ),
-    # A change in the thing they came here to improve.
+    # Theirs, and BLOCKED on them: work sitting waiting for an approval.
+    Trigger(
+        "profile_update",
+        2,
+        _update_applies,
+        _update_email,
+        lambda f: str((f.profile_update or {}).get("id")),
+    ),
+    # Theirs, and the thing they came here to move.
     Trigger(
         "band_move",
         3,
@@ -248,22 +271,22 @@ TRIGGERS: tuple[Trigger, ...] = (
         _band_email,
         lambda f: f"{(f.band_move or {}).get('from')}->{(f.band_move or {}).get('to')}",
     ),
-    # Work waiting on their approval.
-    Trigger(
-        "profile_update",
-        4,
-        _update_applies,
-        _update_email,
-        lambda f: str((f.profile_update or {}).get("id")),
-    ),
-    # Good news with nothing to do. Last on purpose: it can always wait a day,
-    # and everything above it cannot.
+    # Theirs, with nothing to do about it.
     Trigger(
         "milestone",
-        5,
+        4,
         _milestone_applies,
         _milestone_email,
         lambda f: str((f.milestone or {}).get("id") or (f.milestone or {}).get("text")),
+    ),
+    # Ours. A strong match is worth saying, and it is the one thing here that
+    # is equally available by simply opening Jobs.
+    Trigger(
+        "strong_match",
+        5,
+        _match_applies,
+        _match_email,
+        lambda f: str((f.top_match or {}).get("id")),
     ),
 )
 

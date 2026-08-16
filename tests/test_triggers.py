@@ -86,7 +86,7 @@ def test_five_true_facts_produce_one_email() -> None:
     """The whole point. Not five, not a batched digest — one."""
     chosen = choose(everything_true())
     assert chosen is not None
-    assert chosen.key == "strong_match"
+    assert chosen.key == "stale_application"
 
 
 def test_the_daily_slot_is_shared_with_the_daily_brief(FakeEmail: Any = None) -> None:
@@ -204,11 +204,11 @@ def test_the_order_is_pinned() -> None:
     sequence is what someone actually needs to agree with.
     """
     assert [t.key for t in sorted(triggers.TRIGGERS, key=lambda t: t.priority)] == [
-        "strong_match",
         "stale_application",
-        "band_move",
         "profile_update",
+        "band_move",
         "milestone",
+        "strong_match",
     ]
 
 
@@ -219,14 +219,42 @@ def test_the_priorities_are_distinct() -> None:
     assert len(set(priorities)) == len(priorities)
 
 
-def test_good_news_with_nothing_to_do_comes_last() -> None:
-    """A milestone can always wait a day. An interview cannot."""
+def test_a_closing_window_beats_a_thing_with_no_deadline() -> None:
+    """Time-bound beats browsable — the first of the two ranking axes."""
     facts = Facts(
         milestone={"id": "m-1", "text": "Ten posts shipped."},
         stale_application={"id": "app-1", "company": "Swiggy", "days": 12},
     )
     chosen = choose(facts)
     assert chosen is not None and chosen.key == "stale_application"
+
+
+def test_something_they_did_beats_something_we_found() -> None:
+    """The second axis.
+
+    A band move is theirs; a match is inventory, and inventory is in Jobs
+    whenever they want it. The first draft had this backwards and led with the
+    match — the most interruptive email being about the thing that had not
+    changed and would still be there tomorrow.
+    """
+    facts = Facts(
+        top_match=a_match(),
+        band_move={"from": "EMERGING", "to": "CLEAR", "receipt": "why", "improved": True},
+    )
+    chosen = choose(facts)
+    assert chosen is not None and chosen.key == "band_move"
+
+
+def test_even_a_milestone_outranks_inventory() -> None:
+    """A milestone has nothing to do about it, and still wins.
+
+    That follows from the second axis rather than in spite of it: "ten posts
+    shipped" is a fact about them, and a job posting is a fact about the market
+    that Jobs already shows.
+    """
+    facts = Facts(top_match=a_match(), milestone={"id": "m", "text": "Ten posts shipped."})
+    chosen = choose(facts)
+    assert chosen is not None and chosen.key == "milestone"
 
 
 # ── Each fact has to be true ───────────────────────────────────────────────
@@ -417,3 +445,66 @@ def test_every_trigger_identifies_the_fact_that_fired(trigger: Any) -> None:
     """
     identity = trigger.identity(everything_true())
     assert identity and identity != "None", trigger.key
+
+
+# ── The cross-TYPE order ───────────────────────────────────────────────────
+
+
+def test_the_type_order_is_pinned() -> None:
+    """Which email wins the day, decided rather than left to cron ordering.
+
+    The slot guarantees ONE proactive email. It does not decide which, and
+    "whichever cron ran first" is an accident of how two schedule entries were
+    written — not something anybody chose.
+    """
+    from carigma_api.services.emails import PROACTIVE_ORDER
+
+    assert [str(t) for t in PROACTIVE_ORDER] == [
+        "weekly_review",
+        "event",
+        "daily_brief",
+        "market_digest",
+    ]
+
+
+def test_a_weekly_review_beats_everything_it_shares_a_day_with() -> None:
+    """It happens once. A missed one means that week has no record at all."""
+    from carigma_api.services.emails import outranks
+
+    for loser in (EmailType.EVENT, EmailType.DAILY_BRIEF, EmailType.MARKET_DIGEST):
+        assert outranks(EmailType.WEEKLY_REVIEW, loser), loser
+
+
+def test_something_specific_beats_the_general_roundup() -> None:
+    """An event is about them. The brief is the most repeatable thing we send."""
+    from carigma_api.services.emails import outranks
+
+    assert outranks(EmailType.EVENT, EmailType.DAILY_BRIEF)
+    assert not outranks(EmailType.DAILY_BRIEF, EmailType.EVENT)
+
+
+def test_ranking_a_receipt_is_refused_rather_than_answered() -> None:
+    """A receipt does not compete for the slot, so there is no right answer.
+
+    Returning False would be a wrong answer to a question nobody should have
+    asked, and the caller would carry on believing the ranking meant something.
+    """
+    from carigma_api.services.emails import outranks
+
+    with pytest.raises(ValueError):
+        outranks(EmailType.RECEIPT, EmailType.DAILY_BRIEF)
+
+
+def test_every_proactive_type_is_ranked() -> None:
+    """A marketing type missing from the order would silently never win.
+
+    The non-empty rule's cousin: a list that omits a member does not fail, it
+    just quietly makes that member last forever.
+    """
+    from carigma_api.services.emails import PROACTIVE_ORDER
+
+    marketing = {t for t in EmailType if t.is_marketing}
+    assert marketing == set(PROACTIVE_ORDER), (
+        f"unranked marketing types would never win a contested day: "
+        f"{marketing - set(PROACTIVE_ORDER)}"
+    )
