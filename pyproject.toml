@@ -2,7 +2,21 @@
 name = "carigma-api"
 version = "0.1.0"
 description = "Carigma V2 API — FastAPI service wrapping the Carigma career-intelligence engine"
-requires-python = ">=3.11"
+# Render picked 3.14 on the first deploy, because nothing here said otherwise.
+# Everything has been tested on 3.11, and 3.14 is new enough that wheel
+# coverage is uneven — a library without a cp314 wheel compiles from source or
+# fails, which is a second unknown under an extraction path that already has
+# one.
+#
+# TWO declarations, doing different jobs:
+#   `.python-version`  SELECTS the interpreter. Render reads it, pyenv reads
+#                      it, and it is committed so it cannot drift per
+#                      environment the way a dashboard env var can.
+#   `requires-python`  REFUSES the wrong one. pip will not install into an
+#                      interpreter outside this range, so a mis-selection
+#                      fails at build rather than at runtime.
+requires-python = ">=3.11,<3.13"
+
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -14,6 +28,16 @@ dependencies = [
     # Payments are BUILT but dormant (P5). The SDK ships now so the path is
     # real code rather than a sketch to be written under time pressure later.
     "razorpay>=2.0",
+    # Supabase and Anthropic were BOTH undeclared until the first container
+    # deploy. They worked locally because the venv had them from earlier work;
+    # a container installs only what is declared. `supabase` crashed at
+    # startup. `anthropic` would have survived startup and crashed on the
+    # first extraction — which is to say, on the export session.
+    #
+    # `tests/test_dependencies.py` now walks every import and fails on any
+    # that pyproject does not declare.
+    "supabase>=2.9",
+    "anthropic>=0.40",
     # Onboarding extraction. Same libraries V1 uses, deliberately: the parsing
     # is the IP, and a different PDF library extracts subtly different text,
     # which would change what the analyst sees for the same file.
