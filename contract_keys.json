@@ -430,6 +430,11 @@
     "primary_action.title",
     "primary_action.when"
   ],
+  "GET /unsubscribe/{}": [
+    "note",
+    "readable",
+    "scope"
+  ],
   "GET /weekly/contract": [
     "contract",
     "contract.accepted_kinds",
@@ -710,6 +715,11 @@
     "decision",
     "item_key",
     "snooze_until"
+  ],
+  "POST /unsubscribe/{}": [
+    "done",
+    "note",
+    "scope"
   ],
   "POST /weekly/contract/approve": [
     "confirmation",
