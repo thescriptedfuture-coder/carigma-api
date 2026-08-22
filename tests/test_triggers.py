@@ -106,6 +106,8 @@ def test_the_daily_slot_is_shared_with_the_daily_brief(FakeEmail: Any = None) ->
         "period_key": slot_key(TODAY),
         "prefs": Preferences(),
         "claim_as": DAILY_SLOT,
+        "service_key": "test-signing-key",
+        "app_url": "https://app.example.com",
     }
 
     brief = build_daily_brief(TO, DailyFacts(new_matches=3))
@@ -143,6 +145,8 @@ def test_a_new_trigger_cannot_raise_anyones_volume() -> None:
             period_key=slot_key(TODAY),
             prefs=Preferences(),
             claim_as=DAILY_SLOT,
+            service_key="test-signing-key",
+            app_url="https://app.example.com",
         )
 
     assert len(mailer.sent) == 1, "the ceiling is one per user per day, whatever fires"
@@ -166,6 +170,8 @@ def test_tomorrow_is_a_new_slot() -> None:
             period_key=slot_key(day),
             prefs=Preferences(),
             claim_as=DAILY_SLOT,
+            service_key="test-signing-key",
+            app_url="https://app.example.com",
         )
 
     assert len(mailer.sent) == 2
@@ -189,6 +195,8 @@ def test_the_ceiling_is_per_user() -> None:
             period_key=slot_key(TODAY),
             prefs=Preferences(),
             claim_as=DAILY_SLOT,
+            service_key="test-signing-key",
+            app_url="https://app.example.com",
         )
 
     assert len(mailer.sent) == 2
@@ -347,6 +355,8 @@ def test_an_unsubscribed_user_burns_no_slot() -> None:
         period_key=slot_key(TODAY),
         prefs=Preferences(daily_brief=False),
         claim_as=DAILY_SLOT,
+        service_key="test-signing-key",
+        app_url="https://app.example.com",
     )
 
     assert log.claims == set(), "an unsubscribed send must not claim the slot"

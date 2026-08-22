@@ -273,6 +273,8 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
             # reasons, never more frequency" does not have an exception for
             # the ones we send to people who stopped showing up.
             claim_as=triggers.DAILY_SLOT,
+            service_key=settings.supabase_service_key,
+            app_url=settings.app_url,
             prefs=_prefs_for_user(db, sequence.user_id),
             dry_run=dry_run,
         )
@@ -370,6 +372,8 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
             # The shared ceiling. The weekly review passes it too: a Sunday
             # that carries both a review and a brief is still two emails.
             claim_as=triggers.DAILY_SLOT,
+            service_key=settings.supabase_service_key,
+            app_url=settings.app_url,
         )
         summary.record(outcome, row["email"])
 

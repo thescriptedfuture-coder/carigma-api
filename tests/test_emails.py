@@ -79,6 +79,12 @@ def deliver(email: Email | None, **over: Any) -> tuple[SendOutcome, FakeMailer, 
         email_type=over.pop("email_type", EmailType.DAILY_BRIEF),
         period_key=over.pop("period_key", "2026-08-08"),
         prefs=over.pop("prefs", Preferences()),
+        # Marketing mail without an unsubscribe link is refused before it is
+        # sent, so every test that expects a send has to supply the pieces the
+        # footer is built from. Overridable, because one test below removes
+        # them deliberately.
+        service_key=over.pop("service_key", "test-signing-key"),
+        app_url=over.pop("app_url", "https://app.example.com"),
         **over,
     )
     return outcome, mailer, log

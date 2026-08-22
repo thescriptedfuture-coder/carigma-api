@@ -251,3 +251,141 @@ def test_an_unreadable_link_says_so_without_blaming_the_reader(wired: Any) -> No
 
     assert body["readable"] is False
     assert "cut short" in body["note"]
+
+
+# ── The footer, and the refusal ────────────────────────────────────────────
+
+
+def test_every_marketing_email_carries_an_unsubscribe_link() -> None:
+    """Until this, NOTHING did.
+
+    Every proactive email V2 sent was unsubscribe-less marketing mail. The
+    public route existing does not help anyone who never receives a link to it.
+    """
+    from carigma_api.services.emails import (
+        DailyFacts,
+        EmailType,
+        Preferences,
+        SendStatus,
+        build_daily_brief,
+        send,
+    )
+
+    sent: list[Any] = []
+
+    class Mailer:
+        def send(self, email: Any) -> None:
+            sent.append(email)
+
+    class Log:
+        def record(self, *_a: Any, **_k: Any) -> None: ...
+
+        def claim_period(self, *_a: Any, **_k: Any) -> bool:
+            return True
+
+    outcome = send(
+        build_daily_brief("a@b.com", DailyFacts(new_matches=3)),
+        mailer=Mailer(),
+        log=Log(),
+        user_id=USER,
+        recipient="a@b.com",
+        email_type=EmailType.DAILY_BRIEF,
+        period_key="2026-08-17",
+        prefs=Preferences(),
+        service_key=KEY,
+        app_url="https://app.example.com",
+    )
+
+    assert outcome.status is SendStatus.SENT
+    body = sent[0].body
+    assert "Stop these emails:" in body
+    assert "/unsubscribe/" in body
+    # And the link in the footer actually resolves back to this user.
+    token = body.split("/unsubscribe/")[1].split()[0]
+    assert unsub.resolve(token, service_key=KEY) == USER
+
+
+def test_marketing_mail_with_no_link_is_REFUSED_rather_than_sent() -> None:
+    """The safe direction. A misconfigured deploy stops mailing rather than
+    mailing unlawfully — the same shape as JSEARCH_DAILY_CAP producing a
+    question rather than a bill."""
+    from carigma_api.services.emails import (
+        DailyFacts,
+        EmailType,
+        Preferences,
+        SendStatus,
+        build_daily_brief,
+        send,
+    )
+
+    sent: list[Any] = []
+
+    class Mailer:
+        def send(self, email: Any) -> None:
+            sent.append(email)
+
+    class Log:
+        def __init__(self) -> None:
+            self.claims = 0
+
+        def record(self, *_a: Any, **_k: Any) -> None: ...
+
+        def claim_period(self, *_a: Any, **_k: Any) -> bool:
+            self.claims += 1
+            return True
+
+    log = Log()
+    outcome = send(
+        build_daily_brief("a@b.com", DailyFacts(new_matches=3)),
+        mailer=Mailer(),
+        log=log,
+        user_id=USER,
+        recipient="a@b.com",
+        email_type=EmailType.DAILY_BRIEF,
+        period_key="2026-08-17",
+        prefs=Preferences(),
+        service_key="",  # misconfigured
+        app_url="https://app.example.com",
+    )
+
+    assert outcome.status is SendStatus.NO_UNSUBSCRIBE_LINK
+    assert outcome.status.is_problem is True, "this must show up in the run summary"
+    assert sent == []
+    # And it burns no daily slot, so a fixed deploy can still send today.
+    assert log.claims == 0
+
+
+def test_a_receipt_needs_no_footer() -> None:
+    """A receipt is a transaction record, not marketing. It must not be
+    refused for lacking an unsubscribe link it should not carry."""
+    from carigma_api.services.emails import Email, EmailType, Preferences, SendStatus, send
+
+    sent: list[Any] = []
+
+    class Mailer:
+        def send(self, email: Any) -> None:
+            sent.append(email)
+
+    class Log:
+        def record(self, *_a: Any, **_k: Any) -> None: ...
+
+        def claim_period(self, *_a: Any, **_k: Any) -> bool:
+            return True
+
+    outcome = send(
+        Email(
+            to="a@b.com", subject="Your receipt", body="300 credits.", email_type=EmailType.RECEIPT
+        ),
+        mailer=Mailer(),
+        log=Log(),
+        user_id=USER,
+        recipient="a@b.com",
+        email_type=EmailType.RECEIPT,
+        period_key="2026-08-17",
+        prefs=Preferences(unsubscribed_all=True),
+        service_key="",
+        app_url="",
+    )
+
+    assert outcome.status is SendStatus.SENT
+    assert "Stop these emails" not in sent[0].body

@@ -96,6 +96,9 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         smtp_from = "Carigma <bot@example.com>"
         supabase_url = "https://example.supabase.co"
         supabase_service_key = "sb_secret_test"
+        # The lapsed digest is marketing mail, so it now carries an unsubscribe
+        # footer — and is REFUSED without the pieces to build one.
+        app_url = "https://app.example.com"
 
     monkeypatch.setattr(send_emails, "Settings", _S)
     monkeypatch.setattr(send_emails, "service_client", lambda settings: object())

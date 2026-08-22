@@ -214,3 +214,62 @@ def test_dynamic_field_lists_are_checked_too() -> None:
     imply coverage, the list itself is checked directly."""
     for field in FILTER_FIELDS:
         assert field in LEGAL, f"FILTER_FIELDS names {field!r}, which is not a profile key"
+
+
+# ── The bypass ─────────────────────────────────────────────────────────────
+
+
+def test_nothing_outside_the_repository_writes_to_profiles_directly() -> None:
+    """`profile_to_db` raises on unknown keys. A raw client goes around it.
+
+    The fifth instance of the signature-mismatch class, and the first where the
+    BYPASS is how it got past the guard built for exactly this: the unsubscribe
+    route's first draft did
+
+        client.table("profiles").update({"email_unsubscribed_all": True})
+
+    — a column that does not exist. Postgres would have rejected it, the
+    handler's `except` would have swallowed it, and somebody who unsubscribed
+    would have kept receiving mail.
+
+    So the rule is structural rather than remembered: `profiles` is written
+    through `ProfileRepository`, which translates and refuses. Reads are
+    allowed — the risk is a write with a name nothing validates.
+
+    `services/repository.py` is exempt because it IS the repository.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    offenders: list[str] = []
+    checked = 0
+
+    for path in sorted(src.rglob("*.py")):
+        if path.name == "repository.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # `<x>.table("profiles").<something>(...)` where something writes.
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"update", "insert", "upsert", "delete"}:
+                continue
+            inner = node.func.value
+            while isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute):
+                if (
+                    inner.func.attr == "table"
+                    and inner.args
+                    and isinstance(inner.args[0], ast.Constant)
+                ):
+                    checked += 1
+                    if inner.args[0].value == "profiles":
+                        offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
+                    break
+                inner = inner.func.value
+
+    assert checked > 0, "no table writes found at all — this guard would prove nothing"
+    assert offenders == [], (
+        "a raw client write to `profiles` bypasses `profile_to_db`, which is the "
+        f"only thing that refuses an unknown column name: {offenders}"
+    )

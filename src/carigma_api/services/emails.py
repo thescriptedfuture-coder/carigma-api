@@ -28,11 +28,12 @@ Every rendered email passes through `assert_no_guilt` before it can be sent.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Protocol
 
+from carigma_api.services.unsubscribe import link as unsubscribe_link
 from carigma_api.services.weekly import assert_no_guilt
 
 logger = logging.getLogger(__name__)
@@ -79,12 +80,15 @@ class SendStatus(StrEnum):
     #: The user turned this off, or unsubscribed.
     UNSUBSCRIBED = "unsubscribed"
     DRY_RUN = "dry_run"
+    #: A marketing email we could not put an unsubscribe link in, so we did not
+    #: send it. See `send()` — refusing is the safe direction.
+    NO_UNSUBSCRIBE_LINK = "no_unsubscribe_link"
 
     @property
     def is_problem(self) -> bool:
         """Only a genuine failure is a problem. Skips and duplicates are the
         system working."""
-        return self is SendStatus.FAILED
+        return self in (SendStatus.FAILED, SendStatus.NO_UNSUBSCRIBE_LINK)
 
 
 @dataclass(frozen=True)
@@ -312,6 +316,8 @@ def send(
     prefs: Preferences,
     dry_run: bool = False,
     claim_as: str | None = None,
+    service_key: str = "",
+    app_url: str = "",
 ) -> SendOutcome:
     """The one path from a built email to an actually-sent one.
 
@@ -333,6 +339,40 @@ def send(
             detail="nothing to report",
         )
         return SendOutcome(SendStatus.SKIPPED, "Nothing real happened — no email sent.")
+
+    # Marketing mail carries an unsubscribe link, or it does not go.
+    #
+    # Until now NOTHING did — every proactive email V2 sent was unsubscribe-less
+    # marketing mail. That is the compliance half of the public unsubscribe
+    # route, and the route existing does not help anyone who never receives a
+    # link to it.
+    #
+    # Built HERE rather than in each builder because this is the one path from
+    # a built email to a sent one: a sixth email type cannot forget, and there
+    # is no "I'll add the footer later" state that still sends.
+    #
+    # Refusing rather than sending without it is the safe direction. A
+    # misconfigured deploy stops mailing instead of mailing unlawfully — the
+    # same shape as JSEARCH_DAILY_CAP producing a question rather than a bill.
+    if email is not None and email_type.is_marketing:
+        try:
+            footer_link = unsubscribe_link(user_id, service_key=service_key, app_url=app_url)
+        except Exception:
+            logger.error(
+                "REFUSING to send %s to %s: no unsubscribe link could be built. "
+                "Marketing mail without one is not something we send.",
+                email_type,
+                recipient,
+            )
+            log.record(
+                email,
+                recipient=recipient,
+                email_type=str(email_type),
+                status=str(SendStatus.NO_UNSUBSCRIBE_LINK),
+                detail="no signing key or app url",
+            )
+            return SendOutcome(SendStatus.NO_UNSUBSCRIBE_LINK, "No unsubscribe link — not sent.")
+        email = replace(email, body=email.body.rstrip() + "\n\n" + footer(footer_link))
 
     if not prefs.allows(email_type):
         log.record(
@@ -433,6 +473,20 @@ def outranks(a: EmailType, b: EmailType) -> bool:
     if a not in PROACTIVE_ORDER or b not in PROACTIVE_ORDER:
         raise ValueError(f"not a proactive email type: {a if a not in PROACTIVE_ORDER else b}")
     return PROACTIVE_ORDER.index(a) < PROACTIVE_ORDER.index(b)
+
+
+def footer(link: str) -> str:
+    """One line, plain, and the link is the whole affordance.
+
+    No "we're sad to see you go" and no confirmation step in the copy — the
+    route is one click by design, and asking someone to reconsider on the way
+    out is the dark pattern this product does not do.
+    """
+    return (
+        "—\n"
+        f"Stop these emails: {link}\n"
+        "Receipts and anything you ask us for directly are unaffected."
+    )
 
 
 # ── Period keys ────────────────────────────────────────────────────────────
