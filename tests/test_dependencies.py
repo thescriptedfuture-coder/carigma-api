@@ -162,3 +162,28 @@ def test_the_running_interpreter_matches_the_pin() -> None:
     pinned = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
     running = f"{sys.version_info.major}.{sys.version_info.minor}"
     assert running == pinned, f"tests are running on {running}, the repo pins {pinned}"
+
+
+def test_every_dependency_has_an_upper_bound() -> None:
+    """No dependency may accept a major version nobody has run.
+
+    A Render cron build pulled `anthropic 1.0.0` five days after the API build
+    pulled `0.122.0` — same spec, `>=0.40`, no ceiling. Three environments ran
+    three versions and none matched the test suite.
+
+    Same class as Render selecting Python 3.14: an unbounded declaration is a
+    standing agreement to accept an interface nobody has seen. Sixteen
+    dependencies had no ceiling; `anthropic` was just the one that moved first.
+    """
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = data["project"]
+    specs = list(project.get("dependencies", []))
+    for group in project.get("optional-dependencies", {}).values():
+        specs.extend(group)
+
+    assert specs, "no dependencies found — this guard would prove nothing"
+
+    unbounded = [s for s in specs if not any(op in s for op in ("<", "==", "~="))]
+    assert unbounded == [], (
+        f"these accept any future major version, including one nobody has run: {unbounded}"
+    )

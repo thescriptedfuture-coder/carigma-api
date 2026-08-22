@@ -17,17 +17,39 @@ description = "Carigma V2 API — FastAPI service wrapping the Carigma career-in
 #                      fails at build rather than at runtime.
 requires-python = ">=3.11,<3.13"
 
+# ── Ceilings ───────────────────────────────────────────────────────────────
+#
+# EVERY dependency has an upper bound, and none of them did until a Render cron
+# build pulled `anthropic 1.0.0` five days after the API build pulled `0.122.0`.
+# Three environments — local, API, cron — ran three different versions of the
+# same SDK, and none matched what the test suite had verified.
+#
+# Same class as Render choosing Python 3.14: an unbounded declaration lets a
+# deploy differ from everything that was checked, and the difference only shows
+# up when it breaks. A major version is precisely where a library is entitled
+# to change its interface, so `>=x` with no ceiling is a standing agreement to
+# accept an interface we have never seen.
+#
+# The bound is the next MAJOR above what is installed and verified — except for
+# packages still below 1.0, where the minor is the breaking boundary, so the
+# bound is the next minor.
+#
+# `anthropic` was raised to `>=1.0` rather than capped at `<1`: 1.0 was checked
+# symbol-by-symbol against everything we call (see
+# `tests/test_anthropic_surface.py`) and the cron already runs it. Converging on
+# the verified version beats pinning two services apart.
+
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "pyjwt[crypto]>=2.9",
-    "httpx>=0.27",
-    "python-multipart>=0.0.12",
+    "fastapi>=0.115,<0.200",
+    "uvicorn[standard]>=0.32,<0.60",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "pyjwt[crypto]>=2.9,<3",
+    "httpx>=0.27,<0.30",
+    "python-multipart>=0.0.12,<0.1",
     # Payments are BUILT but dormant (P5). The SDK ships now so the path is
     # real code rather than a sketch to be written under time pressure later.
-    "razorpay>=2.0",
+    "razorpay>=2.0,<3",
     # Supabase and Anthropic were BOTH undeclared until the first container
     # deploy. They worked locally because the venv had them from earlier work;
     # a container installs only what is declared. `supabase` crashed at
@@ -36,21 +58,21 @@ dependencies = [
     #
     # `tests/test_dependencies.py` now walks every import and fails on any
     # that pyproject does not declare.
-    "supabase>=2.9",
-    "anthropic>=0.40",
+    "supabase>=2.9,<3",
+    "anthropic>=1.0,<2",
     # Onboarding extraction. Same libraries V1 uses, deliberately: the parsing
     # is the IP, and a different PDF library extracts subtly different text,
     # which would change what the analyst sees for the same file.
-    "pdfplumber>=0.11",
-    "python-docx>=1.1",
+    "pdfplumber>=0.11,<0.13",
+    "python-docx>=1.1,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.7",
-    "mypy>=1.13",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.7,<0.20",
+    "mypy>=1.13,<3",
 ]
 
 [build-system]
