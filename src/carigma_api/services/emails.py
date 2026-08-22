@@ -331,13 +331,24 @@ def send(
     4. **Dry run** → print, claim nothing, send nothing.
     """
     if email is None:
-        log.record(
-            None,
-            recipient=recipient,
-            email_type=str(email_type),
-            status=str(SendStatus.SKIPPED),
-            detail="nothing to report",
-        )
+        # A DRY RUN WRITES NOTHING, including this.
+        #
+        # The skip record came before the dry-run check, so `--dry-run` on a
+        # quiet day wrote a skip row per user — twelve of them, describing a
+        # run that never happened. Repeated dry runs accumulate them, and
+        # anybody later counting skips to reason about behaviour would be
+        # counting rehearsals as events.
+        #
+        # "What would we send?" must be free to ask. Same rule as the referral
+        # producer being read-only.
+        if not dry_run:
+            log.record(
+                None,
+                recipient=recipient,
+                email_type=str(email_type),
+                status=str(SendStatus.SKIPPED),
+                detail="nothing to report",
+            )
         return SendOutcome(SendStatus.SKIPPED, "Nothing real happened — no email sent.")
 
     # Marketing mail carries an unsubscribe link, or it does not go.

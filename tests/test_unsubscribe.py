@@ -389,3 +389,43 @@ def test_a_receipt_needs_no_footer() -> None:
 
     assert outcome.status is SendStatus.SENT
     assert "Stop these emails" not in sent[0].body
+
+
+def test_a_dry_run_writes_nothing_at_all_on_a_quiet_day() -> None:
+    """ "What would we send?" must be free to ask.
+
+    The skip record came before the dry-run check, so `--dry-run` on a quiet
+    day wrote a skip row per user — twelve of them, describing a run that never
+    happened. Found by actually running it, not by reading it.
+    """
+    from carigma_api.services.emails import EmailType, Preferences, SendStatus, send
+
+    written: list[Any] = []
+
+    class Log:
+        def record(self, *_a: Any, **kw: Any) -> None:
+            written.append(kw)
+
+        def claim_period(self, *_a: Any, **_k: Any) -> bool:
+            return True
+
+    class Mailer:
+        def send(self, email: Any) -> None:
+            raise AssertionError("a dry run must not send")
+
+    outcome = send(
+        None,  # nothing to say
+        mailer=Mailer(),
+        log=Log(),
+        user_id=USER,
+        recipient="a@b.com",
+        email_type=EmailType.DAILY_BRIEF,
+        period_key="2026-08-17",
+        prefs=Preferences(),
+        dry_run=True,
+        service_key=KEY,
+        app_url="https://app.example.com",
+    )
+
+    assert outcome.status is SendStatus.SKIPPED
+    assert written == [], "a dry run recorded a skip that never happened"

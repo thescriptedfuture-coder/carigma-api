@@ -8,9 +8,23 @@ never suppresses the real send that follows. It is the default in any
 environment where SMTP is not configured, because a cron that silently does
 nothing is worse than one that says it would have.
 
-Scheduling (Render Cron, both IST):
-    daily   — 08:30 IST  =>  `0 3 * * *`   UTC
-    weekly  — 18:00 IST  =>  `30 12 * * 0` UTC
+Scheduling (Render Cron Jobs, IST times, cron expressed in UTC):
+
+    daily         08:30 IST  Mon-Sun   `0 3 * * *`
+    weekly        18:00 IST  Sunday    `30 12 * * 0`
+    reengagement  10:00 IST  Wednesday `30 4 * * 3`
+    sweep         09:00 IST  Monday    `30 3 * * 1`
+
+**Order matters on Sunday/Monday.** `weekly` proposes next week's contract on
+Sunday evening; `sweep` auto-adopts anything still undecided after its grace
+window. Running sweep BEFORE the proposal would adopt a week nobody had been
+shown. Monday morning is comfortably after Sunday evening, and the sweep's own
+`GRACE` makes it correct regardless — but the gap is deliberate, not luck.
+
+`reengagement` is midweek on purpose: a lapsed-user email landing beside the
+daily brief or the Sunday review would be two proactive emails in one day,
+which the shared `DAILY_SLOT` would refuse anyway. Scheduling it apart means
+the ceiling never has to.
 """
 
 from __future__ import annotations

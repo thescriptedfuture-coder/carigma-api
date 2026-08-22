@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# Run anything in this project with THIS project's interpreter.
+#
+#     ./run emails daily --dry-run
+#     ./run emails weekly --dry-run
+#     ./run test
+#     ./run gates
+#     ./run python -c "import carigma_api; print('ok')"
+#
+# ## Why this exists
+#
+# A dry run failed with `ModuleNotFoundError: No module named
+# 'pydantic_settings'` — from V1's venv, which is a different project two
+# directories up. Nothing was broken; the wrong interpreter was active.
+#
+# Knowing which venv is correct is not something anyone should have to hold in
+# their head, and "activate the right one first" is an instruction that works
+# until the day it doesn't. This picks it.
+#
+# It also CREATES the venv if it is missing, so a fresh clone runs the same
+# command as a machine that has been here for months.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here"
+
+# Windows puts it in Scripts/, everything else in bin/.
+if [ -x ".venv/Scripts/python.exe" ]; then
+  py=".venv/Scripts/python.exe"
+elif [ -x ".venv/bin/python" ]; then
+  py=".venv/bin/python"
+else
+  echo "No venv here yet — creating one from $(cat .python-version 2>/dev/null || echo 'the default python')."
+  # `python -m venv` uses whatever python is on PATH. `requires-python` in
+  # pyproject then REFUSES the install if that is the wrong version, so a bad
+  # interpreter fails here with a clear message rather than at runtime with a
+  # missing wheel.
+  python -m venv .venv
+  if [ -x ".venv/Scripts/python.exe" ]; then py=".venv/Scripts/python.exe"; else py=".venv/bin/python"; fi
+  "$py" -m pip install --quiet --upgrade pip
+  # EDITABLE, so src/ edits take effect without reinstalling — the whole point
+  # of a local environment.
+  "$py" -m pip install --quiet -e ".[dev]"
+  echo "Ready."
+fi
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  emails)  exec "$py" scripts/send_emails.py "$@" ;;
+  test)    exec "$py" -m pytest "$@" ;;
+  gates)   exec bash scripts/gates.sh "$@" ;;
+  python)  exec "$py" "$@" ;;
+  pip)     exec "$py" -m pip "$@" ;;
+  "")
+    echo "Usage: ./run {emails|test|gates|python|pip} ..."
+    echo
+    echo "  ./run emails daily --dry-run     what today's brief would say"
+    echo "  ./run emails weekly --dry-run    what Sunday's review would say"
+    echo "  ./run gates                      everything that must pass"
+    exit 2
+    ;;
+  *)
+    # Anything else runs through the project interpreter too, so `./run
+    # scripts/measure_onboarding.py` works without a special case.
+    exec "$py" "$cmd" "$@"
+    ;;
+esac
