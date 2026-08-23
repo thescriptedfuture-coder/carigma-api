@@ -13,6 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from supabase import create_client
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
@@ -242,7 +243,11 @@ def put_email_preferences(
 
 
 @router.post("/auth/reset-password")
-def post_reset_password(body: ResetRequest, request: Request) -> dict[str, Any]:
+def post_reset_password(
+    body: ResetRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
     """Send a reset link. Deliberately unauthenticated, and rate limited.
 
     Answers identically whether or not the address is registered — confirming
@@ -255,9 +260,35 @@ def post_reset_password(body: ResetRequest, request: Request) -> dict[str, Any]:
     and no route called it.
     """
     enforce_public_rate_limit(request)
-    # Supabase sends the mail. Failures are logged, never surfaced, because a
-    # different response for a failed send is the same oracle by another route.
-    logger.info("password reset requested")
+
+    # ACTUALLY SEND IT.
+    #
+    # This route rate-limited, logged "password reset requested", and returned
+    # "a reset link is on its way" — while calling nothing. The comment said
+    # "Supabase sends the mail". Supabase was never asked.
+    #
+    # It hid because of its own best feature: the response is DELIBERATELY
+    # identical whether or not the address is registered, so the surface that
+    # would have revealed the gap is the one built to say nothing. A user who
+    # forgot their password waited for an email that did not exist.
+    #
+    # `redirect_to` is mandatory here, not optional. Supabase silently
+    # substitutes its global Site URL for anything it cannot match, and that
+    # Site URL is V1 — so a V2 reset link without this lands the user in a
+    # different application. `APP_URL` must be on the Supabase redirect
+    # allow-list or the same substitution happens anyway.
+    try:
+        client = create_client(settings.supabase_url, settings.supabase_anon_key)
+        client.auth.reset_password_for_email(
+            body.email,
+            {"redirect_to": f"{settings.app_url.rstrip('/')}/auth/reset"},
+        )
+    except Exception:
+        # Logged, never surfaced. A different response for a failed send is the
+        # same enumeration oracle by another route — and the log line is the
+        # only place this can be seen, so it says what it means.
+        logger.exception("PASSWORD RESET SEND FAILED — the user is waiting for an email")
+
     return reset_confirmation(body.email)
 
 
