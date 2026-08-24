@@ -179,6 +179,16 @@ def test_a_bucket_never_refills_past_its_capacity() -> None:
 
 # ── Idempotency replay ─────────────────────────────────────────────────────
 
+# Uuids, not labels. `agent_runs.id` and `.user_id` are `uuid` columns, and
+# `AgentRun` refuses anything else at construction — because for months these
+# very tests round-tripped rows containing `id="run_1"`, a value Postgres
+# rejects with a 400. The fixtures agreed with each other and with nothing else.
+U1 = "11111111-1111-1111-1111-111111111111"
+U2 = "22222222-2222-2222-2222-222222222222"
+RUN_1 = "aaaaaaaa-1111-4111-8111-000000000001"
+RUN_2 = "aaaaaaaa-1111-4111-8111-000000000002"
+RUN_9 = "aaaaaaaa-1111-4111-8111-000000000009"
+
 
 class FakeStore:
     def __init__(self, runs: dict[tuple[str, str], AgentRun] | None = None):
@@ -191,7 +201,7 @@ class FakeStore:
 
 
 def finished_run(agent: str = "profile", charged: int = 10) -> AgentRun:
-    run = AgentRun(id="run_1", user_id="u1", agent=agent, status=RunStatus.SUCCEEDED)
+    run = AgentRun(id=RUN_1, user_id=U1, agent=agent, status=RunStatus.SUCCEEDED)
     run.result = {"profileScore": 71}
     run.credits = CreditReceipt(charged, 90, "Profile Analyst run")
     run.finished_at = datetime.now(UTC)
@@ -200,20 +210,20 @@ def finished_run(agent: str = "profile", charged: int = 10) -> AgentRun:
 
 def test_no_key_means_no_replay_and_no_lookup() -> None:
     store = FakeStore()
-    assert replay_or_none(store, "u1", None, agent="profile") is None
+    assert replay_or_none(store, U1, None, agent="profile") is None
     assert store.lookups == [], "a lookup without a key is a wasted query"
 
 
 def test_an_unseen_key_starts_a_fresh_run() -> None:
-    assert replay_or_none(FakeStore(), "u1", "key-1", agent="profile") is None
+    assert replay_or_none(FakeStore(), U1, "key-1", agent="profile") is None
 
 
 def test_a_repeated_key_returns_the_original_run() -> None:
     """The double-tap on Generate."""
     original = finished_run()
-    store = FakeStore({("u1", "key-1"): original})
+    store = FakeStore({(U1, "key-1"): original})
 
-    replayed = replay_or_none(store, "u1", "key-1", agent="profile")
+    replayed = replay_or_none(store, U1, "key-1", agent="profile")
     assert replayed is original
 
 
@@ -234,26 +244,26 @@ def test_a_replay_still_carries_the_original_result() -> None:
 
 
 def test_one_users_key_is_never_another_users_replay() -> None:
-    store = FakeStore({("u1", "key-1"): finished_run()})
-    assert replay_or_none(store, "u2", "key-1", agent="profile") is None
+    store = FakeStore({(U1, "key-1"): finished_run()})
+    assert replay_or_none(store, U2, "key-1", agent="profile") is None
 
 
 def test_reusing_a_key_for_a_different_agent_is_an_error() -> None:
     """A key promises two requests are the same request. Answering with another
     agent's result would be worse than refusing."""
-    store = FakeStore({("u1", "key-1"): finished_run(agent="profile")})
+    store = FakeStore({(U1, "key-1"): finished_run(agent="profile")})
 
     with pytest.raises(IdempotencyConflict, match="profile"):
-        replay_or_none(store, "u1", "key-1", agent="jobs")
+        replay_or_none(store, U1, "key-1", agent="jobs")
 
 
 def test_an_in_flight_run_is_returned_rather_than_waited_on() -> None:
     """The client polls the run protocol anyway; blocking here would hold a
     connection open for the length of an agent run."""
-    running = AgentRun(id="run_2", user_id="u1", agent="jobs", status=RunStatus.RUNNING)
-    store = FakeStore({("u1", "key-2"): running})
+    running = AgentRun(id=RUN_2, user_id=U1, agent="jobs", status=RunStatus.RUNNING)
+    store = FakeStore({(U1, "key-2"): running})
 
-    replayed = replay_or_none(store, "u1", "key-2", agent="jobs")
+    replayed = replay_or_none(store, U1, "key-2", agent="jobs")
     assert replayed is running
     assert replayed.status is RunStatus.RUNNING
 
@@ -306,7 +316,7 @@ def test_a_run_round_trips_through_the_table() -> None:
     store.save(run)
 
     row = table.upserted[0]
-    assert row["id"] == "run_1"
+    assert row["id"] == RUN_1
     assert row["status"] == "succeeded"
     assert row["credits_charged"] == 10
     assert row["steps"][0]["count"] == 7
@@ -317,7 +327,7 @@ def test_the_idempotency_key_is_written_with_the_run() -> None:
     store = SupabaseRunStore(table)
     run = finished_run()
 
-    store.remember_idempotency("u1", "key-1", run.id)
+    store.remember_idempotency(U1, "key-1", run.id)
     store.save(run)
 
     assert table.upserted[0]["idempotency_key"] == "key-1"
@@ -335,8 +345,8 @@ def test_reading_a_run_back_restores_its_status_and_steps() -> None:
     table = FakeTable(
         [
             {
-                "id": "run_9",
-                "user_id": "u1",
+                "id": RUN_9,
+                "user_id": U1,
                 "agent": "jobs",
                 "status": "empty",
                 "steps": [{"step": "scan", "label": "Scanning", "status": "done", "count": 0}],
@@ -348,7 +358,7 @@ def test_reading_a_run_back_restores_its_status_and_steps() -> None:
             }
         ]
     )
-    run = SupabaseRunStore(table).get("run_9")
+    run = SupabaseRunStore(table).get(RUN_9)
 
     assert run is not None
     # `empty` is a first-class non-failure and must survive the round trip.
@@ -365,16 +375,16 @@ def test_a_persistence_failure_never_aborts_the_run() -> None:
 
 
 def test_a_failed_read_returns_none_rather_than_raising() -> None:
-    assert SupabaseRunStore(FakeTable(explode=True)).get("run_1") is None
-    assert SupabaseRunStore(FakeTable(explode=True)).find_by_idempotency_key("u1", "k") is None
+    assert SupabaseRunStore(FakeTable(explode=True)).get(RUN_1) is None
+    assert SupabaseRunStore(FakeTable(explode=True)).find_by_idempotency_key(U1, "k") is None
 
 
 def test_an_idempotency_lookup_is_scoped_to_the_user() -> None:
     table = FakeTable(
         [
             {
-                "id": "run_1",
-                "user_id": "u1",
+                "id": RUN_1,
+                "user_id": U1,
                 "agent": "profile",
                 "status": "succeeded",
                 "steps": [],
@@ -386,8 +396,8 @@ def test_an_idempotency_lookup_is_scoped_to_the_user() -> None:
     )
     store = SupabaseRunStore(table)
 
-    assert store.find_by_idempotency_key("u1", "key-1") is not None
-    assert store.find_by_idempotency_key("u2", "key-1") is None
+    assert store.find_by_idempotency_key(U1, "key-1") is not None
+    assert store.find_by_idempotency_key(U2, "key-1") is None
 
 
 # ── Wired into a real endpoint ─────────────────────────────────────────────
@@ -424,11 +434,11 @@ def test_the_rate_limit_fires_on_a_real_endpoint(
     """Sixth request in a burst gets a 429 with a usable Retry-After."""
     from carigma_api.routes import score as score_routes
     from tests.conftest import auth, make_token
+    from tests.run_fakes import RecordingRunStore
     from tests.test_score_endpoint import (  # type: ignore[attr-defined]
         FakeCredits,
         FakeProfiles,
         FakeScores,
-        _NullRunStore,
     )
 
     monkeypatch.setattr(
@@ -438,7 +448,7 @@ def test_the_rate_limit_fires_on_a_real_endpoint(
             FakeProfiles({"name": "Ravi"}),
             FakeScores(),
             FakeCredits(balance=1000),
-            _NullRunStore(),
+            RecordingRunStore(),
         ),
     )
     codes = [
@@ -459,11 +469,11 @@ def test_the_429_carries_a_retry_after_header_and_charges_nothing(
 ) -> None:
     from carigma_api.routes import score as score_routes
     from tests.conftest import auth, make_token
+    from tests.run_fakes import RecordingRunStore
     from tests.test_score_endpoint import (  # type: ignore[attr-defined]
         FakeCredits,
         FakeProfiles,
         FakeScores,
-        _NullRunStore,
     )
 
     credits = FakeCredits(balance=1000)
@@ -474,7 +484,7 @@ def test_the_429_carries_a_retry_after_header_and_charges_nothing(
             FakeProfiles({"name": "Ravi"}),
             FakeScores(),
             credits,
-            _NullRunStore(),
+            RecordingRunStore(),
         ),
     )
 
@@ -519,11 +529,11 @@ def test_the_limiter_test_no_longer_depends_on_being_fast(
     from carigma_api.services import ratelimit
     from carigma_api.services.ratelimit import AGENT_BURST
     from tests.conftest import auth, make_token
+    from tests.run_fakes import RecordingRunStore
     from tests.test_score_endpoint import (  # type: ignore[attr-defined]
         FakeCredits,
         FakeProfiles,
         FakeScores,
-        _NullRunStore,
     )
 
     monkeypatch.setattr(
@@ -533,7 +543,7 @@ def test_the_limiter_test_no_longer_depends_on_being_fast(
             FakeProfiles({"name": "Ravi"}),
             FakeScores(),
             FakeCredits(balance=1000),
-            _NullRunStore(),
+            RecordingRunStore(),
         ),
     )
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from carigma_api.services import credits as credits_service
 from carigma_api.services.ai import UpstreamError
@@ -71,6 +71,41 @@ class AgentRun:
     finished_at: datetime | None = None
     _events: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue, repr=False)
     _cancelled: bool = False
+
+    def __post_init__(self) -> None:
+        """Refuse an id the `agent_runs` table cannot hold.
+
+        `agent_runs.id` and `.user_id` are both `uuid`. For months `new_run`
+        produced `run_<hex>`, so **every insert was rejected with a 400** — and
+        because `SupabaseRunStore` documents its writes as best-effort, the
+        rejection was logged and the request returned 200. Nothing surfaced.
+
+        The check belongs HERE rather than in each store because the stores are
+        where the fakes are, and a fake is exactly the thing that cannot
+        refuse:
+
+            class _NullRunStore:
+                def save(self, run: object) -> None: ...
+
+        That is not a simplified store, it is an absent one. `InMemoryRunStore`
+        is the same absence with a dict in front — a dict accepts any string as
+        a key, so it can never disagree with Postgres about a type. **Guarding
+        the class instead means an unstorable run cannot be constructed at
+        all**, and every store, fake or real, inherits the refusal.
+
+        `user_id` is checked too. It has never been wrong — it comes from the
+        JWT `sub` — but it is the same column type reached by a different path,
+        and a guard scoped to the failure we happened to find is a guard for
+        the paths we remembered.
+        """
+        for label, value in (("id", self.id), ("user_id", self.user_id)):
+            try:
+                UUID(str(value))
+            except (ValueError, AttributeError, TypeError) as exc:
+                raise ValueError(
+                    f"AgentRun.{label} must be a UUID — agent_runs.{label} is a uuid "
+                    f"column and Postgres answers anything else with a 400. Got {value!r}."
+                ) from exc
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -238,7 +273,22 @@ def _finish(run: AgentRun, run_store: RunStore | None) -> None:
 
 
 def new_run(user_id: str, agent: str) -> AgentRun:
-    return AgentRun(id=f"run_{uuid4().hex}", user_id=user_id, agent=agent)
+    """A run id the `agent_runs` table can actually store.
+
+    This was `f"run_{uuid4().hex}"`, and `agent_runs.id` has been
+    `uuid primary key` since V2_001 — so **every insert was rejected with a
+    400, on every run, from the first day the table existed.**
+
+    Three components then disagreed: the score computed and persisted, the API
+    returned 200, and the run record did not exist. The 200 was correct —
+    `SupabaseRunStore` documents its writes as best-effort — but "best-effort"
+    covered a write that had never once succeeded.
+
+    The column is the right side. The schema declared uuid first, `user_id`
+    beside it is uuid, and **nothing anywhere parsed the prefix**: it was
+    decoration that cost a column type. No migration.
+    """
+    return AgentRun(id=str(uuid4()), user_id=user_id, agent=agent)
 
 
 def cancel(run: AgentRun) -> None:

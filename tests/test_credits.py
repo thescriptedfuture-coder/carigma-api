@@ -20,7 +20,11 @@ from carigma_api.services.ai import UpstreamError
 from carigma_api.services.credits import InsufficientCredits
 from carigma_api.services.runs import RunReporter, RunStatus
 
-USER = "user-1"
+# A real uuid, because `AgentRun` now refuses anything else: `agent_runs`
+# declares `id` and `user_id` as `uuid`, and for months the runs these tests
+# exercised were rejected by Postgres on every insert. Do not shorten this back
+# to a readable label — the readable label is what hid the bug.
+USER = "11111111-1111-1111-1111-111111111111"
 
 
 class FakeStore:

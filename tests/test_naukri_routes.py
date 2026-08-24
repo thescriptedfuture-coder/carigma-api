@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from carigma_api.routes import naukri as routes
 from carigma_api.services.naukri import CycleState
 from tests.conftest import auth, make_token
+from tests.run_fakes import RecordingRunStore
 
 # camelCase, because that is what `db_to_profile` hands the route. Reading
 # `linkedin_headline` here once produced "No headline on the profile yet" for
@@ -115,23 +116,11 @@ class FakeCredits:
         self.ledger.append((delta, reason))
 
 
-class _NullRunStore:
-    def save(self, run: object) -> None: ...
-
-    def get(self, run_id: str) -> None:
-        return None
-
-    def remember_idempotency(self, user_id: str, key: str, run_id: str) -> None: ...
-
-    def find_by_idempotency_key(self, user_id: str, key: str) -> None:
-        return None
-
-
 @pytest.fixture
 def wired(client: TestClient, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     db, profiles, creds = FakeDB(), FakeProfiles(), FakeCredits()
     monkeypatch.setattr(
-        routes, "_deps", lambda request, settings: (db, profiles, creds, _NullRunStore())
+        routes, "_deps", lambda request, settings: (db, profiles, creds, RecordingRunStore())
     )
     return client, db, profiles, creds
 
