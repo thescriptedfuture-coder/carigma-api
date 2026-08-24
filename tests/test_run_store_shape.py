@@ -37,54 +37,28 @@ checked somewhere the fake is not involved.**
 
 A list of uuid columns copied into this file is a second copy of the schema,
 and a second copy is a second thing to be wrong — silently, in the direction of
-passing. So the DDL is parsed out of `migrations/`, and the block is FOUND by
-searching every migration rather than by naming a file: the first draft of this
-guard hardcoded `V2_001_core.sql`, which does not exist. That returned an empty
-column set, `parametrize` produced zero cases, and the real check disappeared
-while the file still looked like a guard.
+passing. The DDL is parsed by `tests/schema.py`, which reads BOTH repositories:
+V2 created `agent_runs`, but most tables V2 writes to are V1's and are only
+ALTERed here.
+
+Two drafts of that parser were themselves vacuous — one named a migration file
+that does not exist, one let ALTERs from an earlier file suppress the CREATE
+block. Both returned an empty or truncated column set, which makes every check
+built on them pass on anything. Hence `SOURCES_FOUND` and the precondition
+test below: **a schema reader that finds nothing must fail loudly, because
+finding nothing is indistinguishable from finding no problems.**
 """
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from carigma_api.services import runs as runs_service
 from carigma_api.services.run_store import _TABLE, _to_row
-
-MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
-
-#: Words that open a table-level clause rather than name a column.
-_NOT_COLUMNS = {"constraint", "primary", "unique", "check", "foreign", "exclude", "like"}
-
-
-def ddl() -> str:
-    """The body of `create table ... agent_runs (...)`, from whichever
-    migration declares it. Empty string if no migration does."""
-    pattern = re.compile(rf"create\s+table[^(]*\bpublic\.{_TABLE}\s*\((.*?)\n\s*\);", re.S | re.I)
-    for path in sorted(MIGRATIONS.glob("*.sql")):
-        found = pattern.search(path.read_text(encoding="utf-8"))
-        if found:
-            return found.group(1)
-    return ""
-
-
-def columns() -> dict[str, str]:
-    """`{name: type}` for every column in the declaration."""
-    out: dict[str, str] = {}
-    for line in ddl().splitlines():
-        found = re.match(r"\s{2,}(\w+)\s+(\w+)", line)
-        if found and found.group(1).lower() not in _NOT_COLUMNS:
-            out[found.group(1)] = found.group(2).lower()
-    return out
-
-
-def uuid_columns() -> list[str]:
-    return sorted(name for name, kind in columns().items() if kind == "uuid")
+from tests.schema import SOURCES_FOUND, columns_typed, types_of
 
 
 def a_run() -> runs_service.AgentRun:
@@ -97,14 +71,15 @@ def test_the_declaration_says_what_we_think_it_says() -> None:
     """The precondition, and it earns its place: with it absent, a wrong path
     or a changed DDL style empties every check below and the file still
     passes."""
-    found = columns()
-    assert found, f"no `create table public.{_TABLE}` found under {MIGRATIONS.name}/"
+    found = types_of(_TABLE)
+    assert SOURCES_FOUND, "no migration files found — every check below would be vacuous"
+    assert found, f"no `create table public.{_TABLE}` found in any migration"
     assert found.get("id") == "uuid"
     assert found.get("user_id") == "uuid"
     assert "status" in found and "idempotency_key" in found
 
 
-@pytest.mark.parametrize("column", uuid_columns())
+@pytest.mark.parametrize("column", columns_typed(_TABLE, "uuid"))
 def test_every_uuid_column_receives_something_postgres_accepts(column: str) -> None:
     """`UUID(value)` raises on exactly what Postgres rejects.
 
@@ -154,7 +129,7 @@ def test_the_row_declares_no_column_the_table_lacks() -> None:
     PostgREST rejects an unknown column with a 400 the same way it rejects a
     bad uuid, and `SupabaseRunStore` logs both and returns.
     """
-    declared = set(columns())
+    declared = set(types_of(_TABLE))
     assert declared, "no columns parsed — this assertion would prove nothing"
 
     unknown = sorted(set(_to_row(a_run(), None)) - declared)

@@ -40,7 +40,7 @@ from uuid import UUID
 
 from carigma_api.services.run_store import _TABLE, _to_row
 from carigma_api.services.runs import AgentRun
-from tests.schema import columns_of, has_alter, not_null_of, uuid_columns_of
+from tests.schema import SOURCES_FOUND, columns_of, columns_typed, not_null_of
 
 
 class SchemaViolation(AssertionError):
@@ -53,21 +53,18 @@ class SchemaViolation(AssertionError):
 
 
 def check_row(row: dict[str, object]) -> None:
+    assert SOURCES_FOUND, "no migration files found — this check would pass on any row"
     declared = columns_of(_TABLE)
     assert declared, (
-        f"no `create table public.{_TABLE}` found in migrations/ — this check "
+        f"no `create table public.{_TABLE}` found in any migration — this check "
         "would pass on any row at all"
     )
-    assert not has_alter(_TABLE), (
-        f"public.{_TABLE} is altered by a later migration; the parsed column "
-        "list may no longer match the live table"
-    )
 
-    unknown = sorted(set(row) - set(declared))
+    unknown = sorted(set(row) - declared)
     if unknown:
         raise SchemaViolation(f"{_TABLE} has no column(s) {unknown}; PostgREST answers 400")
 
-    for column in uuid_columns_of(_TABLE):
+    for column in columns_typed(_TABLE, "uuid"):
         value = row.get(column)
         if value is None:
             continue

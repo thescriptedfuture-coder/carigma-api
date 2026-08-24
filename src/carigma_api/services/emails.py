@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -501,6 +501,21 @@ def footer(link: str) -> str:
 
 
 # ── Period keys ────────────────────────────────────────────────────────────
+#
+# Both of these end up in `digest_log.sent_on`, which is `date not null`. That
+# is the whole constraint on their shape, and it was violated for months:
+# `weekly_key` returned `"2026-W34"`, Postgres answers that with
+#
+#     ERROR: 22007: invalid input syntax for type date: "2026-W34"
+#
+# and `claim_period` catches every exception and returns False — which means
+# "already sent". **So every weekly review and every re-engagement digest was
+# claimed, refused, and reported as a benign duplicate.** Nothing errored,
+# nothing sent, and a dry run could not show it because `send` returns before
+# it claims.
+#
+# `tests/test_period_keys.py` now checks the output of every function here
+# against the column it lands in.
 
 
 def daily_key(day: date) -> str:
@@ -508,10 +523,25 @@ def daily_key(day: date) -> str:
 
 
 def weekly_key(day: date) -> str:
-    """ISO week, so a Sunday-evening job and a Monday-morning retry of the same
-    week collapse to one send rather than two."""
-    iso = day.isocalendar()
-    return f"{iso.year}-W{iso.week:02d}"
+    """The most recent Sunday on or before `day`, as an ISO date.
+
+    Two jobs, and the old implementation did neither.
+
+    **Storable.** `date.fromisoformat` accepts this and so does Postgres. An
+    ISO week string is not a date in any format the column understands.
+
+    **Idempotent across the Sunday/Monday boundary.** The point of a weekly key
+    is that a Sunday-evening send and a Monday-morning retry of the same run
+    collapse to one email. An ISO WEEK number cannot do that — ISO weeks END on
+    Sunday, so Sunday is `W34` and the Monday after it is `W35`, and the retry
+    would have sent a second review. The old docstring claimed this property;
+    it never had it.
+
+    Anchoring to the Sunday gives it: Sunday returns itself, and the following
+    Monday returns the same Sunday. `weekday()` is Mon=0 … Sun=6, so
+    `(weekday + 1) % 7` is the number of days back to that Sunday.
+    """
+    return (day - timedelta(days=(day.weekday() + 1) % 7)).isoformat()
 
 
 # ── Run summary ────────────────────────────────────────────────────────────

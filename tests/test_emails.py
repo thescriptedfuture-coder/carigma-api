@@ -359,21 +359,36 @@ def test_the_daily_key_is_the_date() -> None:
 
 
 def test_a_sunday_job_and_a_monday_retry_share_a_weekly_key() -> None:
-    """ISO weeks run Monday–Sunday, so a Sunday-evening send and its Monday
-    retry must NOT collapse — they are different ISO weeks. This pins the
-    actual behaviour so nobody assumes otherwise."""
-    sunday = weekly_key(date(2026, 8, 9))
-    monday = weekly_key(date(2026, 8, 10))
-    assert sunday != monday
+    """The whole point of a weekly key, and it took three goes to get here.
 
-    saturday = weekly_key(date(2026, 8, 8))
-    assert saturday == sunday, "the same ISO week must share a key"
+    `weekly_key` used to return an ISO week number, and its docstring said this
+    property held. It did not: ISO weeks END on Sunday, so the Sunday send was
+    W34 and the Monday retry was W35, and the retry sent a second review.
+
+    **This test used to assert the opposite** — "must NOT collapse — they are
+    different ISO weeks. This pins the actual behaviour so nobody assumes
+    otherwise." So the function claimed one thing, the test pinned the other,
+    and both were green. A test written to describe behaviour it has not
+    questioned records the bug as the specification.
+
+    (The value was also unstorable — see `tests/test_period_keys.py`.)
+    """
+    sunday = date(2026, 8, 9)
+    assert sunday.strftime("%A") == "Sunday"
+
+    assert weekly_key(sunday) == weekly_key(date(2026, 8, 10)), "Monday retry, same claim"
+    assert weekly_key(date(2026, 8, 8)) != weekly_key(sunday), "the Saturday before is prior week"
+    assert weekly_key(sunday) == "2026-08-09"
 
 
 def test_the_weekly_key_survives_a_year_boundary() -> None:
-    """31 Dec 2026 is ISO week 53 of 2026; 1 Jan 2027 is ISO week 53 of 2026
-    too. Using the calendar year here would split one week across two keys."""
+    """31 Dec 2026 and 1 Jan 2027 fall in one week and must share one key.
+
+    Anchoring to the week's Sunday gets this for free, and without the ISO
+    year/week mismatch that made the old key read `2026-W53` in January.
+    """
     assert weekly_key(date(2026, 12, 31)) == weekly_key(date(2027, 1, 1))
+    assert weekly_key(date(2027, 1, 1)) == "2026-12-27"
 
 
 # ── The run summary ────────────────────────────────────────────────────────
