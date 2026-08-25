@@ -224,6 +224,8 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
 
     db = service_client(settings)
     now = datetime.now(UTC)
+    audience = mail.Audience.from_settings(settings.email_audience, settings.email_allowlist)
+    logger.info("reengagement audience: %s", audience.describe)
 
     # ── 1. Is there anything true to say? ──────────────────────────────────
     # Asked ONCE, before any recipient is considered. `gist_for_email` returns
@@ -289,6 +291,7 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
             claim_as=triggers.DAILY_SLOT,
             service_key=settings.supabase_service_key,
             app_url=settings.app_url,
+            audience=audience,
             prefs=_prefs_for_user(db, sequence.user_id),
             dry_run=dry_run,
         )
@@ -351,6 +354,8 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
     db = service_client(settings)
     mailer = SmtpMailer(settings)
     log = SupabaseSendLog(db)
+    audience = mail.Audience.from_settings(settings.email_audience, settings.email_allowlist)
+    logger.info("audience: %s", audience.describe)
 
     today = datetime.now(UTC).date()
     period = mail.daily_key(today) if kind == "daily" else mail.weekly_key(today)
@@ -388,6 +393,7 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
             claim_as=triggers.DAILY_SLOT,
             service_key=settings.supabase_service_key,
             app_url=settings.app_url,
+            audience=audience,
         )
         summary.record(outcome, row["email"])
 

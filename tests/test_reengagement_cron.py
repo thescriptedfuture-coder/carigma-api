@@ -96,6 +96,11 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         smtp_from = "Carigma <bot@example.com>"
         supabase_url = "https://example.supabase.co"
         supabase_service_key = "sb_secret_test"
+        # These tests are about the sequence logic, so the deploy-level audience
+        # gate is opened explicitly. Saying so beats a default: the gate admits
+        # nobody unless someone decides otherwise, and that is the point of it.
+        email_audience = "everyone"
+        email_allowlist = ""
         # The lapsed digest is marketing mail, so it now carries an unsubscribe
         # footer — and is REFUSED without the pieces to build one.
         app_url = "https://app.example.com"

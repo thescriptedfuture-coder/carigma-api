@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from carigma_api.services.emails import (
+    Audience,
     DailyFacts,
     Email,
     EmailType,
@@ -85,6 +86,14 @@ def deliver(email: Email | None, **over: Any) -> tuple[SendOutcome, FakeMailer, 
         # them deliberately.
         service_key=over.pop("service_key", "test-signing-key"),
         app_url=over.pop("app_url", "https://app.example.com"),
+        # The deploy-level audience gate, opened explicitly.
+        #
+        # `send()` admits NOBODY when no audience is passed, which is the whole
+        # design: a caller that forgets sends nothing rather than everything.
+        # Saying `unrestricted()` here is the visible counterpart — these tests
+        # are about send()'s own logic, not about who this deploy may write to,
+        # and a default would hide the distinction they depend on.
+        audience=over.pop("audience", Audience.unrestricted()),
         **over,
     )
     return outcome, mailer, log
