@@ -10,8 +10,11 @@ would test nothing worth testing.
 from __future__ import annotations
 
 import json
+import sys
+import tempfile
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -236,3 +239,67 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if os.environ.get("UPDATE_CONTRACT_KEYS") and len(_contract_recorder.RECORDED) > 20:
         _contract_recorder.write_manifest()
+
+
+# ── Every file this suite opens, outside its own repository ────────────────
+#
+# The first CI run went red on both repositories for the same reason: each
+# read a file the other repo owned. `carigma-api` read V1's DDL from the parent
+# tree; `carigma-web` read `contract_keys.json` from its sibling. Locally both
+# are there. `actions/checkout` fetches ONE repository, so both threw.
+#
+# A textual scan for `parents[N]` and `'../..'` was tried first and fired on
+# correct code — `Path(inspect.getfile(mail)).parents[3]` lands ON the root, not
+# above it — so it was replaced with this, which MEASURES rather than infers.
+# An audit hook sees the path actually opened.
+#
+# `test_no_reads_outside_repo.py` reads the result.
+_ROOT = Path(__file__).resolve().parents[1]
+#: Not "another repository": the interpreter, the venv, scratch files, and
+#: per-user configuration. The last one matters — an SDK on this machine reads
+#: `AppData/Roaming/Anthropic/active_config` during the suite, which is a fact
+#: about the laptop and never happens in CI. A guard that fires on the
+#: environment rather than the code is a guard that gets deleted.
+_IGNORE = tuple(
+    str(Path(p).resolve())
+    for p in (
+        sys.prefix,
+        sys.base_prefix,
+        tempfile.gettempdir(),
+        Path.home() / "AppData",
+        Path.home() / ".config",
+        Path.home() / ".cache",
+    )
+)
+
+#: Absolute paths opened outside the repository, in open order.
+OUTSIDE_READS: list[str] = []
+
+
+def _audit(event: str, args: tuple) -> None:
+    if event != "open" or not args:
+        return
+    target = args[0]
+    if not isinstance(target, str):
+        return
+    try:
+        resolved = Path(target).resolve()
+    except (OSError, ValueError):
+        return
+    if resolved.is_relative_to(_ROOT):
+        return
+    text = str(resolved)
+    if any(text.startswith(prefix) for prefix in _IGNORE):
+        return
+    # Windows device paths are devices, not files: the null device shows up as
+    # an absolute path outside the repo and says nothing about what this code
+    # reads. Same for its POSIX spelling, so CI and a laptop agree.
+    if text.startswith("\\\\.") or text.lower() in ("/dev/null", "nul"):
+        return
+    # Anything the interpreter itself touches lives under one of the prefixes
+    # above; what is left is a file OUR code asked for.
+    if text not in OUTSIDE_READS:
+        OUTSIDE_READS.append(text)
+
+
+sys.addaudithook(_audit)
