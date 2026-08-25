@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Refuse the commit if the gates fail.
+#
+# Twice now a red commit went in because the gate result was discarded by the
+# shell — `gates.sh | tail -1 && git commit`, then `gates.sh | tail -2; git
+# commit`. Both times the rule against it was already written down. A rule you
+# have to remember at the exact moment you are least likely to is a rule that
+# will fail again, so this removes the remembering.
+#
+# Install:  git config core.hooksPath scripts/githooks
+# Skip:     git commit --no-verify   (deliberate, visible, and rare)
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ ! -x scripts/gates.sh ] && [ ! -f scripts/gates.sh ]; then
+    echo "pre-commit: scripts/gates.sh is missing — refusing rather than assuming it passed." >&2
+    exit 1
+fi
+
+echo "pre-commit: running the gates..."
+
+# NOT piped. The whole point is that the exit status reaches this script.
+if bash scripts/gates.sh; then
+    echo "pre-commit: gates passed."
+    exit 0
+fi
+
+cat >&2 <<'MSG'
+
+pre-commit: THE GATES FAILED — commit refused.
+
+Fix the failure, or `git commit --no-verify` if you genuinely mean to commit
+red. The point of this hook is that committing red is a decision someone makes
+out loud, not something a shell operator does quietly on your behalf.
+MSG
+exit 1

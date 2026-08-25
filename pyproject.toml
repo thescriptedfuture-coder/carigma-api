@@ -2,23 +2,77 @@
 name = "carigma-api"
 version = "0.1.0"
 description = "Carigma V2 API — FastAPI service wrapping the Carigma career-intelligence engine"
-requires-python = ">=3.11"
+# Render picked 3.14 on the first deploy, because nothing here said otherwise.
+# Everything has been tested on 3.11, and 3.14 is new enough that wheel
+# coverage is uneven — a library without a cp314 wheel compiles from source or
+# fails, which is a second unknown under an extraction path that already has
+# one.
+#
+# TWO declarations, doing different jobs:
+#   `.python-version`  SELECTS the interpreter. Render reads it, pyenv reads
+#                      it, and it is committed so it cannot drift per
+#                      environment the way a dashboard env var can.
+#   `requires-python`  REFUSES the wrong one. pip will not install into an
+#                      interpreter outside this range, so a mis-selection
+#                      fails at build rather than at runtime.
+requires-python = ">=3.11,<3.13"
+
+# ── Ceilings ───────────────────────────────────────────────────────────────
+#
+# EVERY dependency has an upper bound, and none of them did until a Render cron
+# build pulled `anthropic 1.0.0` five days after the API build pulled `0.122.0`.
+# Three environments — local, API, cron — ran three different versions of the
+# same SDK, and none matched what the test suite had verified.
+#
+# Same class as Render choosing Python 3.14: an unbounded declaration lets a
+# deploy differ from everything that was checked, and the difference only shows
+# up when it breaks. A major version is precisely where a library is entitled
+# to change its interface, so `>=x` with no ceiling is a standing agreement to
+# accept an interface we have never seen.
+#
+# The bound is the next MAJOR above what is installed and verified — except for
+# packages still below 1.0, where the minor is the breaking boundary, so the
+# bound is the next minor.
+#
+# `anthropic` was raised to `>=1.0` rather than capped at `<1`: 1.0 was checked
+# symbol-by-symbol against everything we call (see
+# `tests/test_anthropic_surface.py`) and the cron already runs it. Converging on
+# the verified version beats pinning two services apart.
+
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "pyjwt[crypto]>=2.9",
-    "httpx>=0.27",
-    "python-multipart>=0.0.12",
+    "fastapi>=0.115,<0.200",
+    "uvicorn[standard]>=0.32,<0.60",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "pyjwt[crypto]>=2.9,<3",
+    "httpx>=0.27,<0.30",
+    "python-multipart>=0.0.12,<0.1",
+    # Payments are BUILT but dormant (P5). The SDK ships now so the path is
+    # real code rather than a sketch to be written under time pressure later.
+    "razorpay>=2.0,<3",
+    # Supabase and Anthropic were BOTH undeclared until the first container
+    # deploy. They worked locally because the venv had them from earlier work;
+    # a container installs only what is declared. `supabase` crashed at
+    # startup. `anthropic` would have survived startup and crashed on the
+    # first extraction — which is to say, on the export session.
+    #
+    # `tests/test_dependencies.py` now walks every import and fails on any
+    # that pyproject does not declare.
+    "supabase>=2.9,<3",
+    "anthropic>=1.0,<2",
+    # Onboarding extraction. Same libraries V1 uses, deliberately: the parsing
+    # is the IP, and a different PDF library extracts subtly different text,
+    # which would change what the analyst sees for the same file.
+    "pdfplumber>=0.11,<0.13",
+    "python-docx>=1.1,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.7",
-    "mypy>=1.13",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.7,<0.20",
+    "mypy>=1.13,<3",
 ]
 
 [build-system]
@@ -65,6 +119,19 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# The Razorpay SDK ships no type stubs. Scoped to that one module so nothing
+# else silently loses type checking.
+[[tool.mypy.overrides]]
+module = ["razorpay.*"]
+ignore_missing_imports = true
+
+# Neither PDF library ships stubs. Scoped to the two modules, and both are
+# imported inside functions so a missing wheel is an extraction failure the
+# user is told about rather than an import error that takes the app down.
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "docx.*"]
+ignore_missing_imports = true
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
