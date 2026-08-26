@@ -45,6 +45,7 @@ from carigma_api.services.referrals import (
 )
 from tests.conftest import USER_ID, auth, make_token
 from tests.fake_supabase import FakeDB
+from tests.schema import _strip_comments
 
 OTHER = "00000000-0000-4000-8000-0000000000ff"
 
@@ -90,6 +91,7 @@ class PostgresLike(FakeDB):
             "referral_summary": self._summary,
             "referral_claim": self._claim,
             "referral_code_valid": self._code_valid,
+            "referral_activate_tx": self._activate_tx,
         }
 
     def table(self, name: str) -> Any:
@@ -152,6 +154,78 @@ class PostgresLike(FakeDB):
                 continue
             return [{"slot": slot, "state": str(State.PENDING)}]
         raise Raised("P0004")
+
+    def _activate_tx(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """V2_015: the flip and BOTH grants, together or not at all.
+
+        The thing this must model is not the arithmetic — it is the
+        **conditional** flip and the fact that nothing is written when it does
+        not win. The real bug was a sequence where the flip could succeed and
+        the grants not follow, so a fake that flips and grants unconditionally
+        would agree with the broken version as happily as the fixed one.
+        """
+        referred = str(params["p_referred_id"])
+        at = params["p_at"]
+
+        row = next(
+            (
+                r
+                for r in self.rows(REFERRALS)
+                if str(r.get("referred_id")) == referred
+                and str(r.get("state")) == str(State.PENDING)
+            ),
+            None,
+        )
+        if row is None:
+            # `update ... where state = 'pending'` affected no rows. Nothing
+            # below happens — that is the whole point of the transaction.
+            return []
+
+        row["state"] = str(State.ACTIVATED)
+        row["activated_at"] = at
+
+        for user, delta, kind, reason in (
+            (
+                str(row["referrer_id"]),
+                params["p_referrer_credits"],
+                params["p_referrer_kind"],
+                f"Referral activated ({referred[:8]})",
+            ),
+            (
+                referred,
+                params["p_referred_credits"],
+                params["p_referred_kind"],
+                "Welcome bonus from a referral",
+            ),
+        ):
+            existing = next((c for c in self.rows("credits") if str(c["user_id"]) == user), None)
+            balance = int(existing["balance"]) + delta if existing else delta
+            if existing:
+                existing["balance"] = balance
+                existing["updated_at"] = at
+            else:
+                self.table("credits").insert(
+                    {"user_id": user, "balance": balance, "updated_at": at}
+                ).execute()
+            self.table("credit_ledger").insert(
+                {
+                    "user_id": user,
+                    "delta": delta,
+                    "kind": kind,
+                    "reason": reason,
+                    "balance_after": balance,
+                    "created_at": at,
+                }
+            ).execute()
+
+        return [
+            {
+                "referrer_id": row["referrer_id"],
+                "slot": row["slot"],
+                "referrer_balance": 0,
+                "referred_balance": 0,
+            }
+        ]
 
 
 class FakeCredits:
@@ -279,8 +353,17 @@ def test_the_store_never_compares_a_count_to_the_cap() -> None:
 
 
 def _migration() -> str:
-    root = Path(store_mod.__file__).parents[3]
-    return (root / "migrations" / "V2_013_referral_access.sql").read_text(encoding="utf-8")
+    """Every referral migration, concatenated.
+
+    This read `V2_013_referral_access.sql` alone. `referral_activate_tx` landed
+    in V2_015, so a guard pinned to one filename would have declared it
+    undefined — and the fix for that would look like relaxing the guard rather
+    than widening it. Read the directory instead of naming a file.
+    """
+    migrations = Path(store_mod.__file__).parents[3] / "migrations"
+    files = sorted(migrations.glob("V2_*.sql"))
+    assert files, f"no migrations found under {migrations}"
+    return "\n".join(f.read_text(encoding="utf-8") for f in files)
 
 
 def test_the_fake_functions_match_the_migration() -> None:
@@ -297,27 +380,65 @@ def test_the_fake_functions_match_the_migration() -> None:
     assert called, "no rpc calls found - this guard would pass vacuously"
 
     for name in called:
-        assert f"function public.{name}(" in sql, f"{name} is called but not defined in V2_013"
+        assert f"function public.{name}(" in sql, f"{name} is called but no migration defines it"
 
     for param in set(re.findall(r'\.rpc\("\w+", \{"(\w+)"', source)):
         assert param in sql, f"{param} is passed but no function declares it"
 
 
-def test_activation_is_not_reachable_by_rpc() -> None:
+def test_activation_is_reachable_only_by_the_service_role() -> None:
     """The hole the other three functions could have opened.
 
     `referral_summary`, `referral_claim` and `referral_code_valid` are granted
-    to `authenticated` because RLS otherwise makes the surface impossible.
-    Activation must NOT join them: a function an authenticated user can execute
-    is one they can execute from a browser console, and that would mint 20
-    credits with no upload. The `Activation` type guards the Python call site;
-    a SQL grant would route straight around it.
+    to `authenticated`, because RLS otherwise makes the share surface
+    impossible. **Activation must never join them**: a function an
+    authenticated user can execute is one they can execute from a browser
+    console, and that would mint 70 credits with no upload. The `Activation`
+    type guards the Python call site; a SQL grant would route straight around
+    it.
+
+    This assertion used to be `"referral_activate" not in sql` — activation
+    happened in Python, so its absence from the SQL was the property. V2_015
+    moved it into a transaction, so the property changed shape: the danger was
+    never `security definer`, it was `authenticated`. Now the grant itself is
+    what gets checked, in both directions.
     """
     sql = _migration()
-    assert "referral_activate" not in sql
-    for line in sql.splitlines():
-        if line.strip().startswith("grant execute"):
-            assert "activate" not in line, f"activation granted over RPC: {line.strip()}"
+    assert "function public.referral_activate_tx(" in sql, "the function is gone"
+
+    # Split on `;`, not on newlines. A grant wraps across lines, and the first
+    # version of this read line-by-line and reported a correctly-granted
+    # function as "granted beyond service_role" — the same false alarm that got
+    # the textual out-of-repo scan deleted.
+    # Comments stripped BEFORE splitting: `sql.split(";")` otherwise hands each
+    # statement the comment block that precedes it, so `startswith("revoke")`
+    # is false for every revoke in the file and the check below passes by
+    # finding nothing.
+    statements = [" ".join(part.split()) for part in _strip_comments(sql).split(";")]
+    grants = [
+        stmt
+        for stmt in statements
+        if stmt.strip().startswith("grant execute") and "activate" in stmt
+    ]
+    assert grants, "referral_activate_tx is defined but granted to nobody — it cannot run"
+    # The GRANTEE, not the whole statement. Searching the statement for "public"
+    # matches `public.referral_activate_tx` — the schema, not the role — and
+    # reported a correctly-granted function as granted to the world. Third time
+    # in this session a substring stood in for a parse and fired on correct
+    # code; narrow the match until only the thing under test can satisfy it.
+    for stmt in grants:
+        grantees = {who.strip() for who in stmt.rsplit(" to ", 1)[-1].split(",")}
+        assert grantees == {"service_role"}, f"activation granted to {grantees}: {stmt}"
+
+    # And revoked explicitly rather than left to whatever the default is.
+    revokes = [
+        stmt for stmt in statements if stmt.strip().startswith("revoke") and "activate" in stmt
+    ]
+    for role in ("public", "anon", "authenticated"):
+        assert any(stmt.endswith(f"from {role}") for stmt in revokes), (
+            f"execute on referral_activate_tx is never revoked from {role} — the default "
+            "has changed before, so it is stated rather than assumed"
+        )
 
 
 # ── Codes ────────────────────────────────────────────────────────
@@ -438,42 +559,65 @@ def test_an_unrecognised_failure_is_not_reported_as_a_bad_code(db: PostgresLike)
 # ── Activation ────────────────────────────────────────────────
 
 
+def ledger(db: PostgresLike) -> list[tuple[str, int]]:
+    return [(str(r["user_id"]), int(r["delta"])) for r in db.rows("credit_ledger")]
+
+
 def test_activation_pays_both_sides_once(db: PostgresLike) -> None:
     code = seed_code(db)
     store(db).claim(code=code)
-    credits = FakeCredits()
 
-    grant = store(db).activate(activation_from_profile_upload(USER_ID), credits=credits)
+    grant = store(db).activate(activation_from_profile_upload(USER_ID))
 
     assert grant is not None
-    assert [(u, amount) for u, amount, _ in credits.grants] == [
-        (OTHER, REFERRER_CREDITS),
-        (USER_ID, REFERRED_CREDITS),
-    ]
+    assert ledger(db) == [(OTHER, REFERRER_CREDITS), (USER_ID, REFERRED_CREDITS)]
     assert db.rows(REFERRALS)[0]["state"] == str(State.ACTIVATED)
     assert db.rows(REFERRALS)[0]["activated_at"] is not None
 
 
-def test_activating_twice_pays_once(db: PostgresLike) -> None:
-    """Two uploads, or a retry. The conditional update decides."""
+def test_the_state_and_the_credits_move_together(db: PostgresLike) -> None:
+    """The window V2_015 closes.
+
+    Activation used to be three round trips: flip the state, grant the
+    referrer, grant the referred user. A failure after the flip left the row
+    saying `activated` with nobody paid — and **no retry could fix it**, since
+    `activate` returns early once it sees `activated`. A failure between the
+    two grants paid one side and never the other.
+
+    So the invariant is not "both grants happened" but "the state and the
+    credits agree". Anything else is somebody owed money with no way to ask.
+    """
     code = seed_code(db)
     store(db).claim(code=code)
-    credits = FakeCredits()
+    store(db).activate(activation_from_profile_upload(USER_ID))
 
-    first = store(db).activate(activation_from_profile_upload(USER_ID), credits=credits)
-    second = store(db).activate(activation_from_profile_upload(USER_ID), credits=credits)
+    activated = db.rows(REFERRALS)[0]["state"] == str(State.ACTIVATED)
+    paid = {str(r["user_id"]) for r in db.rows("credit_ledger")}
+
+    assert activated is (paid == {OTHER, USER_ID}), (
+        "the referral is marked activated but the two sides are not both paid"
+    )
+
+
+def test_activating_twice_pays_once(db: PostgresLike) -> None:
+    """Two uploads, or a retry. The conditional update inside the transaction
+    decides, and the loser writes nothing at all."""
+    code = seed_code(db)
+    store(db).claim(code=code)
+
+    first = store(db).activate(activation_from_profile_upload(USER_ID))
+    second = store(db).activate(activation_from_profile_upload(USER_ID))
 
     assert first is not None
     assert second is None
-    assert len(credits.grants) == 2, "two rows for the first activation, none for the second"
+    assert len(ledger(db)) == 2, "two rows for the first activation, none for the second"
 
 
 def test_an_upload_with_no_referral_is_not_an_error(db: PostgresLike) -> None:
     """Most users were not referred. A profile upload must never fail because
     of the referral programme attached to it."""
-    credits = FakeCredits()
-    assert store(db).activate(activation_from_profile_upload(USER_ID), credits=credits) is None
-    assert credits.grants == []
+    assert store(db).activate(activation_from_profile_upload(USER_ID)) is None
+    assert ledger(db) == []
 
 
 def test_the_state_flip_gates_the_credits(db: PostgresLike) -> None:
@@ -483,9 +627,22 @@ def test_the_state_flip_gates_the_credits(db: PostgresLike) -> None:
     db.rows(REFERRALS)[0]["state"] = str(State.ACTIVATED)
     db.rows(REFERRALS)[0]["activated_at"] = datetime.now(UTC).isoformat()
 
-    credits = FakeCredits()
-    assert store(db).activate(activation_from_profile_upload(USER_ID), credits=credits) is None
-    assert credits.grants == []
+    assert store(db).activate(activation_from_profile_upload(USER_ID)) is None
+    assert ledger(db) == []
+
+
+def test_the_credits_never_travel_through_python() -> None:
+    """Structural. `activate` used to take a granter and call it twice, which
+    is what made the window possible at all. Removing the parameter means the
+    old shape cannot be reintroduced by accident — there is nowhere to put it.
+    """
+    import inspect
+
+    from carigma_api.services.referral_store import SupabaseReferralStore
+
+    params = inspect.signature(SupabaseReferralStore.activate).parameters
+    assert "credits" not in params, "the grant belongs to the transaction, not to Python"
+    assert list(params) == ["self", "activation"]
 
 
 # ── The surface ───────────────────────────────────────────────

@@ -38,6 +38,7 @@ from carigma_api.services.referrals import (
     AlreadyReferred,
     CapReached,
     Grant,
+    LedgerKind,
     SelfReferral,
     State,
     grant_for_activation,
@@ -210,7 +211,7 @@ class SupabaseReferralStore:
         rows = res.data if res and isinstance(res.data, list) else []
         return dict(rows[0]) if rows and isinstance(rows[0], dict) else None
 
-    def activate(self, activation: Activation, *, credits: Any) -> Grant | None:
+    def activate(self, activation: Activation) -> Grant | None:
         """Turn a pending referral into credits. THE only grant path.
 
         **Requires a SERVICE-ROLE client, and deliberately has no RPC.**
@@ -245,23 +246,42 @@ class SupabaseReferralStore:
             slot=int(row["slot"]),
         )
 
-        # The state flip is a CONDITIONAL update guarded on `pending`, and its
-        # affected-row count gates the credits — the same shape as
-        # `claim_payment`. Two concurrent uploads for one user would otherwise
-        # both read `pending` and both pay out.
-        res = (
-            self._c.table(REFERRALS)
-            .update({"state": str(State.ACTIVATED), "activated_at": activation.at.isoformat()})
-            .eq("referred_id", activation.referred_id)
-            .eq("state", str(State.PENDING))
-            .execute()
-        )
-        if not (res.data if res else None):
+        # ONE transaction: the conditional state flip AND both credit grants,
+        # in `referral_activate_tx`.
+        #
+        # This used to be three round trips — flip, grant the referrer, grant
+        # the referred user. A failure after the flip left the row saying
+        # `activated` with nobody paid, and **a retry could not help**, because
+        # the guard at the top of this method returns early once it sees
+        # `activated`. The credits were owed with no path to recovery, and a
+        # failure between the two grants paid one side and never the other.
+        #
+        # Grant-first-flip-after would have been worse: a crash between them
+        # means a retry re-grants, which is the double payment the payments
+        # path exists to prevent. So the window is removed rather than
+        # recovered from.
+        #
+        # The function is `security definer` and granted to **service_role
+        # only** — see V2_015. The danger with `referral_activate` was ever
+        # granting it to `authenticated`, not the definer rights themselves.
+        res = self._c.rpc(
+            "referral_activate_tx",
+            {
+                "p_referred_id": activation.referred_id,
+                "p_at": activation.at.isoformat(),
+                "p_referrer_credits": grant.referrer_credits,
+                "p_referred_credits": grant.referred_credits,
+                "p_referrer_kind": str(LedgerKind.REFERRER),
+                "p_referred_kind": str(LedgerKind.REFERRED),
+            },
+        ).execute()
+
+        rows = res.data if res else None
+        if not rows:
+            # No pending row when the transaction ran — somebody else won the
+            # race, or it was already activated. Not an error.
             logger.info("referral for %s was activated concurrently", activation.referred_id)
             return None
-
-        for entry in grant.ledger_rows(activation.at):
-            credits.grant(str(entry["user_id"]), int(entry["delta"]), str(entry["reason"]))
         return grant
 
 

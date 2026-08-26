@@ -48,7 +48,6 @@ from carigma_api.services.referral_store import SupabaseReferralStore
 from carigma_api.services.referrals import activation_from_profile_upload
 from carigma_api.services.repository import (
     ProfileRepository,
-    SupabaseCreditStore,
     service_client,
     user_client,
 )
@@ -278,10 +277,7 @@ def _activate_referral(user_id: str, settings: Settings) -> dict[str, Any] | Non
 
     try:
         store = SupabaseReferralStore(client)
-        grant = store.activate(
-            activation_from_profile_upload(user_id),
-            credits=_Granter(SupabaseCreditStore(client)),
-        )
+        grant = store.activate(activation_from_profile_upload(user_id))
     except Exception:
         logger.exception("referral activation failed for %s", user_id)
         return None
@@ -289,16 +285,6 @@ def _activate_referral(user_id: str, settings: Settings) -> dict[str, Any] | Non
     if grant is None:
         return None
     return {"credits": grant.referred_credits, "reason": "Welcome bonus from a referral"}
-
-
-class _Granter:
-    def __init__(self, store: Any) -> None:
-        self._store = store
-
-    def grant(self, user_id: str, amount: int, reason: str) -> int | None:
-        from carigma_api.services import credits as credits_service
-
-        return credits_service.grant(self._store, user_id, amount, reason)
 
 
 __all__ = ["router"]
