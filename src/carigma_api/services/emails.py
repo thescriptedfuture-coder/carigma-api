@@ -83,6 +83,9 @@ class SendStatus(StrEnum):
     #: A marketing email we could not put an unsubscribe link in, so we did not
     #: send it. See `send()` — refusing is the safe direction.
     NO_UNSUBSCRIBE_LINK = "no_unsubscribe_link"
+    #: This deploy is not allowed to email this person. NOT a skip: a skip
+    #: means there was nothing to say, and this means there was.
+    NOT_IN_AUDIENCE = "not_in_audience"
 
     @property
     def is_problem(self) -> bool:
@@ -304,6 +307,45 @@ class Preferences:
         return self.weekly_review
 
 
+@dataclass(frozen=True)
+class Audience:
+    """Who this deploy is permitted to email.
+
+    `_recipients` reads every profile in a Supabase that V1 and V2 share, so
+    "who is in the database" is not the same question as "who agreed to hear
+    from V2". Nothing in `profiles` distinguishes them — `onboarded` is written
+    by both — so a V2-only FILTER cannot be built honestly. An explicit
+    allow-list can.
+
+    **The default admits nobody.** `send()` builds this itself when no audience
+    is passed, so a caller that forgets sends nothing rather than everything —
+    the opposite of what the last accident did.
+    """
+
+    everyone: bool = False
+    allowed: frozenset[str] = frozenset()
+
+    def admits(self, recipient: str) -> bool:
+        return self.everyone or recipient.strip().lower() in self.allowed
+
+    @property
+    def describe(self) -> str:
+        if self.everyone:
+            return "everyone"
+        return f"{len(self.allowed)} allow-listed address(es)"
+
+    @classmethod
+    def unrestricted(cls) -> Audience:
+        """Every recipient. A deliberate act, named so it reads as one."""
+        return cls(everyone=True)
+
+    @classmethod
+    def from_settings(cls, audience: str, allowlist: str) -> Audience:
+        if audience.strip().lower() == "everyone":
+            return cls.unrestricted()
+        return cls(allowed=frozenset(a.strip().lower() for a in allowlist.split(",") if a.strip()))
+
+
 def send(
     email: Email | None,
     *,
@@ -318,6 +360,7 @@ def send(
     claim_as: str | None = None,
     service_key: str = "",
     app_url: str = "",
+    audience: Audience | None = None,
 ) -> SendOutcome:
     """The one path from a built email to an actually-sent one.
 
@@ -328,7 +371,13 @@ def send(
     3. **Duplicate guard** → claim the period BEFORE sending, so a crash
        mid-send cannot produce a second attempt that succeeds. `claim_as`
        shares one namespace across types where the ceiling is shared.
-    4. **Dry run** → print, claim nothing, send nothing.
+    4. **Audience** → this deploy may not write to this person at all.
+    5. **Dry run** → print, claim nothing, send nothing.
+
+    The audience check sits BEFORE the dry run on purpose. A dry run should
+    show exactly who would be excluded; the duplicate claim cannot be
+    rehearsed, but this can, and the last failure of this kind hid precisely
+    because four clean dry runs exercised none of it.
     """
     if email is None:
         # A DRY RUN WRITES NOTHING, including this.
@@ -394,6 +443,21 @@ def send(
             detail=None,
         )
         return SendOutcome(SendStatus.UNSUBSCRIBED)
+
+    # The audience gate. Built here rather than taken on trust, so omitting it
+    # admits NOBODY — see `Audience`.
+    if not (audience or Audience()).admits(recipient):
+        log.record(
+            email,
+            recipient=recipient,
+            email_type=str(email_type),
+            status=str(SendStatus.NOT_IN_AUDIENCE),
+            detail=(audience or Audience()).describe,
+        )
+        return SendOutcome(
+            SendStatus.NOT_IN_AUDIENCE,
+            "This deploy is not permitted to email that address.",
+        )
 
     if dry_run:
         # Deliberately does NOT claim the period: a dry run must be repeatable,
@@ -582,6 +646,9 @@ class RunSummary:
             ("dry_run", "would send"),
             ("duplicate", "already sent this period"),
             ("unsubscribed", "unsubscribed"),
+            # Named loudly. A run that emailed nobody because of the audience
+            # gate must not read like a quiet day.
+            ("not_in_audience", "NOT IN AUDIENCE"),
         ):
             if n := self.counts.get(key, 0):
                 parts.append(f"{n} {label}")

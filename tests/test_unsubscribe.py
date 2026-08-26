@@ -263,6 +263,7 @@ def test_every_marketing_email_carries_an_unsubscribe_link() -> None:
     public route existing does not help anyone who never receives a link to it.
     """
     from carigma_api.services.emails import (
+        Audience,
         DailyFacts,
         EmailType,
         Preferences,
@@ -294,6 +295,8 @@ def test_every_marketing_email_carries_an_unsubscribe_link() -> None:
         prefs=Preferences(),
         service_key=KEY,
         app_url="https://app.example.com",
+        # Opened explicitly — see `Audience`: no audience admits nobody.
+        audience=Audience.unrestricted(),
     )
 
     assert outcome.status is SendStatus.SENT
@@ -310,6 +313,7 @@ def test_marketing_mail_with_no_link_is_REFUSED_rather_than_sent() -> None:
     mailing unlawfully — the same shape as JSEARCH_DAILY_CAP producing a
     question rather than a bill."""
     from carigma_api.services.emails import (
+        Audience,
         DailyFacts,
         EmailType,
         Preferences,
@@ -346,6 +350,8 @@ def test_marketing_mail_with_no_link_is_REFUSED_rather_than_sent() -> None:
         prefs=Preferences(),
         service_key="",  # misconfigured
         app_url="https://app.example.com",
+        # Opened explicitly — see `Audience`: no audience admits nobody.
+        audience=Audience.unrestricted(),
     )
 
     assert outcome.status is SendStatus.NO_UNSUBSCRIBE_LINK
@@ -358,7 +364,14 @@ def test_marketing_mail_with_no_link_is_REFUSED_rather_than_sent() -> None:
 def test_a_receipt_needs_no_footer() -> None:
     """A receipt is a transaction record, not marketing. It must not be
     refused for lacking an unsubscribe link it should not carry."""
-    from carigma_api.services.emails import Email, EmailType, Preferences, SendStatus, send
+    from carigma_api.services.emails import (
+        Audience,
+        Email,
+        EmailType,
+        Preferences,
+        SendStatus,
+        send,
+    )
 
     sent: list[Any] = []
 
@@ -385,6 +398,8 @@ def test_a_receipt_needs_no_footer() -> None:
         prefs=Preferences(unsubscribed_all=True),
         service_key="",
         app_url="",
+        # Opened explicitly — see `Audience`: no audience admits nobody.
+        audience=Audience.unrestricted(),
     )
 
     assert outcome.status is SendStatus.SENT
@@ -398,7 +413,7 @@ def test_a_dry_run_writes_nothing_at_all_on_a_quiet_day() -> None:
     day wrote a skip row per user — twelve of them, describing a run that never
     happened. Found by actually running it, not by reading it.
     """
-    from carigma_api.services.emails import EmailType, Preferences, SendStatus, send
+    from carigma_api.services.emails import Audience, EmailType, Preferences, SendStatus, send
 
     written: list[Any] = []
 
@@ -425,6 +440,8 @@ def test_a_dry_run_writes_nothing_at_all_on_a_quiet_day() -> None:
         dry_run=True,
         service_key=KEY,
         app_url="https://app.example.com",
+        # Opened explicitly — see `Audience`: no audience admits nobody.
+        audience=Audience.unrestricted(),
     )
 
     assert outcome.status is SendStatus.SKIPPED

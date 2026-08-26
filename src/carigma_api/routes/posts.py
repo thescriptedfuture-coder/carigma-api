@@ -271,17 +271,13 @@ async def post_regenerate(
 
     enforce_agent_rate_limit(user.id, "content")
 
-    try:
-        credits_service.check_affordable(credit_store, user.id, action)
-    except InsufficientCredits as exc:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail=(
-                f"You need {exc.required} credits to redraft this slot. You have {exc.balance}."
-            ),
-            headers={"X-Error-Code": "insufficient_credits"},
-        ) from exc
-
+    # Structural refusals come FIRST, before any question about credits.
+    #
+    # This used to sit after `check_affordable`, and the test beside it is
+    # called "refused before any work" — it passed only because an unreadable
+    # balance ran FREE, so the credit check never refused anything. Making
+    # credits strict surfaced the real order: **you should not have to be able
+    # to afford something to be told it is impossible.**
     week_start = _monday_of(datetime.now(UTC).date())
     store = _store(request, settings)
     plan = _load_or_default(store, user.id, week_start)
@@ -294,6 +290,34 @@ async def post_regenerate(
                 "message": "You've already shipped that one.",
             },
         )
+
+    try:
+        credits_service.check_affordable(
+            credit_store, user.id, action, enforced=settings.credits_enforced
+        )
+    except credits_service.CreditsUnavailable as exc:
+        # We could not read the balance, so we cannot account for this run.
+        # Refusing is not "charging on failure" — nothing is charged and no
+        # work starts. Before this, an unreadable balance ran the work FREE.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "credits_unavailable",
+                "message": (
+                    "We couldn't check your credits just now, so you weren't "
+                    "charged and nothing ran. Try again in a moment."
+                ),
+            },
+            headers={"X-Error-Code": "credits_unavailable"},
+        ) from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"You need {exc.required} credits to redraft this slot. You have {exc.balance}."
+            ),
+            headers={"X-Error-Code": "insufficient_credits"},
+        ) from exc
 
     run = runs_service.new_run(user.id, "content")
     if key := idempotency_key(request):

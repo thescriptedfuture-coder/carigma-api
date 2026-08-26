@@ -22,6 +22,21 @@ from carigma_api.services.constants import CREDIT_COSTS, CREDIT_LABELS, FREE_ACT
 logger = logging.getLogger(__name__)
 
 
+class CreditsUnavailable(Exception):
+    """We could not determine the balance. NOT the same as "the balance is nil".
+
+    `read_balance` returned `None` for four different situations: the read
+    threw, there is no credits row, the stored balance is not a number, and —
+    by implication in `check_affordable` — "credits are not configured, so run
+    free". A transient Supabase failure therefore made every run free, on the
+    money path, silently.
+
+    **Inferring a dev condition from a production failure was the actual bug.**
+    The dev bypass is now an explicit setting (`CREDITS_ENFORCED`), and this
+    exception carries the case where we genuinely do not know.
+    """
+
+
 class InsufficientCredits(Exception):
     def __init__(self, required: int, balance: int) -> None:
         self.required = required
@@ -50,7 +65,14 @@ class CreditStore(Protocol):
     """The persistence this module needs. A Protocol so the rule can be tested
     exhaustively without a database — the rule is what matters, not the driver."""
 
-    def read_balance(self, user_id: str) -> int | None: ...
+    def read_balance(self, user_id: str) -> int | None:
+        """The balance, or `None` when the user has no credits row.
+
+        **Must raise `CreditsUnavailable` if it could not find out** — a failed
+        read and an absent row are different answers, and conflating them is
+        what made an outage free.
+        """
+        ...
 
     def apply_delta(self, user_id: str, delta: int, reason: str, balance_after: int) -> None: ...
 
@@ -66,20 +88,43 @@ def label_for(action: str) -> str:
     return CREDIT_LABELS.get(action, action.replace("_", " ").capitalize())
 
 
-def check_affordable(store: CreditStore, user_id: str, action: str) -> int:
+def check_affordable(
+    store: CreditStore, user_id: str, action: str, *, enforced: bool = True
+) -> int:
     """Verify the user can afford `action` BEFORE the work runs.
 
-    Returns the cost. Raises InsufficientCredits otherwise.
+    Returns the cost, or raises.
 
-    Fails OPEN when credits aren't configured (balance is None): a missing
-    credits table must not lock every user out of the product.
+    | situation | before | now |
+    |---|---|---|
+    | read threw | free run | `CreditsUnavailable` |
+    | no credits row | free run | `InsufficientCredits(cost, 0)` |
+    | balance below cost | `InsufficientCredits` | unchanged |
+
+    `enforced` defaults to **True**, so a caller that forgets gets the strict
+    behaviour. On the money path the safe default is the one that refuses; the
+    bypass exists for a machine with no credits table, and a bypass you have to
+    ask for cannot be triggered by an outage.
+
+    Refusing here is not "charging on failure" — nothing is charged and no work
+    starts. It is declining to begin something we cannot account for.
     """
     cost = cost_of(action)
     if cost <= 0:
         return 0
+
+    # `read_balance` raises CreditsUnavailable on a read it could not complete.
+    # Deliberately NOT caught: the caller turns it into a 503 the user can act
+    # on. Swallowing it here would put us back where we started.
     balance = store.read_balance(user_id)
+
     if balance is None:
-        return cost
+        if not enforced:
+            # The explicit dev bypass. CREDITS_ENFORCED=false, chosen by a
+            # person, never inferred from a failure.
+            return cost
+        raise InsufficientCredits(cost, 0)
+
     if balance < cost:
         raise InsufficientCredits(cost, balance)
     return cost
@@ -149,8 +194,26 @@ def charge_for_result(
 
 
 def grant(store: CreditStore, user_id: str, amount: int, reason: str) -> int | None:
-    """Add credits (welcome grant, top-up, subscription cycle)."""
-    balance = store.read_balance(user_id)
+    """Add credits (welcome grant, top-up, subscription cycle).
+
+    `None` means **the grant did not happen**, and callers on the payments path
+    rely on that to release a payment back for retry.
+
+    `CreditsUnavailable` is caught here rather than propagated, and this is the
+    one place that conflation is right: a failed READ means `apply_delta` was
+    never reached, so nothing was applied. That satisfies the rule the payments
+    path is built on — **only a grant we can PROVE did not happen is safe to
+    retry automatically.** A read that threw is exactly such a proof.
+
+    Contrast `check_affordable`, where the same exception must NOT be swallowed:
+    there the question is "can this person afford it", and "we could not find
+    out" is not an answer to it.
+    """
+    try:
+        balance = store.read_balance(user_id)
+    except CreditsUnavailable:
+        logger.warning("credit grant for %s abandoned: balance unreadable", user_id)
+        return None
     if balance is None:
         return None
     new_balance = balance + int(amount)

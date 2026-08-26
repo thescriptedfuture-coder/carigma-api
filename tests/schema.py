@@ -7,31 +7,38 @@ stops matching the table.
 
 ## Two sources, because V2 owns only half the schema
 
-`migrations/` holds the tables V2 created. **Most tables V2 writes to are V1's**
-— `profiles`, `credits`, `credit_ledger`, `payments`, `digest_log`, `email_log`
-— created by the `supabase_migration_*.sql` files in the parent repository and
-only ALTERed by V2. A parser that reads `migrations/` alone can say nothing
-about the majority of writes, which is where the two bugs of this class were:
+`migrations/*.sql` holds the tables V2 created. **Most tables V2 writes to are
+V1's** — `profiles`, `credits`, `credit_ledger`, `payments`, `digest_log`,
+`email_log` — and V2 only ALTERs them. A reader that saw V2's migrations alone
+could say nothing about the majority of writes, which is where both bugs of
+this class were:
 
 - `agent_runs.id` is `uuid`; we sent `run_<hex>`. Every insert refused.
 - `digest_log.sent_on` is `date`; we sent `"2026-W34"`. Every weekly claim
   refused, and refusal reads as "already sent".
 
-So both sources are read, and `SOURCES_FOUND` is asserted non-empty by the
-callers: a parser that quietly finds no DDL turns every guard built on it into
-a guard that passes on anything.
+So V1's DDL is **vendored** into `migrations/v1_reference/`. It used to be read
+from the parent repository, which works on a laptop where every repo sits in
+one tree and **fails in CI, which checks out one repository alone.** Same class
+as the first container deploy finding `supabase` undeclared: a local working
+tree is a superset of any single repository.
 
-## ALTER is applied, not treated as a reason to give up
+`tests/test_schema_sources.py` compares the vendored copies against the parent
+repo byte-for-byte whenever it is present, so the copy cannot drift unnoticed.
 
-An earlier version refused to answer for any table a later migration ALTERed,
-which meant refusing for `profiles` and `credit_ledger` — the two most-written
-tables in the system. Refusing is safe but useless. This applies
-`add column` / `drop column` in source order instead.
+## Finding nothing is not the same as finding no problems
+
+`types_of` returns `{}` unless it found a CREATE. That matters more than it
+looks: an earlier version applied V2's ALTERs regardless, so a table whose
+CREATE was missing came back with **the two or three columns V2 added** rather
+than empty — a partial schema that looks like a real answer. Callers that
+`skip` on an empty result then did not skip, and the guard reported false
+alarms against a table it could not actually see.
 
 Deliberately NOT handled: `alter column ... type`, computed columns, domains,
 inherited tables. None appear in either repository; if one is added, this will
 report the original type and be wrong. `types_of` is therefore only ever used
-to REJECT values a column plainly cannot hold, never to assert a column can.
+to REJECT values a column plainly cannot hold, never to assert one can.
 """
 
 from __future__ import annotations
@@ -41,10 +48,13 @@ from functools import cache, lru_cache
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
-V2_MIGRATIONS = _HERE.parents[1] / "migrations"
-#: V1's schema lives two repositories up. Absent in a bare clone of the API,
-#: which is why the callers assert on `SOURCES_FOUND`.
-V1_MIGRATIONS = _HERE.parents[3] if len(_HERE.parents) > 3 else None
+MIGRATIONS = _HERE.parents[1] / "migrations"
+#: V1's DDL, vendored. Read-only — see the README in that directory.
+V1_REFERENCE = MIGRATIONS / "v1_reference"
+#: The parent repository, present locally and absent in CI. Used ONLY by the
+#: drift check, never to answer a question about the schema: a source that
+#: exists on one machine is a source that gives two different answers.
+PARENT_REPO = _HERE.parents[3] if len(_HERE.parents) > 3 else None
 
 #: Words that open a table-level clause rather than name a column.
 _NOT_COLUMNS = {"constraint", "primary", "unique", "check", "foreign", "exclude", "like"}
@@ -63,14 +73,14 @@ def _strip_comments(sql: str) -> str:
 
 @lru_cache(maxsize=1)
 def _sources() -> list[tuple[str, str]]:
-    """`(name, sql)` for every migration file, V1 before V2."""
+    """`(name, sql)` for every migration, V1's vendored DDL first.
+
+    Order is explicit rather than alphabetical: V1 CREATEs the tables and V2
+    ALTERs them, and `V2_001...` sorts before `v1_reference/...` in ASCII.
+    """
     out: list[tuple[str, str]] = []
-    if V1_MIGRATIONS and V1_MIGRATIONS.is_dir():
-        for path in sorted(V1_MIGRATIONS.glob("supabase_*.sql")):
-            out.append((path.name, _strip_comments(path.read_text(encoding="utf-8"))))
-    if V2_MIGRATIONS.is_dir():
-        for path in sorted(V2_MIGRATIONS.glob("*.sql")):
-            out.append((path.name, _strip_comments(path.read_text(encoding="utf-8"))))
+    for path in sorted(V1_REFERENCE.glob("*.sql")) + sorted(MIGRATIONS.glob("*.sql")):
+        out.append((path.name, _strip_comments(path.read_text(encoding="utf-8"))))
     return out
 
 
@@ -98,6 +108,7 @@ def types_of(table: str) -> dict[str, str]:
     )
 
     out: dict[str, str] = {}
+    created = False
 
     # PASS 1: the CREATE, wherever it lives. Separate from pass 2 because a
     # single interleaved loop had this bug — ALTERs from an alphabetically
@@ -113,7 +124,14 @@ def types_of(table: str) -> dict[str, str]:
             col = re.match(r"\s{2,}(\w+)\s+(\w+)", line)
             if col and col.group(1).lower() not in _NOT_COLUMNS:
                 out[col.group(1)] = col.group(2).lower()
+        created = True
         break
+
+    # No CREATE anywhere means we do not know this table. Returning the
+    # columns V2's ALTERs happen to add would be a partial schema wearing the
+    # shape of a complete one — see the module docstring.
+    if not created:
+        return {}
 
     # PASS 2: ALTERs, in source order.
     for _name, sql in _sources():

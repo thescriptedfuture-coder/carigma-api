@@ -91,6 +91,33 @@ class Settings(BaseSettings):
     smtp_pass: str = Field(default="")
     smtp_from: str = Field(default="Carigma <support@carigma.in>")
 
+    # ── Who this deploy may email ──────────────────────────────────────────
+    #
+    # V1 and V2 share one Supabase, and `_recipients` reads EVERY profile
+    # joined to its auth email. There is no V2 marker to filter on, so a real
+    # cron run mails twelve live V1 users a V2 email.
+    #
+    # Until the weekly-key fix that could not happen: `claim_period` refused
+    # every weekly claim, so the path was inert whatever the flag said. **That
+    # was an accident, and an accidental safety leaves without notice.** This
+    # is the deliberate replacement.
+    #
+    # Default is `allowlist` with an EMPTY list, so a deploy that configures
+    # nothing emails nobody. Going wide is an explicit act: set
+    # EMAIL_AUDIENCE=everyone. Forgetting fails toward silence.
+    email_audience: str = Field(default="allowlist")
+    email_allowlist: str = Field(default="")
+
+    # ── Credits ────────────────────────────────────────────────────────────
+    # `check_affordable` used to run FREE whenever the balance came back None —
+    # which covered a failed read as well as "no credits table here". So a
+    # transient Supabase failure made every run free, on the money path.
+    #
+    # Inferring a dev condition from a production failure was the actual bug.
+    # The bypass is now this setting, chosen by a person. Default ON: the safe
+    # default on money is the one that refuses.
+    credits_enforced: bool = Field(default=True)
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
