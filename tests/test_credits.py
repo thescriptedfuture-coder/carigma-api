@@ -143,12 +143,84 @@ def test_check_affordable_allows_exact_balance() -> None:
     assert credits_service.check_affordable(FakeStore(10), USER, "run_profile") == 10
 
 
-def test_unconfigured_credits_fail_open() -> None:
-    """A missing credits table must not lock every user out of the product."""
-    assert credits_service.check_affordable(FakeStore(None), USER, "run_profile") == 10
+def test_no_credits_row_is_refused_when_credits_are_enforced() -> None:
+    """The default, and the reversal.
+
+    This test used to be called `test_unconfigured_credits_fail_open` and
+    asserted the opposite: a `None` balance ran the work FREE, "so a missing
+    credits table does not lock every user out".
+
+    The reasoning was sound for a missing TABLE and catastrophic for everything
+    else that returned `None` — a failed read, most of all. **Inferring a dev
+    condition from a production failure was the actual bug**, and on the money
+    path it meant a Supabase blip made every run free.
+
+    The dev bypass still exists. It is now something a person switches on.
+    """
+    with pytest.raises(credits_service.InsufficientCredits) as caught:
+        credits_service.check_affordable(FakeStore(None), USER, "run_profile")
+
+    assert caught.value.balance == 0
 
 
-async def test_unconfigured_credits_charge_nothing_but_still_deliver() -> None:
+def test_the_dev_bypass_still_works_when_asked_for() -> None:
+    """`CREDITS_ENFORCED=false`. A machine with no credits table can still run
+    the product — but because someone said so, not because a read failed."""
+    assert (
+        credits_service.check_affordable(FakeStore(None), USER, "run_profile", enforced=False) == 10
+    )
+
+
+def test_the_bypass_is_off_unless_asked_for() -> None:
+    """The parameter defaults to enforced. A caller that forgets gets the
+    strict behaviour, because on money the safe default is the one that
+    refuses."""
+    import inspect
+
+    default = inspect.signature(credits_service.check_affordable).parameters["enforced"].default
+    assert default is True
+
+
+def test_an_unreadable_balance_is_not_a_free_run() -> None:
+    """The bug itself.
+
+    `read_balance` raising must reach the caller, so the route can say "we
+    could not check" rather than silently delivering paid work for nothing.
+    """
+
+    class Unreadable:
+        def read_balance(self, user_id: str) -> int | None:
+            raise credits_service.CreditsUnavailable("supabase is down")
+
+        def apply_delta(self, user_id: str, delta: int, reason: str, balance_after: int) -> None:
+            raise AssertionError("nothing may be charged when the balance is unknown")
+
+    with pytest.raises(credits_service.CreditsUnavailable):
+        credits_service.check_affordable(Unreadable(), USER, "run_profile")
+
+
+def test_a_grant_abandons_itself_when_the_balance_is_unreadable() -> None:
+    """The other side of the same exception, and it must NOT propagate here.
+
+    `grant` returning None means "the grant did not happen", which the payments
+    path relies on to release a payment for retry. A read that threw is proof
+    `apply_delta` was never reached — and **only a grant we can prove did not
+    happen is safe to retry automatically.**
+    """
+
+    class Unreadable:
+        def read_balance(self, user_id: str) -> int | None:
+            raise credits_service.CreditsUnavailable("supabase is down")
+
+        def apply_delta(self, user_id: str, delta: int, reason: str, balance_after: int) -> None:
+            raise AssertionError("nothing may be applied when the balance is unknown")
+
+    assert credits_service.grant(Unreadable(), USER, 50, "top-up") is None
+
+
+async def test_the_dev_bypass_charges_nothing_but_still_delivers() -> None:
+    """Unchanged behaviour, reached deliberately. `_run` does not enforce, so
+    this still describes a machine with no credits table."""
     store = FakeStore(None)
     settled = await _run(lambda r: {"profileScore": 71}, store)
     assert settled.status is RunStatus.SUCCEEDED

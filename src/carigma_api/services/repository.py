@@ -20,6 +20,7 @@ from typing import Any
 from supabase import Client, create_client
 
 from carigma_api.config import Settings
+from carigma_api.services import credits as credits_service
 
 logger = logging.getLogger(__name__)
 
@@ -200,9 +201,11 @@ class SupabaseCreditStore:
                 .maybe_single()
                 .execute()
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Credit balance read failed for %s", user_id)
-            return None
+            # NOT None. `None` means "this user has no credits row", and a
+            # failed read is not that — it used to produce a free run.
+            raise credits_service.CreditsUnavailable("could not read the credit balance") from exc
         row = _as_row(res.data if res else None)
         if not row:
             return None
@@ -213,11 +216,13 @@ class SupabaseCreditStore:
             # as zero", which is exactly what the comment below rejects. Dead
             # code that reads as a policy decision is worse than no code.
             return int(row["balance"])
-        except (TypeError, ValueError):
-            # A non-numeric balance is corrupt data. Returning None (fail open)
-            # beats guessing 0, which would wrongly block every paid action.
+        except (TypeError, ValueError) as exc:
+            # Corrupt data. We do not know the balance, which is exactly what
+            # CreditsUnavailable means — the old comment argued for failing
+            # open "rather than guessing 0", and both options were wrong
+            # because both were answers to a question we could not answer.
             logger.error("Non-numeric credit balance for %s: %r", user_id, row.get("balance"))
-            return None
+            raise credits_service.CreditsUnavailable("credit balance is not a number") from exc
 
     def apply_delta(self, user_id: str, delta: int, reason: str, balance_after: int) -> None:
         self._client.table("credits").update(

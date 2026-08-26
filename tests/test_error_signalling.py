@@ -32,8 +32,15 @@ one fails until someone writes the reason down. That puts the judgement at the
 moment the code is written, which is the only moment anyone has the context to
 make it.
 
-Two entries below are marked DECIDE. They are not parsers, and their two
-answers are not the same answer.
+One entry below is marked DECIDE. It is not a parser, and its two answers are
+not the same answer.
+
+There were two. `read_balance` was the other, and it was FIXED rather than
+accepted: a failed read now raises `CreditsUnavailable` instead of returning
+the same `None` as "this user has no credits row" — which `check_affordable`
+read as "credits are not configured, run free". A transient Supabase failure
+therefore made every run free, on the money path. **Inferring a dev condition
+from a production failure was the actual bug.**
 """
 
 from __future__ import annotations
@@ -62,11 +69,18 @@ ACCEPTED: dict[tuple[str, str], str] = {
     ("runs.py", "stream"): "ends the stream; there is no other terminal value",
     ("unsubscribe.py", "resolve"): "a corrupt token and an invalid token are both 'bad link'",
     # ── DECIDE. Listed so they are visible, not because they are settled.
-    ("repository.py", "read_balance"): (
-        "DECIDE: None means 'credits not configured, run free' to check_affordable. "
-        "A transient read failure therefore makes every run free. It errs toward the "
-        "user, which is the right DIRECTION, but nothing distinguishes an outage from "
-        "an unconfigured install, so nobody would ever find out."
+    # `read_balance` was here, marked DECIDE, and is now FIXED rather than
+    # accepted: it raises `CreditsUnavailable` on a read it could not complete,
+    # so a failed read and an absent row are no longer the same answer. The
+    # entry is gone rather than reworded, and the stale-entry half of the
+    # assertion below is what would have caught it if it were not.
+    ("credits.py", "grant"): (
+        "None means 'the grant did not happen', and a read that threw is PROOF "
+        "apply_delta was never reached. The payments path relies on exactly that "
+        "to release a payment for retry — only a grant we can prove did not happen "
+        "is safe to retry automatically. Contrast check_affordable, where the same "
+        "exception must NOT be swallowed: 'we could not find out' is not an answer "
+        "to 'can this person afford it'."
     ),
     ("onboarding.py", "_activate_referral"): (
         "DECIDE: None means 'no referral to activate'. A failed activation returns the "
@@ -167,5 +181,8 @@ def test_the_two_undecided_ones_are_still_marked() -> None:
     undecided = sorted(k for k, why in ACCEPTED.items() if why.startswith("DECIDE:"))
     assert undecided == [
         ("onboarding.py", "_activate_referral"),
-        ("repository.py", "read_balance"),
-    ]
+    ], (
+        "`read_balance` was the other one and is now fixed rather than accepted — it "
+        "raises CreditsUnavailable, so a failed read and an absent row are different "
+        "answers. If a DECIDE reappears here, decide it."
+    )

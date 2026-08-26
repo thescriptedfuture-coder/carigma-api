@@ -258,7 +258,18 @@ async def run_naukri_tuneup(
     action = "run_naukri" if starts_new_cycle(latest_state) else "naukri_step"
 
     try:
-        credits_service.check_affordable(credit_store, user.id, action)
+        credits_service.check_affordable(
+            credit_store, user.id, action, enforced=settings.credits_enforced
+        )
+    except credits_service.CreditsUnavailable as exc:
+        # We could not read the balance, so we cannot account for this run.
+        # Refusing is not "charging on failure" — nothing is charged and no
+        # work starts. Before this, an unreadable balance ran the work FREE.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="We could not check your credits just now. Try again in a moment.",
+            headers={"X-Error-Code": "credits_unavailable"},
+        ) from exc
     except InsufficientCredits as exc:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,

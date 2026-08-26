@@ -108,6 +108,16 @@ class Settings(BaseSettings):
     email_audience: str = Field(default="allowlist")
     email_allowlist: str = Field(default="")
 
+    # ── Credits ────────────────────────────────────────────────────────────
+    # `check_affordable` used to run FREE whenever the balance came back None —
+    # which covered a failed read as well as "no credits table here". So a
+    # transient Supabase failure made every run free, on the money path.
+    #
+    # Inferring a dev condition from a production failure was the actual bug.
+    # The bypass is now this setting, chosen by a person. Default ON: the safe
+    # default on money is the one that refuses.
+    credits_enforced: bool = Field(default=True)
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
