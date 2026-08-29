@@ -174,10 +174,26 @@ def _standing(s: Signals) -> dict[str, Any]:
 
     Not a manufactured task. A product that always has something for you to do
     is one that invents work.
+
+    But the copy has to agree with the button underneath it. It used to read
+    "Nothing needs you right now / Your plan is running. Come back when
+    something lands." — above a button offering the week. Three things wrong:
+
+    - **It sends people away** from an action it is simultaneously offering.
+      A screen whose text says "come back later" is a screen people leave, and
+      the rung exists precisely because there is always a next thing.
+    - **"Your plan is running" can be false.** A brand-new account has no plan.
+      Asserting one to somebody who has never set anything up is the
+      fabrication rule broken in the smallest possible way.
+    - It reads as an apology for the product having nothing to say, when a
+      quiet day is a real and good answer.
+
+    So: state the quiet honestly, do not claim anything about a plan, and let
+    the body describe what the button actually gets you.
     """
     return {
-        "title": "Nothing needs you right now",
-        "body": "Your plan is running. Come back when something lands.",
+        "title": "Nothing is due today",
+        "body": "A quiet day is a real answer. It is a good moment to look at the week ahead.",
         "primary": {"label": "See the week", "route": "/posts"},
     }
 

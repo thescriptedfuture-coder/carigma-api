@@ -127,8 +127,14 @@ def test_nothing_pressing_does_not_invent_work(wired) -> None:  # type: ignore[n
 
     body = client.get("/today", headers=token()).json()
 
-    assert "Nothing needs you" in body["primary_action"]["title"]
+    assert "Nothing is due" in body["primary_action"]["title"]
     assert body["deferred"] == []
+
+    # The route must still hand back somewhere to go. "Does not invent work"
+    # and "offers nothing" are different answers, and the old copy drifted
+    # toward the second while the button said otherwise.
+    assert body["primary_action"]["primary"]["route"]
+    assert "come back" not in body["primary_action"]["body"].lower()
 
 
 def test_the_greeting_uses_a_first_name_when_there_is_one(wired) -> None:  # type: ignore[no-untyped-def]
