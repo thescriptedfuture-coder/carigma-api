@@ -214,8 +214,18 @@ def grant(store: CreditStore, user_id: str, amount: int, reason: str) -> int | N
     except CreditsUnavailable:
         logger.warning("credit grant for %s abandoned: balance unreadable", user_id)
         return None
-    if balance is None:
-        return None
-    new_balance = balance + int(amount)
+
+    # `None` means the user has no credits row — which is every user, once,
+    # and used to end the grant here. **So a brand-new account could never
+    # receive its first credits**, because granting required a balance to add
+    # to and nothing created the first one. An absent row is a balance of
+    # nothing, and `apply_delta` upserts, so this is now the first write.
+    #
+    # This is only safe because a failed READ is a separate answer above. When
+    # both were `None`, treating them alike would have meant granting on top of
+    # a balance we could not see.
+    # falsy-ok: a stored balance of 0 and no row at all are the same starting
+    # point — there is nothing to add to either way, and both produce `amount`.
+    new_balance = (balance or 0) + int(amount)
     store.apply_delta(user_id, int(amount), reason, new_balance)
     return new_balance

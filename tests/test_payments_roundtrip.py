@@ -52,6 +52,7 @@ class FakeTable:
         self._filters: dict[str, Any] = {}
         self._op: str | None = None
         self._payload: dict[str, Any] | None = None
+        self._conflict: str | None = None
         self._single = False
 
     def select(self, *_a: Any, **_k: Any) -> FakeTable:
@@ -64,6 +65,23 @@ class FakeTable:
 
     def update(self, payload: dict[str, Any]) -> FakeTable:
         self._op, self._payload = "update", payload
+        return self
+
+    def upsert(self, payload: dict[str, Any], **kw: Any) -> FakeTable:
+        """Merge on the conflict target, or insert.
+
+        This method did not exist. `apply_delta` used `.update()`, so nothing
+        exercised an upsert and the fake was never asked for one — and the
+        moment the real code needed it, the fake raised AttributeError and
+        three payment tests failed for a reason that had nothing to do with
+        payments.
+
+        The behaviour that matters is the CONFLICT: a second write for the
+        same user must merge, not append. A fake that appended would let a
+        double-credit bug pass here.
+        """
+        self._op, self._payload = "upsert", payload
+        self._conflict = kw.get("on_conflict") or "user_id"
         return self
 
     def eq(self, column: str, value: Any) -> FakeTable:
@@ -87,6 +105,17 @@ class FakeTable:
 
         if self._op == "insert":
             assert self._payload is not None
+            rows.append(dict(self._payload))
+            return _Res([dict(self._payload)])
+
+        if self._op == "upsert":
+            assert self._payload is not None
+            keys = [k.strip() for k in str(self._conflict).split(",")]
+            ident = tuple(str(self._payload.get(k)) for k in keys)
+            for row in rows:
+                if tuple(str(row.get(k)) for k in keys) == ident:
+                    row.update(self._payload)
+                    return _Res([dict(row)])
             rows.append(dict(self._payload))
             return _Res([dict(self._payload)])
 

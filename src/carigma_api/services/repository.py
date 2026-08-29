@@ -225,9 +225,22 @@ class SupabaseCreditStore:
             raise credits_service.CreditsUnavailable("credit balance is not a number") from exc
 
     def apply_delta(self, user_id: str, delta: int, reason: str, balance_after: int) -> None:
-        self._client.table("credits").update(
-            {"balance": balance_after, "updated_at": datetime.now(UTC).isoformat()}
-        ).eq("user_id", user_id).execute()
+        # UPSERT, not update. `.update()` matching no rows is a SUCCESS in
+        # PostgREST — it reports 200 and changes nothing — so for a user with
+        # no credits row every write here silently did nothing. Combined with
+        # `grant()` refusing to grant without an existing balance, a new
+        # account could not receive credits by any path at all.
+        self._client.table("credits").upsert(
+            {
+                "user_id": user_id,
+                "balance": balance_after,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            # Named rather than left to the primary key. PostgREST would infer
+            # it, but the intent — "one row per user, merge into it" — should
+            # be readable here rather than inferred from the DDL.
+            on_conflict="user_id",
+        ).execute()
         # Ledger writes are best-effort: losing an audit row must not fail a
         # completed run, but it must be loud in the logs.
         try:

@@ -74,14 +74,12 @@ ACCEPTED: dict[tuple[str, str], str] = {
     # so a failed read and an absent row are no longer the same answer. The
     # entry is gone rather than reworded, and the stale-entry half of the
     # assertion below is what would have caught it if it were not.
-    ("credits.py", "grant"): (
-        "None means 'the grant did not happen', and a read that threw is PROOF "
-        "apply_delta was never reached. The payments path relies on exactly that "
-        "to release a payment for retry — only a grant we can prove did not happen "
-        "is safe to retry automatically. Contrast check_affordable, where the same "
-        "exception must NOT be swallowed: 'we could not find out' is not an answer "
-        "to 'can this person afford it'."
-    ),
+    # `credits.py::grant` was here. It no longer collides: "no credits row"
+    # used to return the same `None` as a failed read, from the ordinary path,
+    # which is why a new account could never be granted its first credits.
+    # A missing row is now a balance of zero and the grant proceeds, so the
+    # only `None` left comes from the handler. The stale-entry half of the
+    # assertion below is what made this visible.
     ("onboarding.py", "_activate_referral"): (
         "DECIDE: None means 'no referral to activate'. A failed activation returns the "
         "same, so a referral that silently failed to grant is indistinguishable from a "
