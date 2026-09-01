@@ -567,6 +567,7 @@
   ],
   "POST /onboarding/complete": [
     "cadence",
+    "credits_granted",
     "onboarded",
     "platforms",
     "referral",

@@ -35,6 +35,7 @@ user already has.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -44,6 +45,7 @@ from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.services import extraction, onboarding
 from carigma_api.services.ai import call_claude_json
+from carigma_api.services.constants import SIGNUP_CREDITS
 from carigma_api.services.referral_store import SupabaseReferralStore
 from carigma_api.services.referrals import activation_from_profile_upload
 from carigma_api.services.repository import (
@@ -253,8 +255,68 @@ def complete_onboarding(
         "target_roles": saved.get("targetRoles"),
         "cadence": saved.get("cadence"),
         "platforms": saved.get("platforms") or [],
+        "credits_granted": _grant_signup_credits(user.id, settings),
         "referral": _activate_referral(user.id, settings),
     }
+
+
+def _grant_signup_credits(user_id: str, settings: Settings) -> int | None:
+    """The welcome grant. Once, on a COMPLETED profile.
+
+    `SIGNUP_CREDITS` was defined and read by nothing — a whole feature that
+    existed as a constant. Underneath it, `apply_delta` used `.update()` (a
+    success that changes nothing when there is no row) and `grant()` refused
+    without an existing balance, so a new account could not receive credits by
+    any route at all.
+
+    **On completion, never on registration.** An account costs an email
+    address; a completed profile costs real work. Same anti-farming rule the
+    referral programme follows, and deliberately the same moment, so there is
+    one answer to "when does a grant happen" rather than two.
+
+    Once is the DATABASE's decision — a partial unique index on
+    `credit_ledger (user_id) where kind = 'signup'`, checked inside the
+    transaction that does the granting. A `select ... if not granted` here
+    would be read-then-write, and two saves arriving together would both read
+    "not yet" and both pay out.
+
+    **Never raises.** Returning None on failure is the same choice
+    `_activate_referral` makes below and for the same reason: nobody should
+    lose their finished setup because a grant attached to it failed. The
+    difference from that function is that this one is retryable — the index
+    means a later attempt either grants or is a no-op, never a double.
+    """
+    try:
+        client = service_client(settings)
+    except Exception:
+        logger.warning("no service client; signup grant skipped for %s", user_id)
+        return None
+
+    try:
+        res = client.rpc(
+            "grant_signup_credits",
+            {
+                "p_user_id": user_id,
+                "p_amount": SIGNUP_CREDITS,
+                "p_at": datetime.now(UTC).isoformat(),
+            },
+        ).execute()
+    except Exception:
+        logger.exception("signup grant failed for %s", user_id)
+        return None
+
+    balance = res.data if res else None
+    if balance is None:
+        # Already granted. An ordinary outcome, not a failure — a second
+        # profile save is a normal thing to do.
+        return None
+    if not isinstance(balance, int | float | str):
+        # The function returns an integer. Anything else means the contract
+        # changed under us, and reporting a number we cannot read would be a
+        # fabricated balance — the one thing this system may never do.
+        logger.error("grant_signup_credits returned %r, which is not a balance", balance)
+        return None
+    return int(balance)
 
 
 def _activate_referral(user_id: str, settings: Settings) -> dict[str, Any] | None:

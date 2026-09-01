@@ -354,6 +354,183 @@ def test_a_referral_failure_never_costs_the_user_their_setup(
     assert res.json()["referral"] is None
 
 
+# ── The welcome grant ──────────────────────────────────────────────────────
+
+
+class FakeGrantClient:
+    """A service client whose `grant_signup_credits` behaves like the function.
+
+    The ONE property that matters is that it grants **once**. In production
+    that is a partial unique index inside the transaction; here it is a set,
+    and the point of modelling it at all is that a fake which granted every
+    time would pass a test named "granted once" while the real defect —
+    granting twice — sailed through.
+
+    Same lesson as `_NullRunStore` and the payments fake with no `upsert`: a
+    stand-in for something that can REFUSE has to be able to refuse.
+    """
+
+    def __init__(self, amount: int = 100) -> None:
+        self.amount = amount
+        self.granted: set[str] = set()
+        self.calls: list[dict[str, Any]] = []
+
+    def rpc(self, name: str, params: dict[str, Any]) -> Any:
+        assert name == "grant_signup_credits", f"unexpected rpc {name}"
+        self.calls.append(params)
+        user = str(params["p_user_id"])
+
+        class _Res:
+            def __init__(self, data: Any) -> None:
+                self.data = data
+
+        if user in self.granted:
+            # What the unique-index violation produces: null, not an error.
+            return _Res(None)
+        self.granted.add(user)
+        return _Res(self.amount)
+
+    def execute(self) -> Any:  # pragma: no cover - rpc() returns the result
+        raise AssertionError("execute is called on the rpc result, not the client")
+
+
+def _with_grant(monkeypatch: pytest.MonkeyPatch, grant: FakeGrantClient) -> None:
+    class _Wrapper:
+        def rpc(self, name: str, params: dict[str, Any]) -> Any:
+            result = grant.rpc(name, params)
+
+            class _Chain:
+                def execute(self_inner) -> Any:  # noqa: N805
+                    return result
+
+            return _Chain()
+
+    monkeypatch.setattr(routes, "service_client", lambda _s: _Wrapper())
+
+
+def test_completing_a_profile_grants_the_welcome_credits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`SIGNUP_CREDITS` was defined and read by NOTHING — a whole feature that
+    existed only as a constant, while a new account could not receive credits
+    by any path."""
+    profiles = FakeProfiles(dict(EXTRACTED))
+    monkeypatch.setattr(routes, "_profiles", lambda request, settings: profiles)
+    grant = FakeGrantClient()
+    _with_grant(monkeypatch, grant)
+
+    res = client.post("/onboarding/complete", json={"target_roles": "Analyst"}, headers=token())
+
+    assert res.status_code == 200
+    assert res.json()["credits_granted"] == 100
+    assert grant.calls[0]["p_amount"] == 100
+
+
+def test_completing_twice_grants_once(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second profile save is an ordinary thing to do and must cost nothing.
+
+    The database decides, not the caller: a `select ... if not granted` in
+    Python is read-then-write, and two saves arriving together would both read
+    "not yet". Here the second call returns null, which is what the unique
+    violation produces.
+    """
+    profiles = FakeProfiles(dict(EXTRACTED))
+    monkeypatch.setattr(routes, "_profiles", lambda request, settings: profiles)
+    grant = FakeGrantClient()
+    _with_grant(monkeypatch, grant)
+
+    first = client.post("/onboarding/complete", json={"target_roles": "A"}, headers=token())
+    second = client.post("/onboarding/complete", json={"target_roles": "A"}, headers=token())
+
+    assert first.json()["credits_granted"] == 100
+    assert second.json()["credits_granted"] is None, "a second completion granted again"
+    assert len(grant.granted) == 1
+
+
+def test_a_failed_grant_never_costs_someone_their_setup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule as the referral activation beside it. Nobody loses a finished
+    onboarding because a grant attached to it fell over — and unlike the
+    referral, this one is retryable, because the index makes a later attempt
+    either grant or do nothing."""
+    profiles = FakeProfiles(dict(EXTRACTED))
+    monkeypatch.setattr(routes, "_profiles", lambda request, settings: profiles)
+
+    def explode(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("credits are down")
+
+    monkeypatch.setattr(routes, "service_client", explode)
+
+    res = client.post("/onboarding/complete", json={"target_roles": "Analyst"}, headers=token())
+
+    assert res.status_code == 200
+    assert res.json()["onboarded"] is True
+    assert res.json()["credits_granted"] is None
+
+
+def test_the_grant_is_not_reachable_over_rpc_by_a_signed_in_user() -> None:
+    """A function `authenticated` can execute is one anybody can execute from a
+    browser console — and this one mints credits. Same rule that keeps
+    `referral_activate_tx` to service_role."""
+    from pathlib import Path
+
+    from tests.schema import _strip_comments
+
+    sql = _strip_comments(
+        (Path(__file__).resolve().parents[1] / "migrations" / "V2_016_signup_grant.sql").read_text(
+            encoding="utf-8"
+        )
+    )
+    statements = [" ".join(part.split()) for part in sql.split(";")]
+
+    grants = [s for s in statements if s.startswith("grant execute") and "signup" in s]
+    assert grants, "grant_signup_credits is defined but granted to nobody"
+    for stmt in grants:
+        grantees = {who.strip() for who in stmt.rsplit(" to ", 1)[-1].split(",")}
+        assert grantees == {"service_role"}, f"the mint is reachable by {grantees}"
+
+    revokes = [s for s in statements if s.startswith("revoke") and "signup" in s]
+    for role in ("public", "anon", "authenticated"):
+        assert any(s.endswith(f"from {role}") for s in revokes), f"never revoked from {role}"
+
+
+def test_once_is_enforced_by_an_index_not_by_a_read() -> None:
+    """The cap belongs to the database. A read-then-write in Python would let
+    two concurrent completions both pay out — the same reason the referral cap
+    is a unique index rather than a count."""
+    from pathlib import Path
+
+    sql = (
+        Path(__file__).resolve().parents[1] / "migrations" / "V2_016_signup_grant.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "create unique index" in sql
+    assert "where kind = 'signup'" in sql, "the index must be PARTIAL, or it caps every kind"
+
+    # And the route reaches it through the RPC rather than doing the work in
+    # Python. Checked with the AST, not a substring: the first version of this
+    # searched the function body for "select" and fired on the DOCSTRING, which
+    # says the word while explaining why not to do it. Fourth time today a
+    # substring stood in for a parse and reported correct code as broken.
+    import ast
+
+    tree = ast.parse(Path(routes.__file__).read_text(encoding="utf-8"))
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_grant_signup_credits"
+    )
+    calls = {
+        node.func.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "rpc" in calls, "the grant must go through the transaction"
+    assert "select" not in calls, "the grant path reads before it writes; two saves can race"
+    assert "table" not in calls, "the grant must not touch the tables directly"
+
+
 # ── Where am I ─────────────────────────────────────────────────────────────
 
 

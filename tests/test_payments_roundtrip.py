@@ -52,6 +52,7 @@ class FakeTable:
         self._filters: dict[str, Any] = {}
         self._op: str | None = None
         self._payload: dict[str, Any] | None = None
+        self._conflict: str | None = None
         self._single = False
 
     def select(self, *_a: Any, **_k: Any) -> FakeTable:
@@ -64,6 +65,23 @@ class FakeTable:
 
     def update(self, payload: dict[str, Any]) -> FakeTable:
         self._op, self._payload = "update", payload
+        return self
+
+    def upsert(self, payload: dict[str, Any], **kw: Any) -> FakeTable:
+        """Merge on the conflict target, or insert.
+
+        This method did not exist. `apply_delta` used `.update()`, so nothing
+        exercised an upsert and the fake was never asked for one — and the
+        moment the real code needed it, the fake raised AttributeError and
+        three payment tests failed for a reason that had nothing to do with
+        payments.
+
+        The behaviour that matters is the CONFLICT: a second write for the
+        same user must merge, not append. A fake that appended would let a
+        double-credit bug pass here.
+        """
+        self._op, self._payload = "upsert", payload
+        self._conflict = kw.get("on_conflict") or "user_id"
         return self
 
     def eq(self, column: str, value: Any) -> FakeTable:
@@ -80,6 +98,28 @@ class FakeTable:
     def _matches(self, row: dict[str, Any]) -> bool:
         return all(str(row.get(k)) == str(v) for k, v in self._filters.items())
 
+    def __getattr__(self, name: str) -> Any:
+        """Say WHICH method is missing, and that the real client has it.
+
+        Two fakes have now been absent rather than simplified. `_NullRunStore`
+        accepted every run and rejected none. This class's sibling in
+        `test_payments_roundtrip` had no `upsert` at all — and the day
+        `apply_delta` stopped using `update`, three payment tests failed with a
+        bare AttributeError, in a suite about payments, for a reason that had
+        nothing to do with payments.
+
+        A STATIC "implements everything production calls" check was written and
+        thrown away: most fakes stand in for two or three tables and would fail
+        it for methods they will never be asked for, and a guard that fires on
+        correct code gets deleted. The honest version is this — it cannot fire
+        early, and when it does fire it names the cause.
+        """
+        raise AttributeError(
+            f"{type(self).__name__} has no `{name}`, and production code just called it on a "
+            "table chain. The real client implements it; this stand-in does not. Add it — and "
+            "model what it REFUSES, not only what it accepts."
+        )
+
     def execute(self) -> Any:
         rows = self._db.tables.setdefault(self._name, [])
         if self._name in self._db.failing:
@@ -87,6 +127,17 @@ class FakeTable:
 
         if self._op == "insert":
             assert self._payload is not None
+            rows.append(dict(self._payload))
+            return _Res([dict(self._payload)])
+
+        if self._op == "upsert":
+            assert self._payload is not None
+            keys = [k.strip() for k in str(self._conflict).split(",")]
+            ident = tuple(str(self._payload.get(k)) for k in keys)
+            for row in rows:
+                if tuple(str(row.get(k)) for k in keys) == ident:
+                    row.update(self._payload)
+                    return _Res([dict(row)])
             rows.append(dict(self._payload))
             return _Res([dict(self._payload)])
 

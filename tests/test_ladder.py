@@ -139,7 +139,7 @@ def test_nothing_that_applied_is_silently_dropped() -> None:
 
 
 def test_the_fallback_never_appears_underneath_something_real() -> None:
-    """ "Nothing needs you right now" below a thing that needs you is a
+    """ "Nothing is due today" below a thing that needs you is a
     contradiction on one screen."""
     decision = choose(signals(new_match_count=2))
 
@@ -192,7 +192,16 @@ def test_nothing_pressing_says_so_rather_than_inventing_work() -> None:
 
     assert decision.primary["key"] == "standing"
     assert decision.deferred == []
-    assert "Nothing needs you" in decision.primary["title"]
+    assert "Nothing is due" in decision.primary["title"]
+
+    # The copy must agree with the button under it. The old body read "Your
+    # plan is running. Come back when something lands." above a button offering
+    # the week — it sent people away from an action it was offering, and
+    # asserted a plan that a brand-new account does not have.
+    body = decision.primary["body"].lower()
+    assert "come back" not in body, "the fallback must not send anyone away"
+    assert "your plan is running" not in body, "a new account has no plan to be running"
+    assert decision.primary["primary"]["route"], "the fallback must still offer somewhere to go"
 
 
 def test_zero_matches_is_not_a_rung() -> None:
