@@ -146,6 +146,7 @@
     "known"
   ],
   "GET /health": [
+    "commit",
     "service",
     "status",
     "version"
