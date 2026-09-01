@@ -80,6 +80,13 @@ ACCEPTED: dict[tuple[str, str], str] = {
     # A missing row is now a balance of zero and the grant proceeds, so the
     # only `None` left comes from the handler. The stale-entry half of the
     # assertion below is what made this visible.
+    ("onboarding.py", "_grant_signup_credits"): (
+        "None means 'no grant happened', from a failed call AND from 'already granted'. "
+        "Same answer to the only question the caller asks — the response reports a number "
+        "when credits landed and nothing when they did not. Safe here in a way it was NOT "
+        "for _activate_referral below: the partial unique index makes a retry either grant "
+        "or do nothing, so an indistinguishable failure is recoverable rather than lost."
+    ),
     ("onboarding.py", "_activate_referral"): (
         "DECIDE: None means 'no referral to activate'. A failed activation returns the "
         "same, so a referral that silently failed to grant is indistinguishable from a "

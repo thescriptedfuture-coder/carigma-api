@@ -98,6 +98,28 @@ class FakeTable:
     def _matches(self, row: dict[str, Any]) -> bool:
         return all(str(row.get(k)) == str(v) for k, v in self._filters.items())
 
+    def __getattr__(self, name: str) -> Any:
+        """Say WHICH method is missing, and that the real client has it.
+
+        Two fakes have now been absent rather than simplified. `_NullRunStore`
+        accepted every run and rejected none. This class's sibling in
+        `test_payments_roundtrip` had no `upsert` at all — and the day
+        `apply_delta` stopped using `update`, three payment tests failed with a
+        bare AttributeError, in a suite about payments, for a reason that had
+        nothing to do with payments.
+
+        A STATIC "implements everything production calls" check was written and
+        thrown away: most fakes stand in for two or three tables and would fail
+        it for methods they will never be asked for, and a guard that fires on
+        correct code gets deleted. The honest version is this — it cannot fire
+        early, and when it does fire it names the cause.
+        """
+        raise AttributeError(
+            f"{type(self).__name__} has no `{name}`, and production code just called it on a "
+            "table chain. The real client implements it; this stand-in does not. Add it — and "
+            "model what it REFUSES, not only what it accepts."
+        )
+
     def execute(self) -> Any:
         rows = self._db.tables.setdefault(self._name, [])
         if self._name in self._db.failing:

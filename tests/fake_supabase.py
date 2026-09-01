@@ -38,6 +38,7 @@ class FakeTable:
         self._db = db
         self._name = name
         self._filters: dict[str, Any] = {}
+        self._in: dict[str, list[str]] = {}
         self._op: str | None = None
         self._payload: Any = None
         self._conflict: str | None = None
@@ -70,6 +71,13 @@ class FakeTable:
 
     def eq(self, column: str, value: Any) -> FakeTable:
         self._filters[column] = value
+        return self
+
+    def in_(self, column: str, values: list[Any]) -> FakeTable:
+        """`WHERE column IN (...)`. Production calls this in `routes/jobs.py`
+        and the fake never had it — found by asking, for every method our code
+        calls on a table chain, whether the stand-in answers it."""
+        self._in[column] = [str(v) for v in values]
         return self
 
     def gte(self, column: str, value: Any) -> FakeTable:
@@ -109,7 +117,34 @@ class FakeTable:
                 return False
             if op == "<=" and not actual <= value:
                 return False
+        # `in_`, compared as STRINGS like `eq` above, so the two cannot
+        # disagree about what "equal" means for the same column.
+        for column, allowed in self._in.items():
+            if str(row.get(column)) not in allowed:
+                return False
         return True
+
+    def __getattr__(self, name: str) -> Any:
+        """Say WHICH method is missing, and that the real client has it.
+
+        Two fakes have now been absent rather than simplified. `_NullRunStore`
+        accepted every run and rejected none. This class's sibling in
+        `test_payments_roundtrip` had no `upsert` at all — and the day
+        `apply_delta` stopped using `update`, three payment tests failed with a
+        bare AttributeError, in a suite about payments, for a reason that had
+        nothing to do with payments.
+
+        A STATIC "implements everything production calls" check was written and
+        thrown away: most fakes stand in for two or three tables and would fail
+        it for methods they will never be asked for, and a guard that fires on
+        correct code gets deleted. The honest version is this — it cannot fire
+        early, and when it does fire it names the cause.
+        """
+        raise AttributeError(
+            f"{type(self).__name__} has no `{name}`, and production code just called it on a "
+            "table chain. The real client implements it; this stand-in does not. Add it — and "
+            "model what it REFUSES, not only what it accepts."
+        )
 
     def execute(self) -> Result:
         if self._name in self._db.failing:
