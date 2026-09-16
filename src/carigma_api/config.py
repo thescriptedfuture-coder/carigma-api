@@ -118,6 +118,17 @@ class Settings(BaseSettings):
     # default on money is the one that refuses.
     credits_enforced: bool = Field(default=True)
 
+    # ── Build identity ─────────────────────────────────────────────────────
+    # Set by Render on every deploy. Reported by /health so "which build is
+    # running" is one request rather than an afternoon of grepping a minified
+    # bundle for strings — a method that fails outright when the change is
+    # control flow and leaves no string behind.
+    #
+    # A commit SHA is public in any repository anyone can read and says nothing
+    # about keys, hosts or users. Empty locally, and /health says "unknown"
+    # rather than guessing.
+    render_git_commit: str = Field(default="")
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")
