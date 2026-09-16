@@ -101,22 +101,136 @@ def test_hs256_is_rejected_even_though_it_is_a_real_supabase_algorithm(
     assert client.post("/auth/session", headers=auth(token)).status_code == 401
 
 
-def test_algorithm_confusion_downgrade_is_rejected(client: TestClient) -> None:
-    """Presenting the public key as an HMAC secret must not verify."""
-    from tests.conftest import JWKS
+# ── Algorithm confusion ───────────────────────────────────────────────────
+#
+# THE ATTACK: sign an HS256 token using the server's PUBLIC key as the HMAC
+# secret. A verifier that takes `alg` from the token and hands its "key" to
+# whichever algorithm was named will check an HMAC with a value the attacker
+# can download — and accept the forgery.
+#
+# ## Why the forgery is built by hand
+#
+# This test used `jwt.encode(..., algorithm="HS256")` with the JWKS as the
+# secret. PyJWT 2.14 — a MINOR release, inside our `<3` ceiling — started
+# refusing to encode a key that looks like a JWK: "should not be used directly
+# as an HMAC secret". The library added the same defence the API has, and in
+# doing so made the test unable to construct its own attack.
+#
+# The guarantee did not change; the ability to demonstrate it did. So the
+# forgery is assembled below PyJWT, from `hmac` and base64, where no library
+# release can decline to build it. Local had 2.13 and passed; CI resolved 2.14
+# and failed — which is also a reminder that without a lockfile, local green
+# tests the versions installed once and CI tests the newest allowed.
+#
+# ## Why well-formedness is proved separately
+#
+# If the hand-built token were malformed, the API would reject it for being
+# malformed and this would pass for the wrong reason. `_hs256_is_valid` checks
+# the signature with the same secret, independently of PyJWT.
+#
+# ## What the 401 does NOT prove — found by breaking it
+#
+# An earlier draft of this comment said "a 401 below can only mean the algorithm
+# was refused". **That was false.** Adding "HS256" to `ALLOWED_ALGORITHMS` left
+# all three forgery tests PASSING. The token was still rejected, because PyJWT
+# independently refuses to use an EC public key as an HMAC secret.
+#
+# So the forgery is stopped by TWO layers — our allow-list pin, and PyJWT's
+# key-type check — and an end-to-end test cannot tell them apart. It proves the
+# outcome (the forgery never authenticates), which is the property users need.
+# It does NOT prove our pin, and would keep passing if the pin were deleted as
+# long as the library's check held.
+#
+# Our pin is guarded by `test_allow_list_excludes_symmetric_algorithms`, which
+# DID fail when HS256 was added. Two tests, two layers, each stating which one
+# it covers — rather than one test claiming both.
 
-    token = jwt.encode(
-        {"sub": USER_ID, "exp": int(time.time()) + 3600},
-        json_dumps_key(JWKS),
-        algorithm="HS256",
+
+def _b64url(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _forge_hs256(claims: dict[str, object], secret: bytes) -> str:
+    import hashlib
+    import hmac
+    import json
+
+    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
+    signing_input = f"{header}.{payload}".encode("ascii")
+    signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+    return f"{header}.{payload}.{_b64url(signature)}"
+
+
+def _hs256_is_valid(token: str, secret: bytes) -> bool:
+    import hashlib
+    import hmac
+
+    header, payload, signature = token.split(".")
+    expected = hmac.new(secret, f"{header}.{payload}".encode("ascii"), hashlib.sha256).digest()
+    return hmac.compare_digest(_b64url(expected), signature)
+
+
+def _confusion_secrets() -> dict[str, bytes]:
+    """Every public form of our key an attacker could use as the HMAC secret.
+
+    The PEM is the classic shape of this attack; the JWK and JWKS JSON are what
+    an attacker gets by fetching `/.well-known/jwks.json`, which is public by
+    design. The original test covered only the last.
+    """
+    import json
+
+    from cryptography.hazmat.primitives import serialization
+
+    from tests.conftest import _PRIVATE_KEY, JWKS
+
+    pem = _PRIVATE_KEY.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return {
+        "public key as PEM": pem,
+        "single JWK as JSON": json.dumps(JWKS["keys"][0]).encode(),
+        "whole JWKS as JSON": json.dumps(JWKS).encode(),
+    }
+
+
+@pytest.mark.parametrize("shape", sorted(_confusion_secrets()))
+def test_algorithm_confusion_downgrade_is_rejected(client: TestClient, shape: str) -> None:
+    """A correctly-signed HS256 forgery, keyed with our PUBLIC key, must not
+    verify — in any public form an attacker can obtain."""
+    secret = _confusion_secrets()[shape]
+    token = _forge_hs256({"sub": USER_ID, "exp": int(time.time()) + 3600}, secret)
+
+    assert _hs256_is_valid(token, secret), (
+        "the forgery is malformed, so a 401 would prove nothing about algorithm pinning"
     )
     assert client.post("/auth/session", headers=auth(token)).status_code == 401
 
 
-def json_dumps_key(jwks: dict[str, object]) -> str:
+def test_pyjwt_still_refuses_to_build_this_attack() -> None:
+    """A CANARY about the library, not the guarantee about us.
+
+    PyJWT 2.14 refuses to encode a JWK-shaped value as an HMAC secret. That is
+    defence in depth we did not write and do not control. If a future release
+    relaxes it, this fails — and it SHOULD, because a security defence
+    disappearing from a dependency deserves a human looking at it.
+
+    It must not be mistaken for the protection. The API's rejection is proved
+    above with a hand-built token that no PyJWT release can refuse to make, so
+    this failing never means the API is exposed; it means the library changed.
+    """
     import json
 
-    return json.dumps(jwks)
+    from tests.conftest import JWKS
+
+    with pytest.raises(jwt.exceptions.InvalidKeyError):
+        jwt.encode(
+            {"sub": USER_ID, "exp": int(time.time()) + 3600},
+            json.dumps(JWKS["keys"][0]),
+            algorithm="HS256",
+        )
 
 
 def test_unlisted_algorithm_is_rejected(client: TestClient) -> None:
@@ -350,10 +464,20 @@ def test_config_has_no_hs256_secret_field() -> None:
 
 
 def test_allow_list_excludes_symmetric_algorithms() -> None:
+    """The ONLY test that guards our pin specifically.
+
+    Proved by breaking: with "HS256" added to the allow-list, the end-to-end
+    algorithm-confusion tests still passed — PyJWT's own key-type check stopped
+    the forgery — and this one failed. So this is not redundant with them; it is
+    the half they cannot see. Removing it would leave our defence depending
+    entirely on a dependency's behaviour, which a minor release has already
+    changed once.
+    """
     from carigma_api.auth.jwt_verifier import ALLOWED_ALGORITHMS
 
     assert "ES256" in ALLOWED_ALGORITHMS
-    assert not any(a.startswith("HS") for a in ALLOWED_ALGORITHMS)
+    assert not any(a.upper().startswith("HS") for a in ALLOWED_ALGORITHMS)
+    assert "none" not in {a.lower() for a in ALLOWED_ALGORITHMS}
 
 
 def test_rotated_key_is_picked_up_without_redeploy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,3 +520,58 @@ def test_kid_is_required_to_match_a_published_key() -> None:
     from tests.conftest import JWKS
 
     assert JWKS["keys"][0]["kid"] == TEST_KID
+
+
+# ── A missing service key is not the same failure as an unreachable one ──────
+
+
+def test_production_refuses_to_start_without_the_service_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instance check warns and carries on, which is right for a Supabase
+    blip. A MISSING key is not a blip: the welcome grant, referral activation,
+    unsubscribe tokens and every cron depend on it, and the multi-instance
+    CRITICAL never runs. A production build without it would look healthy and
+    be broken in five places, so it must not start."""
+    import asyncio
+
+    from carigma_api import main as main_mod
+    from carigma_api.config import Settings
+
+    prod = Settings(
+        environment="production",
+        supabase_url="https://example.supabase.co",
+        supabase_service_key="",
+    )
+    monkeypatch.setattr(main_mod, "get_settings", lambda: prod)
+
+    async def start() -> None:
+        async with main_mod.lifespan(main_mod.create_app()):
+            pass
+
+    with pytest.raises(RuntimeError, match="SUPABASE_SERVICE_KEY"):
+        asyncio.run(start())
+
+
+def test_outside_production_a_missing_key_is_only_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI has no service key and must still boot the app. Refusing there would
+    make every test run an outage for a reason that is not a defect."""
+    import asyncio
+
+    from carigma_api import main as main_mod
+    from carigma_api.config import Settings
+
+    dev = Settings(
+        environment="test",
+        supabase_url="https://example.supabase.co",
+        supabase_service_key="",
+    )
+    monkeypatch.setattr(main_mod, "get_settings", lambda: dev)
+
+    async def start() -> None:
+        async with main_mod.lifespan(main_mod.create_app()):
+            pass
+
+    asyncio.run(start())
