@@ -42,8 +42,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from carigma_api.config import Settings  # noqa: E402
+from carigma_api.services import deploy, market, reengagement, triggers  # noqa: E402
 from carigma_api.services import emails as mail  # noqa: E402
-from carigma_api.services import market, reengagement, triggers  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -600,6 +600,15 @@ def main() -> int:
         "widen --since-hours, so testing cannot mail real users.",
     )
     args = parser.parse_args()
+
+    # The four cron jobs are separate Render services with their OWN branch
+    # setting, and a cron has no /health to report it. A job built from the
+    # wrong branch sends real email from code CI has not judged, so it refuses
+    # before touching anything — Render marks the run failed and says so.
+    refusal = deploy.wrong_branch(Settings())
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
 
     if args.kind == "sweep":
         # Not an email. It lives here because this is the process that already

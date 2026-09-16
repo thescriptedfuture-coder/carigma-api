@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     # about keys, hosts or users. Empty locally, and /health says "unknown"
     # rather than guessing.
     render_git_commit: str = Field(default="")
+    # The branch it was built from, which production REFUSES to start on unless
+    # it is `services/deploy.py`'s DEPLOY_BRANCH. Both services deployed from
+    # `p4-surfaces` for weeks while every merge went to `main`, and nothing
+    # could say so — the setting lived only in Render's dashboard.
+    render_git_branch: str = Field(default="")
+    # Render sets this on pull-request previews, which carry their PR's branch
+    # by definition and must not be refused for it.
+    is_pull_request: bool = Field(default=False)
 
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).

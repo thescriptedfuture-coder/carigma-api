@@ -17,7 +17,19 @@ deploy; locally it is absent and this says so rather than guessing.
 
 **It is a build identifier, not configuration.** A commit SHA is public in any
 repository anyone can read, and it says nothing about keys, hosts or users —
-the same reason the version was already here. Nothing else joins it.
+the same reason the version was already here.
+
+## Why it reports a branch too
+
+Its first real use read a commit that did not match `main`, and the conclusion
+drawn was "production is running old code". It was not: both services were
+building from `p4-surfaces`, whose tip had exactly `main`'s tree under a
+different hash, because a merge commit always gets a new one. A hash alone
+cannot distinguish "wrong branch, same code" from "stale code", and those need
+opposite responses. `scripts/deployed.py` compares the code; this has to say
+where it came from for that comparison to be read correctly.
+
+The branch is as public as the commit. Nothing else joins them.
 """
 
 from __future__ import annotations
@@ -28,25 +40,9 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from carigma_api.config import Settings, get_settings
+from carigma_api.services import deploy
 
 router = APIRouter(tags=["health"])
-
-
-def _commit(settings: Settings) -> str:
-    """The deployed commit, short. `unknown` when nothing set it.
-
-    Read through `Settings`, not `os.getenv` — the first version reached for
-    the environment directly and `test_env_example.py` caught it. Every setting
-    goes through one place so that `.env.example` documents the whole surface,
-    which is the rule that keeps a deploy from depending on a variable nobody
-    wrote down.
-
-    Deliberately no fallback to reading `.git`: the container has no
-    repository, so it would only ever succeed on a laptop and would answer
-    confidently about the wrong thing.
-    """
-    sha = settings.render_git_commit
-    return sha[:12] if sha else "unknown"
 
 
 class HealthResponse(BaseModel):
@@ -56,14 +52,23 @@ class HealthResponse(BaseModel):
     #: The commit this process was built from, so "is the fix deployed" is one
     #: request rather than an afternoon.
     commit: str
+    #: The branch it was built from. Production refuses to start on any branch
+    #: but `deploy.DEPLOY_BRANCH`, so outside a preview this reads `main`.
+    branch: str
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
-    """Liveness probe. Deliberately leaks no configuration detail."""
+    """Liveness probe. Deliberately leaks no configuration detail.
+
+    Read through `Settings`, not `os.getenv` — the first version reached for
+    the environment directly and `test_env_example.py` caught it. Every setting
+    goes through one place so `.env.example` documents the whole surface.
+    """
     return HealthResponse(
         status="ok",
         service="carigma-api",
         version="0.1.0",
-        commit=_commit(settings),
+        commit=deploy.short_commit(settings),
+        branch=deploy.branch(settings),
     )
