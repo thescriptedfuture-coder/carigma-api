@@ -54,6 +54,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.jwt_verifier = JWTVerifier(settings)
 
+    # The service key, which the instance check below cannot tell apart from a
+    # Supabase blip — and they are different failures.
+    #
+    # `instances.check` warns and carries on, deliberately, because a TRANSIENT
+    # failure to reach Supabase must not turn a deploy into an outage. But a
+    # MISSING key is not transient. Without it the welcome grant, referral
+    # activation, unsubscribe tokens and every cron fail, and the
+    # multi-instance CRITICAL below never runs at all — so a production deploy
+    # missing this variable would start, look healthy, log one warning, and be
+    # broken in five places.
+    #
+    # Same distinction the JWKS check above already makes: refuse to start a
+    # production API that cannot do its job. A failed deploy leaves the previous
+    # build serving, which is strictly better than a new one that silently
+    # cannot grant credits. Outside production the key is legitimately absent
+    # (CI has none) and this stays a warning.
+    if settings.is_production and not settings.supabase_service_key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_KEY is not set. Production cannot grant credits, activate "
+            "referrals, sign unsubscribe links or run the crons without it — refusing to "
+            "start rather than serving a build that looks healthy and is not."
+        )
+
     # Count our peers. `services/ratelimit` holds its buckets in process
     # memory, so a second instance silently doubles every ceiling — including
     # the share of the JSearch quota live V1 users are drawing from.
@@ -68,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             service_client(settings), version=settings.environment
         )
     except Exception:
+        # Reached with a key present only when Supabase is unreachable, which is
+        # the transient case this is right to tolerate. Without a key it is
+        # reached only outside production — see the refusal above.
         logger.warning("instance check skipped", exc_info=True)
         app.state.instances = None
 
