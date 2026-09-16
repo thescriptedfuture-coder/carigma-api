@@ -33,7 +33,7 @@ from carigma_api.routes import settings as settings_routes
 from carigma_api.routes import today as today_routes
 from carigma_api.routes import unsubscribe as unsubscribe_routes
 from carigma_api.routes import weekly as weekly_routes
-from carigma_api.services import instances
+from carigma_api.services import deploy, instances
 from carigma_api.services.repository import service_client
 
 logging.basicConfig(level=logging.INFO)
@@ -76,6 +76,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "referrals, sign unsubscribe links or run the crons without it — refusing to "
             "start rather than serving a build that looks healthy and is not."
         )
+
+    # Production builds only from the branch the repository declares. The
+    # Render setting drifted to a feature branch once and nothing could report
+    # it; a refusal here is the setting's only way to speak. See deploy.py.
+    refusal = deploy.wrong_branch(settings)
+    if refusal:
+        raise RuntimeError(refusal)
 
     # Count our peers. `services/ratelimit` holds its buckets in process
     # memory, so a second instance silently doubles every ceiling — including
