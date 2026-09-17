@@ -75,6 +75,27 @@ class Unreadable(ValueError):
     """
 
 
+class NotAProfile(ValueError):
+    """Readable, and not a description of anybody's working life.
+
+    An invoice, a ticket, a bank statement. Reading one and producing a career
+    score from it would be the product confidently describing something it
+    never saw — the honesty rule applied to what comes IN, not only to what
+    goes out. Distinct from `Unreadable` because the advice is different: the
+    file was fine, it was the wrong file.
+    """
+
+
+class ProfileCheckFailed(RuntimeError):
+    """The check itself gave no verdict. OUR failure, never the user's file.
+
+    Deliberately not a `NotAProfile`: telling someone their real resume is not
+    a resume because a model call came back malformed would blame them for us.
+    And deliberately not a pass: a gate that opens when it cannot decide is not
+    a gate.
+    """
+
+
 class Extractor(Protocol):
     """The JSON-returning model call. Injected so tests never hit the API."""
 
@@ -131,12 +152,80 @@ def text_from_upload(data: bytes, filename: str) -> str:
     return text
 
 
-def parse_profile_text(text: str, *, extractor: Extractor) -> dict[str, Any]:
+#: How much of the document the profile check reads. A resume says what it is
+#: in its first screen; an invoice does too.
+CHECK_CHARS = 4000
+
+PROFILE_CHECK_SYSTEM = (
+    "You decide whether a document describes one person's working life. "
+    "Return ONLY a raw JSON object. No prose, no markdown. Start with { end with }."
+)
+
+
+def check_is_profile(text: str, *, extractor: Extractor, pasted: bool) -> None:
+    """Refuse text that is not a work profile, BEFORE anything is extracted.
+
+    A separate call rather than a key added to the extraction prompt, for two
+    reasons. The extraction prompt is V1's, carried verbatim because the
+    parsing is the IP. And it is written to be generous — "infer one if not
+    explicit" — which is right for a real profile and exactly wrong for an
+    invoice: asked to infer a headline, a model will find one.
+
+    **Biased toward yes.** Turning away someone's real resume is a closed door
+    at the first step; reading an unusual one costs nothing. So short, junior,
+    non-English and oddly formatted profiles pass, and only a document that is
+    clearly something else is refused.
+
+    Raises `NotAProfile` with a sentence for the input the person used, or
+    `ProfileCheckFailed` when the answer is not a verdict.
+    """
+    user = f"""Does the text below describe a person's professional profile: a resume, CV, LinkedIn profile export, professional bio or portfolio summary covering their work, roles, skills or education?
+
+Count it as a profile however short, junior, unusual, badly formatted or non-English it is. A student with no jobs yet, a career changer and a one-paragraph bio all count.
+
+It is NOT a profile when it is clearly another kind of document: an invoice, receipt, ticket, bank or card statement, contract, letter, form, article, report, job advertisement, or a document about a company rather than a person.
+
+When unsure, answer true. Wrongly turning away someone's real resume costs far more than reading an unusual one.
+
+Return exactly: {{"is_work_profile": true or false, "looks_like": "two to four words naming the kind of document"}}
+
+DOCUMENT TEXT:
+{text[:CHECK_CHARS]}"""
+
+    # `object`, not the protocol's dict: the model can return a list, and this
+    # is the line that has to notice.
+    raw: object = extractor(PROFILE_CHECK_SYSTEM, user, 200)
+    verdict = raw.get("is_work_profile") if isinstance(raw, dict) else None
+
+    # `is True` / `is False`, not truthiness. "false" as a string is truthy, and
+    # a check that reads it as yes has just waved an invoice through.
+    if verdict is True:
+        return
+    if verdict is False:
+        looks_like = str(raw.get("looks_like") or "")[:60] if isinstance(raw, dict) else ""
+        # What it resembled, never the document itself: this is someone's file.
+        logger.info("refused a non-profile upload (looks like: %s)", looks_like or "unstated")
+        if pasted:
+            raise NotAProfile(
+                "This doesn't look like a work profile — paste the text of your LinkedIn "
+                "profile or resume, or upload your LinkedIn PDF export."
+            )
+        raise NotAProfile(
+            "This doesn't look like a work profile — try your LinkedIn PDF export "
+            "(Profile → More → Save to PDF) or a resume."
+        )
+    raise ProfileCheckFailed(f"the profile check returned no verdict: {str(raw)[:200]}")
+
+
+def parse_profile_text(text: str, *, extractor: Extractor, pasted: bool = False) -> dict[str, Any]:
     """Raw text to structured fields. V1's prompt, unchanged.
 
     The `targetRoles` and `location` keys are in the resume prompt but not in
     V1's LinkedIn-PDF prompt; this uses the resume one for every input, which
     is what V1's `parse_resume` and its paste path both do.
+
+    Three refusals come first, cheapest first: too little text, then not a
+    profile, and only then the extraction.
     """
     text = (text or "").strip()
     if len(text) < MIN_TEXT:
@@ -144,6 +233,8 @@ def parse_profile_text(text: str, *, extractor: Extractor) -> dict[str, Any]:
             "Couldn't read enough text. Use a text-based PDF or Word resume "
             "(a scanned image won't work), or paste more of your profile."
         )
+
+    check_is_profile(text, extractor=extractor, pasted=pasted)
 
     system = (
         "You extract structured career data from a resume or LinkedIn export. "
@@ -194,11 +285,16 @@ def clean(raw: dict[str, Any] | None) -> dict[str, Any]:
 
 
 __all__ = [
+    "CHECK_CHARS",
     "EXTRACTED_FIELDS",
     "MAX_BYTES",
     "MIN_TEXT",
+    "PROFILE_CHECK_SYSTEM",
     "Extractor",
+    "NotAProfile",
+    "ProfileCheckFailed",
     "Unreadable",
+    "check_is_profile",
     "clean",
     "extract_docx_text",
     "extract_pdf_text",
