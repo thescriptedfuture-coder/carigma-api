@@ -50,16 +50,18 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   emails)  exec "$py" scripts/send_emails.py "$@" ;;
   deployed) exec "$py" scripts/deployed.py "$@" ;;
+  landed)   exec "$py" scripts/landed.py "$@" ;;
   test)    exec "$py" -m pytest "$@" ;;
   gates)   exec bash scripts/gates.sh "$@" ;;
   python)  exec "$py" "$@" ;;
   pip)     exec "$py" -m pip "$@" ;;
   "")
-    echo "Usage: ./run {emails|deployed|test|gates|python|pip} ..."
+    echo "Usage: ./run {emails|deployed|landed|test|gates|python|pip} ..."
     echo
     echo "  ./run emails daily --dry-run     what today's brief would say"
     echo "  ./run emails weekly --dry-run    what Sunday's review would say"
     echo "  ./run deployed                   is production running origin/main? run it first"
+    echo "  ./run landed [commit ...]        is the work committed, pushed, on main? run it last"
     echo "  ./run gates                      everything that must pass"
     exit 2
     ;;

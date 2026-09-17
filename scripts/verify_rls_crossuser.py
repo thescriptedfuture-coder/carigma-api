@@ -51,6 +51,13 @@ APP_ID = "<application_id>"
 #: a previous run failed to clean up.
 SALTED = "<salted>"
 
+#: A fresh uuid per user, for a uuid primary key the API supplies itself.
+NEW_UUID = "<uuid>"
+
+#: A code matching `referral_codes_shape_ck` (`^[a-z0-9]{6,12}$`), unique per
+#: run and user. SALTED would fail the check constraint and report SEED FAILED.
+CODE = "<code>"
+
 #: `interview_preps` and `application_events` both carry a NOT NULL FK to
 #: job_applications, so each user needs one of those before they can have
 #: either. It is seeded first and tested too — it was never in the eleven
@@ -91,7 +98,62 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     # SEED FAILED rather than quietly scoring a pass. Salted per user, since two
     # rows are inserted and a shared value would collide.
     "user_subscriptions": {"plan_key": "rls-probe", "sub_id": SALTED},
+    # ── Written by the API as the user, and never probed live until 2026-09-17.
+    # The RLS measurement found eleven such tables verified only by migration
+    # text; these eight were not in this list at all (the V2_011 three were,
+    # but the recorded 9/9 run predates them).
+    "profiles": {},
+    "score_history": {"score": 0},
+    "credits": {"balance": 0},
+    "credit_ledger": {"delta": 0, "reason": "rls-probe"},
+    "naukri_scores": {"score": 0},
+    "thread_decisions": {"item_key": SALTED, "decision": "dismissed"},
+    "agent_runs": {"id": NEW_UUID, "agent": "rls-probe"},
+    "referral_codes": {"code": CODE},
 }
+
+#: Every table the API writes through the USER client, and how — the live half
+#: of the RLS RETURNING question.
+#:
+#: supabase-py asks for the written row back on every insert, update and upsert.
+#: Postgres then requires the row to pass the table's SELECT policy, and if it
+#: does not, the write ERRORS and rolls back — a correct refusal that reaches
+#: the user as "we couldn't save that". The code measurement found no table
+#: where that can happen; migration text is not the database, so this asks the
+#: database, using each table's real write shape:
+#:
+#: - ("insert", None)          INSERT ... RETURNING
+#: - ("upsert", conflict)      INSERT ... ON CONFLICT DO UPDATE ... RETURNING,
+#:                             run TWICE so the DO UPDATE path is exercised
+#: - ("update", {patch})       UPDATE ... RETURNING on the user's own row,
+#:                             which the service role seeds first
+#: - ("insert+update", {patch}) both, as the user, when the API does both
+#:
+#: Only A writes as itself. B is still seeded by the service role, so the
+#: leak and access halves keep one side independent of the policy under test.
+#:
+#: `tests/test_rls_probe.py` holds this list to the code: every table written in
+#: `src/` must be here or in its service-only list, with a reason.
+WRITES_AS_USER: dict[str, tuple[str, Any]] = {
+    "profiles": ("upsert", "user_id"),  # ProfileRepository.save
+    "score_history": ("insert", None),  # ScoreRepository.record
+    "credits": ("upsert", "user_id"),  # SupabaseCreditStore.apply_delta
+    "credit_ledger": ("insert", None),  # SupabaseCreditStore.apply_delta
+    "naukri_scores": ("insert", None),  # routes/naukri.py
+    "thread_decisions": ("upsert", "user_id,item_key"),  # thread_store
+    "agent_runs": ("upsert", "id"),  # run_store
+    "referral_codes": ("insert", None),  # referral_store.code_for
+    "content_loop": ("upsert", "user_id,week_start,day"),  # posts_store.save_slot
+    "content_weeks": ("upsert", "user_id,week_start"),  # posts_store.save_week
+    "weekly_review": ("upsert", "user_id,week_start"),  # weekly_store
+    "profile_updates": ("insert+update", {"state": "declined"}),  # propose, then decide
+    "jobs_feed": ("update", {"status": "dismissed", "dismiss_reason": "rls-probe"}),
+    "payments": ("insert+update", {"status": "failed"}),  # record, then claim
+    "user_subscriptions": ("update", {"cycles_credited": 0}),  # claim_cycles
+}
+
+#: Postgres's code for "new row violates row-level security policy".
+RLS_REFUSED = "42501"
 
 
 def admin_headers(settings: Settings) -> dict[str, str]:
@@ -187,8 +249,8 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
 
         tables = {PARENT_TABLE: {}, **OWNER_SCOPED}
 
-        print(f"{'table':22} {'sees own':>10}  {'sees other':>12}   verdict")
-        print("-" * 66)
+        print(f"{'table':22} {'sees own':>10}  {'sees other':>12}  {'A writes own':>12}   verdict")
+        print("-" * 80)
 
         def row_for(template: dict[str, Any], uid: str) -> dict[str, Any]:
             out: dict[str, Any] = {}
@@ -197,6 +259,10 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
                     out[key] = app_id[uid]
                 elif value == SALTED:
                     out[key] = f"rls-probe-{salt}-{uid[:8]}"
+                elif value == NEW_UUID:
+                    out[key] = str(uuid.uuid4())
+                elif value == CODE:
+                    out[key] = f"{salt}{uid.replace('-', '')[:4]}"
                 else:
                     out[key] = value
             if "milestone_key" in out:
@@ -216,17 +282,73 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
                 failures.append(f"{tbl}: {who}'s {direction} errored ({str(exc)[:60]})")
                 return []
 
+        def write_as_owner(tbl: str, client: Any, row: dict[str, Any]) -> str:
+            """Write A's row AS A, the way the API does. Returns the outcome.
+
+            `ok`, or a label that says which failure it was — because "RLS
+            refused a correct write" and "the probe's row was malformed" need
+            opposite responses, and one FAIL label would hide which.
+            """
+            method, arg = WRITES_AS_USER[tbl]
+            attempts: list[Any] = []
+            try:
+                if method == "insert":
+                    attempts.append(client.table(tbl).insert(row).execute())
+                elif method == "upsert":
+                    # Twice: the first may insert, the second MUST take the
+                    # ON CONFLICT DO UPDATE path, which checks the existing
+                    # row against SELECT and UPDATE policies as well.
+                    for _ in range(2):
+                        attempts.append(client.table(tbl).upsert(row, on_conflict=arg).execute())
+                else:
+                    if method == "insert+update":
+                        attempts.append(client.table(tbl).insert(row).execute())
+                    else:
+                        # The API only updates this table; its rows come from
+                        # a cron. Seeded by the service role, separately, so a
+                        # bad seed row cannot be reported as an RLS finding.
+                        try:
+                            svc.table(tbl).insert(row).execute()
+                        except Exception as exc:
+                            return f"SEED FAILED ({str(exc)[:70]})"
+                    attempts.append(
+                        client.table(tbl).update(arg).eq("user_id", row["user_id"]).execute()
+                    )
+            except Exception as exc:
+                code = str(getattr(exc, "code", "") or "")
+                if code == RLS_REFUSED:
+                    return f"RLS REFUSED ({str(exc)[:70]})"
+                return f"WRITE ERROR, not RLS [{code or type(exc).__name__}] ({str(exc)[:70]})"
+            if not all(getattr(res, "data", None) for res in attempts):
+                # Postgres errors rather than hiding an inserted row, but an
+                # UPDATE whose USING filters the row out returns nothing.
+                return "NOTHING RETURNED"
+            return "ok"
+
+        writes_checked = 0
         for table, template in tables.items():
             # PARENT_TABLE is already seeded — it had to exist before the rows
             # that reference it.
-            if table != PARENT_TABLE:
+            wrote = "-"
+            if table in WRITES_AS_USER:
+                wrote = write_as_owner(table, a, row_for(template, a_id))
+                writes_checked += 1
+                if wrote != "ok":
+                    failures.append(f"{table}: A writing A's own row -> {wrote}")
+                try:
+                    svc.table(table).insert(row_for(template, b_id)).execute()
+                except Exception as exc:
+                    failures.append(f"{table}: could not seed B's row ({str(exc)[:90]})")
+                    print(f"{table:22} {'-':>10}  {'-':>12}  {wrote[:12]:>12}   SEED FAILED")
+                    continue
+            elif table != PARENT_TABLE:
                 try:
                     svc.table(table).insert(
                         [row_for(template, a_id), row_for(template, b_id)]
                     ).execute()
                 except Exception as exc:
                     failures.append(f"{table}: could not seed rows ({str(exc)[:90]})")
-                    print(f"{table:22} {'-':>10}  {'-':>12}   SEED FAILED")
+                    print(f"{table:22} {'-':>10}  {'-':>12}  {'-':>12}   SEED FAILED")
                     continue
 
             # LEAK, both directions. Checking only A->B would miss a policy
@@ -251,10 +373,12 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
                 missing = "A" if not own_a else "B"
                 failures.append(f"{table}: LOCKED OUT — {missing} cannot see their own rows")
 
-            verdict = "ok" if (ok_leak and ok_own) else "FAIL"
+            ok_write = wrote in ("ok", "-")
+            verdict = "ok" if (ok_leak and ok_own and ok_write) else "FAIL"
             print(
                 f"{table:22} {('both' if ok_own else 'NO'):>10}  "
-                f"{('no' if ok_leak else f'{len(leaked)} ROWS'):>12}   {verdict}"
+                f"{('no' if ok_leak else f'{len(leaked)} ROWS'):>12}  "
+                f"{wrote[:12]:>12}   {verdict}"
             )
 
     finally:
@@ -279,8 +403,18 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
     if checked != expected:
         print(f"VERDICT: inconclusive — only {checked}/{expected} tables measured.")
         return 1
+    if writes_checked != len(WRITES_AS_USER):
+        print(
+            f"VERDICT: inconclusive — only {writes_checked}/{len(WRITES_AS_USER)} "
+            "user-written tables were written as their owner."
+        )
+        return 1
     print(f"VERDICT: all {checked} owner-scoped tables isolate correctly.")
     print("A sees only A. A still sees A.")
+    print(
+        f"And A can write A's own row, and get it back, on all {writes_checked} "
+        "tables the API writes as the user."
+    )
     return 0
 
 
