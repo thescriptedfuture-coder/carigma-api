@@ -138,11 +138,11 @@ def inspect(name: str, path: Path, *, fetch: bool = True) -> RepoState:
         # Only changes that exist nowhere on the remote are work at risk. A
         # branch synced forward to main is "ahead" by merge commits that carry
         # nothing origin/main does not already have.
+        # "neither origin/main nor origin/main" when a branch tracks main itself.
+        where = TARGET if upstream == TARGET else f"{upstream} or {TARGET}"
         at_risk = git.lines("log", "--no-merges", "--format=%h %s", "@{u}..HEAD", "--not", TARGET)
         if at_risk:
-            state.problem(
-                f"UNPUSHED: {len(at_risk)} change(s) on neither {upstream} nor {TARGET}", at_risk
-            )
+            state.problem(f"UNPUSHED: {len(at_risk)} change(s) not on {where}", at_risk)
         elif ahead:
             state.note(f"ahead of {upstream} by {len(ahead)} commit(s), all already on {TARGET}")
 
