@@ -135,7 +135,38 @@ async def extract_profile(
     """
     profiles = _profiles(request, settings)
 
+    # ## A body that is not a form is OUR bug, and must not read as the user's
+    #
+    # `File()` and `Form()` read only form encodings. Any other body leaves both
+    # None, and until this check that fell through to "Upload a resume or
+    # LinkedIn PDF, or paste your profile text" — an instruction to do exactly
+    # what the person had just done. The web client's axios instance carried a
+    # default `Content-Type: application/json`, which makes axios SERIALISE
+    # FormData to JSON: every PDF arrived as `{"file": {}}` and every paste as
+    # `{"text": "..."}`. Nobody could get past step 1, and the logs said only
+    # "400". This names the cause, logs it, and does not blame the file.
+    encoding = (request.headers.get("content-type") or "").lower()
+    if not encoding.startswith(("multipart/form-data", "application/x-www-form-urlencoded")):
+        logger.error(
+            "onboarding extract received %r, not a form; the client sent no readable input",
+            encoding or "(no content-type)",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={
+                "error": "wrong_encoding",
+                "message": (
+                    "That didn't reach us in a form we can read. This is our fault, not "
+                    "your file, and nothing was saved."
+                ),
+            },
+        )
+
     if file is None and not (text or "").strip():
+        # A well-formed form with nothing in it. The web client cannot send one
+        # (upload needs a file; paste is disabled under 80 characters), so this
+        # is also worth a line in the log.
+        logger.warning("onboarding extract received a form with neither a file nor text")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -155,6 +186,7 @@ async def extract_profile(
             extractor=lambda system, user_prompt, max_tokens: call_claude_json(
                 system, user_prompt, max_tokens, api_key=settings.anthropic_api_key
             ),
+            pasted=file is None,
         )
     except extraction.Unreadable as exc:
         # Not a 500 and not a dead end. The sentence names the next thing to
@@ -162,6 +194,13 @@ async def extract_profile(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "unreadable", "message": str(exc), "can_paste": True},
+        ) from exc
+    except extraction.NotAProfile as exc:
+        # Read fine, and not a profile. Nothing extracted, nothing saved, and no
+        # score will ever be computed from an invoice.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "not_a_profile", "message": str(exc), "can_paste": True},
         ) from exc
     except Exception as exc:
         logger.exception("profile extraction failed for %s", user.id)

@@ -66,11 +66,33 @@ class FakeProfiles:
             self.profile.update(patch)
 
 
+def model(extracted: Any, *, is_profile: Any = True, calls: list[str] | None = None) -> Any:
+    """A stand-in for `call_claude_json` that answers BOTH questions it is asked.
+
+    Extraction now makes two calls — "is this a work profile?" and then "what
+    are its fields?" — and a fake that answered only the second would send
+    every request down the check's no-verdict path. Told apart by the check's
+    own system prompt, compared exactly, so a reworded extraction prompt cannot
+    be mistaken for the check.
+    """
+
+    def call(system: str, user: str, max_tokens: int, **_: Any) -> Any:
+        if system == extraction.PROFILE_CHECK_SYSTEM:
+            if calls is not None:
+                calls.append("check")
+            return {"is_work_profile": is_profile, "looks_like": "a test document"}
+        if calls is not None:
+            calls.append("extract")
+        return extracted() if callable(extracted) else extracted
+
+    return call
+
+
 @pytest.fixture
 def wired(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     profiles = FakeProfiles()
     monkeypatch.setattr(routes, "_profiles", lambda request, settings: profiles)
-    monkeypatch.setattr(routes, "call_claude_json", lambda *_a, **_k: dict(EXTRACTED))
+    monkeypatch.setattr(routes, "call_claude_json", model(lambda: dict(EXTRACTED)))
     # No referral service in these tests; the activation is covered separately
     # and must never be able to fail the request.
     monkeypatch.setattr(routes, "_activate_referral", lambda _uid, _settings: None)
@@ -236,8 +258,10 @@ def test_extraction_names_what_it_found(wired: Any) -> None:
 
 
 def test_sending_neither_a_file_nor_text_is_a_plain_400(wired: Any) -> None:
+    """A real form with nothing useful in it. (An empty `data={}` sends no form
+    at all, which is the wrong-encoding case below, not this one.)"""
     client, _profiles = wired
-    res = client.post("/onboarding/extract", data={}, headers=token())
+    res = client.post("/onboarding/extract", data={"text": "   "}, headers=token())
 
     assert res.status_code == 400
     assert res.json()["detail"]["error"] == "nothing_to_read"
@@ -265,7 +289,7 @@ def test_a_model_that_finds_nothing_is_distinct_from_a_read_failure(
     """ "We read it and it had no profile in it" needs different advice from
     "we couldn't read it"."""
     client, profiles = wired
-    monkeypatch.setattr(routes, "call_claude_json", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "call_claude_json", model({}))
 
     res = client.post("/onboarding/extract", data={"text": "A" * 200}, headers=token())
 
@@ -282,6 +306,264 @@ def test_a_failed_save_is_not_reported_as_success(wired: Any) -> None:
 
     assert res.status_code == 503
     assert "Traceback" not in res.text
+
+
+# ── The body that never arrived ───────────────────────────────────────────
+#
+# Found on the deployed build: nobody could get past step 1. The web client's
+# axios instance carried `Content-Type: application/json` as a default, and
+# axios SERIALISES FormData to JSON when it sees that header. Every PDF arrived
+# as `{"file": {}}` — the bytes never left the browser — and every paste as
+# `{"text": "..."}`. `File()` and `Form()` read neither, and the route answered
+# "Upload a resume or LinkedIn PDF, or paste your profile text": an instruction
+# to do what the person had just done, twice, with nothing in the logs.
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"file": {}}, {"text": "Senior Data Analyst at Acme, six years of SQL. " * 4}],
+    ids=["the-upload-as-deployed", "the-paste-as-deployed"],
+)
+def test_a_json_body_is_named_as_our_fault_not_the_users(
+    wired: Any, body: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    client, profiles = wired
+
+    res = client.post("/onboarding/extract", json=body, headers=token())
+
+    assert res.status_code == 415
+    detail = res.json()["detail"]
+    assert detail["error"] == "wrong_encoding"
+    assert "our fault" in detail["message"]
+    assert "Upload a resume" not in detail["message"], (
+        "telling someone to upload a file they just uploaded is how this hid"
+    )
+    assert profiles.saves == []
+    assert any(
+        r.levelname == "ERROR" and "application/json" in r.getMessage() for r in caplog.records
+    ), "the only trace this left before was an access line reading 400"
+
+
+def test_a_multipart_upload_and_a_form_paste_are_both_accepted(wired: Any) -> None:
+    """The positive half, so the refusal above cannot be satisfied by refusing
+    everything. `data=` sends urlencoded, `files=` sends multipart."""
+    client, _profiles = wired
+
+    pasted = client.post("/onboarding/extract", data={"text": "A" * 200}, headers=token())
+    uploaded = client.post(
+        "/onboarding/extract",
+        files={"file": ("Profile.pdf", io.BytesIO(_pdf(RESUME_LINES)), "application/pdf")},
+        headers=token(),
+    )
+
+    assert pasted.status_code == 200
+    assert uploaded.status_code == 200
+
+
+# ── The readers, on real documents ────────────────────────────────────────
+#
+# Until this, no test anywhere had read a PDF or a .docx SUCCESSFULLY — only
+# failures. With every upload arriving as `{}`, the success path of both
+# readers had never run, on a laptop or on Render. These build real documents.
+
+RESUME_LINES = [
+    "Ravi Kumar",
+    "Senior Data Analyst at Zomato",
+    "Six years turning messy data into decisions",
+    "Skills: SQL, Python, Tableau",
+]
+
+
+def _pdf(lines: list[str]) -> bytes:
+    """A minimal, valid, text-bearing PDF with a correct xref table."""
+    stream = "BT /F1 12 Tf 72 720 Td 16 TL " + " ".join(f"({line}) Tj T*" for line in lines) + " ET"
+    bodies = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%b\nendstream" % (len(stream), stream.encode("latin-1")),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(bodies, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%b\nendobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(bodies) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(bodies) + 1,
+        xref,
+    )
+    return bytes(out)
+
+
+def test_a_text_pdf_is_read() -> None:
+    text = extraction.text_from_upload(_pdf(RESUME_LINES), "Profile.pdf")
+
+    for line in RESUME_LINES:
+        assert line in text
+
+
+def test_a_docx_is_read_including_its_tables() -> None:
+    """V1's lesson: resumes hide employment history in table cells, and a
+    paragraphs-only read loses it without appearing to fail."""
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("Ravi Kumar, Senior Data Analyst")
+    table = document.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Zomato"
+    table.rows[0].cells[1].text = "2020 to now"
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    text = extraction.text_from_upload(buffer.getvalue(), "cv.docx")
+
+    assert "Senior Data Analyst" in text
+    assert "Zomato | 2020 to now" in text
+
+
+def test_an_uploaded_pdf_reaches_the_model_as_its_text(
+    wired: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end over HTTP: the words in the file are the words the check and
+    the extraction see. Not a filename, not `{}`."""
+    client, _profiles = wired
+    prompts: list[str] = []
+
+    def capture(system: str, user: str, max_tokens: int, **_: Any) -> Any:
+        prompts.append(user)
+        if system == extraction.PROFILE_CHECK_SYSTEM:
+            return {"is_work_profile": True, "looks_like": "a resume"}
+        return dict(EXTRACTED)
+
+    monkeypatch.setattr(routes, "call_claude_json", capture)
+
+    res = client.post(
+        "/onboarding/extract",
+        files={"file": ("Profile.pdf", io.BytesIO(_pdf(RESUME_LINES)), "application/pdf")},
+        headers=token(),
+    )
+
+    assert res.status_code == 200
+    assert len(prompts) == 2, "one check, one extraction"
+    assert all("Senior Data Analyst at Zomato" in prompt for prompt in prompts)
+
+
+# ── Is it a work profile at all? ──────────────────────────────────────────
+#
+# Someone will upload an invoice. Reading it and producing a career score would
+# be the product confidently describing something it never saw.
+
+INVOICE = (
+    "TAX INVOICE No. 4471. Bill to: Acme Logistics Pvt Ltd, Gurugram. "
+    "Item: 40ft container freight Mumbai to Rotterdam. Qty 1. Rate 1,85,000. "
+    "GST 18%. Total payable 2,18,300. Due within 30 days."
+)
+
+
+def test_a_file_that_is_not_a_profile_is_refused_before_anything_is_extracted(
+    wired: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, profiles = wired
+    calls: list[str] = []
+    monkeypatch.setattr(
+        routes, "call_claude_json", model(lambda: dict(EXTRACTED), is_profile=False, calls=calls)
+    )
+
+    res = client.post(
+        "/onboarding/extract",
+        files={
+            "file": (
+                "invoice.pdf",
+                io.BytesIO(_pdf([INVOICE[:90], INVOICE[90:]])),
+                "application/pdf",
+            )
+        },
+        headers=token(),
+    )
+
+    assert res.status_code == 422
+    detail = res.json()["detail"]
+    assert detail["error"] == "not_a_profile"
+    assert "doesn't look like a work profile" in detail["message"]
+    assert "LinkedIn PDF export" in detail["message"]
+    assert detail["can_paste"] is True
+    assert calls == ["check"], "no extraction may run on a document that is not a profile"
+    assert profiles.saves == [], "nothing from an invoice may become a profile"
+
+
+def test_pasted_text_that_is_not_a_profile_gets_advice_for_pasting(
+    wired: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, profiles = wired
+    monkeypatch.setattr(
+        routes, "call_claude_json", model(lambda: dict(EXTRACTED), is_profile=False)
+    )
+
+    res = client.post("/onboarding/extract", data={"text": INVOICE}, headers=token())
+
+    assert res.status_code == 422
+    message = res.json()["detail"]["message"]
+    assert "doesn't look like a work profile" in message
+    assert "paste the text of your LinkedIn profile or resume" in message
+    assert profiles.saves == []
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    ["false", "true", None, 0, 1],
+    ids=["string-false", "string-true", "missing", "zero", "one"],
+)
+def test_a_check_with_no_real_verdict_is_our_failure_not_a_refusal_or_a_pass(
+    wired: Any, monkeypatch: pytest.MonkeyPatch, verdict: Any
+) -> None:
+    """`"false"` is truthy. A check that reads it as yes waves an invoice
+    through; one that reads anything malformed as no tells someone their real
+    resume is not a resume. Neither: it is a 503, retryable, nothing saved."""
+    client, profiles = wired
+    monkeypatch.setattr(
+        routes, "call_claude_json", model(lambda: dict(EXTRACTED), is_profile=verdict)
+    )
+
+    res = client.post("/onboarding/extract", data={"text": "A" * 200}, headers=token())
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "extract_failed"
+    assert profiles.saves == []
+
+
+def test_a_check_that_returns_a_list_is_our_failure() -> None:
+    with pytest.raises(extraction.ProfileCheckFailed):
+        extraction.check_is_profile("A" * 200, extractor=lambda *_a: [True], pasted=False)  # type: ignore[arg-type,return-value]
+
+
+def test_too_little_text_is_refused_before_any_model_call() -> None:
+    def must_not_call(*_a: Any) -> dict[str, Any]:
+        raise AssertionError("a near-empty document must not cost a model call")
+
+    with pytest.raises(extraction.Unreadable):
+        extraction.parse_profile_text("too short", extractor=must_not_call)
+
+
+def test_the_check_leans_toward_yes() -> None:
+    """A product decision, pinned: turning away a real resume closes the door at
+    step one; reading an unusual one costs nothing. If this instruction goes,
+    the check becomes a gate that rejects juniors and career changers."""
+    seen: list[str] = []
+
+    def capture(system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        seen.append(user)
+        return {"is_work_profile": True}
+
+    extraction.check_is_profile("A" * 200, extractor=capture, pasted=False)
+
+    assert "When unsure, answer true" in seen[0]
+    assert "student with no jobs yet" in seen[0]
 
 
 # ── Completing ─────────────────────────────────────────────────────────────
