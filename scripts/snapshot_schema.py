@@ -48,7 +48,7 @@ def _env() -> dict[str, str]:
     return env
 
 
-def fetch() -> dict[str, list[str]]:
+def fetch() -> dict[str, dict[str, list[str]]]:
     env = _env()
     url = env["SUPABASE_URL"].rstrip("/")
     key = env.get("SUPABASE_SERVICE_KEY") or ""
@@ -69,7 +69,20 @@ def fetch() -> dict[str, list[str]]:
         doc = json.load(response)
 
     return {
-        table: sorted(definition.get("properties", {}))
+        table: {
+            "columns": sorted(definition.get("properties", {})),
+            # PostgREST annotates a primary key column's description with
+            # `<pk/>`. Recorded because an UPSERT with no conflict target
+            # resolves on the PRIMARY KEY, and `profiles` turned out to have
+            # `id` as its primary key with `user_id` merely unique — the
+            # opposite of what V1's committed DDL says. Every completion of
+            # onboarding failed on a duplicate key for weeks because of it.
+            "primary_key": sorted(
+                name
+                for name, prop in definition.get("properties", {}).items()
+                if "<pk/>" in str(prop.get("description", ""))
+            ),
+        }
         for table, definition in sorted(doc.get("definitions", {}).items())
     }
 

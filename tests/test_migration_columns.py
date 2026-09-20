@@ -55,7 +55,13 @@ def live_tables() -> dict[str, set[str]]:
     V1's come from here, and a table in neither is a hard failure.
     """
     raw = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
-    return {table: set(columns) for table, columns in raw.items()}
+    # The snapshot gained primary keys when `profiles` turned out to be keyed
+    # by `id` in the database and by `user_id` in V1's DDL. Both shapes are
+    # read so an older snapshot still answers about columns.
+    return {
+        table: set(entry["columns"]) if isinstance(entry, dict) else set(entry)
+        for table, entry in raw.items()
+    }
 
 
 #: PostgREST adds these to every row.

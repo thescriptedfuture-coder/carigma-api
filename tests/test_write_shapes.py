@@ -36,7 +36,7 @@ from uuid import UUID
 
 import pytest
 
-from tests.schema import SOURCES_FOUND, columns_of, types_of
+from tests.schema import SOURCES_FOUND, columns_of, live_primary_key, types_of, unique_keys_of
 
 ROOT = Path(__file__).resolve().parents[1]
 WRITE_METHODS = {"insert", "upsert", "update"}
@@ -102,6 +102,117 @@ def _sites() -> tuple[list[tuple[str, int, str, str, ast.Dict]], list[tuple[str,
                 else:
                     unresolvable.append((path.name, table, fn.attr))
     return resolvable, unresolvable
+
+
+def _upserts() -> list[tuple[str, int, str, str | None, set[str]]]:
+    """Every `.table("X").upsert(row, on_conflict=...)`: where, what, and the
+    target it names. Payload keys come along, because an upsert that resolves
+    on a key its row does not carry can only ever INSERT."""
+    out: list[tuple[str, int, str, str | None, set[str]]] = []
+    files = sorted((ROOT / "src").rglob("*.py")) + sorted((ROOT / "scripts").rglob("*.py"))
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            node.targets[0].id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "upsert"
+            ):
+                continue
+            table = _table_of(node)
+            if table is None:
+                inner = node.func.value
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "table"
+                    and inner.args
+                    and isinstance(inner.args[0], ast.Name)
+                ):
+                    table = constants.get(inner.args[0].id)
+            if table is None:
+                continue
+            conflict: str | None = None
+            for keyword in node.keywords:
+                if keyword.arg == "on_conflict" and isinstance(keyword.value, ast.Constant):
+                    conflict = str(keyword.value.value)
+            keys: set[str] = set()
+            if node.args and isinstance(node.args[0], ast.Dict):
+                keys = {
+                    k.value
+                    for k in node.args[0].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+            out.append((path.name, node.lineno, table, conflict, keys))
+    return out
+
+
+UPSERTS = _upserts()
+UPSERT_IDS = [f"{f}:{n}:{t}" for f, n, t, _c, _k in UPSERTS]
+
+
+def test_the_upsert_sweep_found_them() -> None:
+    assert len(UPSERTS) >= 8, f"only found {UPSERT_IDS}"
+
+
+@pytest.mark.parametrize("site", UPSERTS, ids=UPSERT_IDS)
+def test_every_upsert_names_its_conflict_target(
+    site: tuple[str, int, str, str | None, set[str]],
+) -> None:
+    """An upsert with no `on_conflict` resolves on the PRIMARY KEY — whichever
+    key the database happens to call primary, which is not always the one the
+    DDL in this repository declares.
+
+    `profiles` is why. V1's DDL says `user_id uuid primary key`; the live table's
+    primary key is `id`, with `user_id` merely unique. `upsert(payload)` with no
+    `id` in the payload could never match, fell through to INSERT, and raised
+    `duplicate key value violates unique constraint "profiles_user_id_key"` —
+    a 503 on every completion of onboarding, every platform change, every
+    analyst save, for as long as the row already existed.
+
+    Naming the target is the whole fix, and it is checkable here.
+    """
+    name, line, table, conflict, _keys = site
+
+    assert conflict, (
+        f"{name}:{line} upserts into `{table}` without on_conflict, so it resolves on "
+        f"whatever the live primary key is ({live_primary_key(table) or 'unknown'}). "
+        "Name the columns this row is unique by."
+    )
+
+
+@pytest.mark.parametrize("site", UPSERTS, ids=UPSERT_IDS)
+def test_every_conflict_target_is_a_key_that_exists(
+    site: tuple[str, int, str, str | None, set[str]],
+) -> None:
+    """ON CONFLICT needs a unique index. A target without one does not degrade
+    to an insert — it raises, every time."""
+    name, line, table, conflict, keys = site
+    if not conflict:
+        pytest.skip("covered by the test above")
+    declared = unique_keys_of(table)
+    if not declared:
+        pytest.skip(f"no DDL or snapshot key for {table}")
+
+    target = tuple(c.strip() for c in conflict.split(","))
+    assert set(target) in [set(k) for k in declared], (
+        f"{name}:{line} upserts into `{table}` on {target}, which nothing declares unique. "
+        f"Declared: {declared}"
+    )
+    # And the row has to carry the columns it claims to be unique by, or the
+    # conflict can never be detected.
+    if keys:
+        missing = sorted(set(target) - keys)
+        assert missing == [], f"{name}:{line} conflicts on {target} but the row omits {missing}"
 
 
 RESOLVABLE, UNRESOLVABLE = _sites()

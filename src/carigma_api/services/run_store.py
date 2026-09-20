@@ -108,7 +108,11 @@ class SupabaseRunStore:
     def save(self, run: AgentRun) -> None:
         key = self._keys.get(run.id)
         try:
-            self._client.table(_TABLE).upsert(_to_row(run, key)).execute()
+            # `id` is this table's primary key AND what `_to_row` writes, so an
+            # inferred target would resolve correctly — until the day it does
+            # not. `profiles` upserted on an inferred key for weeks and inserted
+            # every time. Name it.
+            self._client.table(_TABLE).upsert(_to_row(run, key), on_conflict="id").execute()
         except Exception:
             logger.exception("agent_runs write failed for run %s", run.id)
 

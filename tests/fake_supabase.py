@@ -27,10 +27,39 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.schema import live_primary_key, unique_keys_of
+
 
 class Result:
     def __init__(self, data: Any) -> None:
         self.data = data
+
+
+class UniqueViolation(Exception):
+    """What PostgREST raises when a write collides with a unique constraint.
+
+    Carries `code` because production code reads it: `referral_store` tells a
+    lost race apart from a real failure that way.
+    """
+
+    def __init__(self, table: str, columns: tuple[str, ...]) -> None:
+        self.code = "23505"
+        self.message = (
+            f'duplicate key value violates unique constraint "{table}_{"_".join(columns)}_key"'
+        )
+        super().__init__(self.message)
+
+
+def _keys_for(table: str) -> list[tuple[str, ...]]:
+    """Every column set this table is unique by — the DDL's, plus the LIVE
+    primary key from `schema_snapshot.json`.
+
+    Without this the fake accepted writes the database refuses. `profiles` is
+    keyed by `id` in the real database and by `user_id` in V1's committed DDL,
+    and `ProfileRepository.save` upserted with neither named: in production
+    every second save raised 23505, and here every second save was fine.
+    """
+    return unique_keys_of(table)
 
 
 class FakeTable:
@@ -146,6 +175,20 @@ class FakeTable:
             "model what it REFUSES, not only what it accepts."
         )
 
+    def _refuse_duplicates(self, rows: list[dict[str, Any]], incoming: dict[str, Any]) -> None:
+        """Raise on a row the database would refuse.
+
+        Only keys the incoming row actually supplies: a primary key with a
+        default (`id uuid default gen_random_uuid()`) is absent from most
+        payloads, and Postgres does not check what it is about to generate.
+        """
+        for key in _keys_for(self._name):
+            if any(column not in incoming for column in key):
+                continue
+            ident = tuple(str(incoming[column]) for column in key)
+            if any(tuple(str(row.get(column)) for column in key) == ident for row in rows):
+                raise UniqueViolation(self._name, key)
+
     def execute(self) -> Result:
         if self._name in self._db.failing:
             raise RuntimeError(f"{self._name} is down")
@@ -153,20 +196,37 @@ class FakeTable:
 
         if self._op == "insert":
             new = self._payload if isinstance(self._payload, list) else [self._payload]
-            rows.extend(dict(r) for r in new)
+            for incoming in new:
+                self._refuse_duplicates(rows, incoming)
+                rows.append(dict(incoming))
             return Result([dict(r) for r in new])
 
         if self._op == "upsert":
-            assert self._conflict, "upsert without on_conflict — the real client needs one"
-            keys = [k.strip() for k in self._conflict.split(",")]
+            # No target named? PostgREST resolves on the PRIMARY KEY, and the
+            # primary key is whatever the live database says it is — not what
+            # the DDL in this repository declares. That gap is the `profiles`
+            # bug, so the fake models it rather than asserting it away.
+            keys = (
+                [k.strip() for k in self._conflict.split(",")]
+                if self._conflict
+                else live_primary_key(self._name)
+            )
             new = self._payload if isinstance(self._payload, list) else [self._payload]
             out = []
             for incoming in new:
+                # A conflict target the row does not carry can never match, so
+                # this is an INSERT — and then the OTHER unique keys apply.
+                if not keys or any(k not in incoming for k in keys):
+                    self._refuse_duplicates(rows, incoming)
+                    rows.append(dict(incoming))
+                    out.append(dict(incoming))
+                    continue
                 ident = tuple(str(incoming.get(k)) for k in keys)
                 existing = next(
                     (r for r in rows if tuple(str(r.get(k)) for k in keys) == ident), None
                 )
                 if existing is None:
+                    self._refuse_duplicates(rows, incoming)
                     rows.append(dict(incoming))
                     out.append(dict(incoming))
                 else:

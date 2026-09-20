@@ -152,6 +152,75 @@ def columns_typed(table: str, *kinds: str) -> list[str]:
     return sorted(name for name, kind in types_of(table).items() if kind in wanted)
 
 
+#: The live database's shape, recorded by `scripts/snapshot_schema.py`. The
+#: DDL says what we asked for; this says what is there. They disagree — see
+#: `live_primary_key`.
+SNAPSHOT = _HERE.parents[1] / "schema_snapshot.json"
+
+
+@cache
+def _snapshot() -> dict[str, dict[str, list[str]]]:
+    import json
+
+    if not SNAPSHOT.exists():
+        return {}
+    raw = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    return {table: entry for table, entry in raw.items() if isinstance(entry, dict)}
+
+
+def live_columns(table: str) -> set[str]:
+    return set(_snapshot().get(table, {}).get("columns", []))
+
+
+def live_primary_key(table: str) -> list[str]:
+    """The primary key the DATABASE has, which is not always the one the DDL
+    declares.
+
+    `profiles` is the case that cost weeks: V1's committed DDL says
+    `user_id uuid primary key`; the live table's primary key is `id`, with
+    `user_id` a separate unique constraint. An upsert with no conflict target
+    resolves on the primary key, so every second save of a profile became an
+    INSERT and died on `profiles_user_id_key`.
+    """
+    return list(_snapshot().get(table, {}).get("primary_key", []))
+
+
+def unique_keys_of(table: str) -> list[tuple[str, ...]]:
+    """Every column set declared unique, primary key included.
+
+    Inline (`code text not null unique`, `user_id uuid primary key`) and
+    table-level (`unique (user_id, week_start)`), plus the LIVE primary key
+    from the snapshot. One question is being answered: can this `on_conflict`
+    target resolve at all? Postgres needs a unique index for ON CONFLICT, and
+    a target without one fails every time it is reached.
+    """
+    create = re.compile(
+        rf"create\s+table[^(]*\bpublic\.{re.escape(table)}\s*\((.*?)\n\s*\);", re.S | re.I
+    )
+    keys: list[tuple[str, ...]] = []
+    for _name, sql in _sources():
+        found = create.search(sql)
+        if not found:
+            continue
+        for raw in found.group(1).splitlines():
+            line = raw.strip().rstrip(",")
+            low = line.lower()
+            if low.startswith(("unique", "primary key")):
+                inside = re.search(r"\((.*?)\)", line)
+                if inside:
+                    keys.append(tuple(c.strip() for c in inside.group(1).split(",")))
+                continue
+            col = re.match(r"(\w+)\s+\w", line)
+            if col and col.group(1).lower() not in _NOT_COLUMNS:
+                if "primary key" in low or re.search(r"\bunique\b", low):
+                    keys.append((col.group(1),))
+        break
+    live = tuple(live_primary_key(table))
+    if live and live not in keys:
+        keys.append(live)
+    return keys
+
+
 def not_null_of(table: str) -> list[str]:
     """Columns declared `not null` AND without a default.
 

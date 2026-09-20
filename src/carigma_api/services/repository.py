@@ -157,7 +157,23 @@ class ProfileRepository:
         payload = profile_to_db(profile)
         payload["user_id"] = user_id
         payload["updated_at"] = datetime.now(UTC).isoformat()
-        self._client.table("profiles").upsert(payload).execute()
+        # `on_conflict` is NOT optional here, and leaving it out broke every
+        # second save of a profile.
+        #
+        # An upsert with no conflict target resolves on the PRIMARY KEY. V1's
+        # committed DDL says `profiles.user_id` is that key. **The live table
+        # disagrees**: its primary key is `id`, and `user_id` is a separate
+        # unique constraint. So this payload — which has no `id` — could never
+        # match a conflict, fell through to a plain INSERT, and collided with
+        # the existing row: `duplicate key value violates unique constraint
+        # "profiles_user_id_key"`, a 503 on every completion of onboarding,
+        # every platform change, every analyst save.
+        #
+        # Naming the target removes the dependency on which key the database
+        # happens to call primary. `schema_snapshot.json` records the live
+        # primary keys, and `tests/test_write_shapes.py` now requires every
+        # upsert in the codebase to name one that is really unique.
+        self._client.table("profiles").upsert(payload, on_conflict="user_id").execute()
         return self.load(user_id)
 
 
