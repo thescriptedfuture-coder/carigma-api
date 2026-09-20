@@ -281,7 +281,7 @@ class FakeTable:
     def table(self, name: str) -> FakeTable:
         return self
 
-    def upsert(self, row: dict[str, Any]) -> FakeTable:
+    def upsert(self, row: dict[str, Any], **_k: Any) -> FakeTable:
         if self.explode:
             raise RuntimeError("db down")
         self.upserted.append(row)

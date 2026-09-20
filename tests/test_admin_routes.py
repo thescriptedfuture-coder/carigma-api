@@ -56,7 +56,7 @@ class FakeTable:
         self.inserted.append((self._name, row))
         return self
 
-    def upsert(self, row: dict[str, Any]) -> FakeTable:
+    def upsert(self, row: dict[str, Any], **_k: Any) -> FakeTable:
         self.upserted.append((self._name, row))
         return self
 

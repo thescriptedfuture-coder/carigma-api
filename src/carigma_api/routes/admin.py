@@ -248,7 +248,11 @@ def adjust_credits(
     new_balance = apply_adjustment(current, adjustment)
 
     db.table("credits").upsert(
-        {"user_id": user_id, "balance": new_balance, "updated_at": datetime.now(UTC).isoformat()}
+        {"user_id": user_id, "balance": new_balance, "updated_at": datetime.now(UTC).isoformat()},
+        # Named, not inferred. `credits` happens to have `user_id` as its
+        # primary key today; `profiles` taught us that "happens to" is the whole
+        # bug. See repository.ProfileRepository.save.
+        on_conflict="user_id",
     ).execute()
     db.table("credit_ledger").insert(adjustment.as_ledger_row(balance_after=new_balance)).execute()
 

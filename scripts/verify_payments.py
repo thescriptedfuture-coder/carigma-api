@@ -66,7 +66,9 @@ class LedgerGranter:
             {}
         ]
         new = int(row[0].get("balance") or 0) + amount
-        self._db.table("credits").upsert({"user_id": user_id, "balance": new}).execute()
+        self._db.table("credits").upsert(
+            {"user_id": user_id, "balance": new}, on_conflict="user_id"
+        ).execute()
         self._db.table("credit_ledger").insert(
             {
                 "user_id": user_id,
@@ -235,7 +237,7 @@ def main() -> int:  # noqa: PLR0915
 
     # ── Clean up: undo the probe credit and remove the rows ──────────────────
     logger.info("cleaning up")
-    db.table("credits").upsert({"user_id": uid, "balance": before}).execute()
+    db.table("credits").upsert({"user_id": uid, "balance": before}, on_conflict="user_id").execute()
     for row in probe_rows:
         db.table("credit_ledger").delete().eq("id", row["id"]).execute()
     db.table("payments").delete().eq("link_id", link_id).execute()
