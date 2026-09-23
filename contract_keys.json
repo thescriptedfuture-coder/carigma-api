@@ -292,6 +292,11 @@
     "slots[].date",
     "slots[].day",
     "slots[].drafts",
+    "slots[].drafts[].body",
+    "slots[].drafts[].index",
+    "slots[].drafts[].note",
+    "slots[].drafts[].reading_seconds",
+    "slots[].drafts[].word_count",
     "slots[].optional",
     "slots[].published_at",
     "slots[].skip_note",
@@ -367,6 +372,7 @@
     "platforms",
     "resumeRetentionOptIn",
     "skills",
+    "targetRole",
     "targetRoles"
   ],
   "GET /profile/email-preferences": [
