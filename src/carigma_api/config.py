@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     # by definition and must not be refused for it.
     is_pull_request: bool = Field(default=False)
 
+    # ── The smoke account ──────────────────────────────────────────────────
+    # A real account on the deployed system, used only by `scripts/smoke.py`.
+    # The suite runs against fakes on both sides of the boundary, so nothing in
+    # it can see a deployed API refusing a write — which is how six surfaces
+    # returned 503 for a week. Never set on Render: this is a laptop's
+    # credentials for signing in as an ordinary user.
+    smoke_email: str = Field(default="")
+    smoke_password: str = Field(default="")
+
     # ── Admin gate ─────────────────────────────────────────────────────────
     # Comma-separated allow-list. Empty ⇒ nobody is admin (safe default).
     admin_emails: str = Field(default="")

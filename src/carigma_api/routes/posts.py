@@ -127,7 +127,16 @@ def get_week(
     payload = plan.as_dict()
     payload["provenance"] = {
         "agent_label": "Content Intelligence",
-        "line": "drafts land 07:00 on slot days",
+        # This said "drafts land 07:00 on slot days". **Nothing writes a draft
+        # on any schedule** — no cron, no worker, nothing. The only writer is
+        # `POST /week/{day}/regenerate`, which a person presses. So the line
+        # described a system that does not exist, to every user, on the surface
+        # where they then found an empty box. Same class as "Your plan is
+        # running" for an account with no plan.
+        #
+        # If a scheduled writer is built, this line becomes true again and the
+        # test below is where that is recorded.
+        "line": "drafts are written when you ask, 3 credits a slot",
     }
 
     if plan.is_paused:

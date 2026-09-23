@@ -28,6 +28,11 @@ ONBOARDED_ROW: dict[str, Any] = {
     "name": "Ravi Kumar",
     "current_role": "Business Analyst",
     "target_roles": "Data Analyst, Product Analyst",
+    # Four of the twelve live rows carry the singular too, and the payload
+    # exposes it as `targetRole`. No test produced one, so the recorded
+    # contract never had the key and the web's mock sending it read as an
+    # invention. Both sides were right; the manifest was blind.
+    "target_role": "Data Analyst",
     "linkedin_headline": "Business Analyst | 5 years | SQL, Power BI",
     "skills": "SQL, Power BI, dbt",
     "location": "New Delhi",
@@ -75,6 +80,8 @@ def test_the_profile_comes_back_in_the_shape_the_app_reads(wired) -> None:  # ty
     assert body["linkedinHeadline"].startswith("Business Analyst")
     assert body["currentRole"] == "Business Analyst"
     assert "linkedin_headline" not in body, "the column name leaked into the payload"
+    assert body["targetRole"] == "Data Analyst"
+    assert body["targetRoles"] == "Data Analyst, Product Analyst"
 
 
 def test_a_null_platforms_column_becomes_linkedin(wired) -> None:  # type: ignore[no-untyped-def]

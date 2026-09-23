@@ -155,7 +155,37 @@ def test_the_week_carries_its_cadence_and_provenance(client: TestClient) -> None
 
     assert body["cadence_label"] == "2/wk · Mon + Thu"
     assert body["provenance"]["agent_label"] == "Content Intelligence"
-    assert body["provenance"]["line"] == "drafts land 07:00 on slot days"
+    # The line must describe something that exists. Nothing writes drafts on a
+    # schedule, so the old "drafts land 07:00 on slot days" was a claim about a
+    # worker nobody built, shown on the surface where the box is then empty.
+    assert body["provenance"]["line"] == "drafts are written when you ask, 3 credits a slot"
+
+
+def test_the_week_carries_each_slot_s_drafts(client: TestClient) -> None:
+    """The week list shows variants, so it carries them — and until this test
+    nothing had ever produced a week containing one.
+
+    `GET /posts/week/{day}` had drafts in its recorded contract; `GET
+    /posts/week` did not, because every seeded week here was empty. The web's
+    own fixture carried draft bodies at the week level, and the guard comparing
+    the two read that as the MOCK inventing a field. The API can send it; no
+    test made it.
+    """
+    seed_with(
+        Slot(
+            "THU",
+            monday() + timedelta(days=3),
+            state=SlotState.DRAFT_READY,
+            drafts=(Draft(1, "Why do dashboards get ignored?", "stronger hook"),),
+        )
+    )
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+    slot = next(s for s in body["slots"] if s["day"] == "THU")
+
+    assert slot["variant_count"] == 1
+    assert slot["drafts"][0]["body"].startswith("Why do dashboards")
+    assert slot["drafts"][0]["note"] == "stronger hook"
 
 
 def test_a_paused_week_is_an_honest_nothing_not_an_empty_list(
