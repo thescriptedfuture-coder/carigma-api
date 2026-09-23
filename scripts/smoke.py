@@ -18,6 +18,11 @@ person clicking, after a deploy.
 - **Reads** every surface an onboarded user sees, asserting a status AND a key
   the client actually renders. A 200 carrying the wrong shape is the failure
   this project keeps having.
+- **Refuses to write to an account that is not disposable.** The first clean
+  run signed in as the owner's real account, because `.env` held the wrong
+  address, and overwrote a profile in daily use. The address must carry a
+  `+smoke` marker AND the account must not already hold a profile this script
+  did not write. `--overwrite-profile` is the deliberate override.
 - **Writes once**: a synthetic profile through `/onboarding/extract`. That one
   call exercises the upload encoding, `pdfplumber` on Render, the "is this a
   work profile?" check against the real model, and — because the account
@@ -76,6 +81,59 @@ READS: tuple[tuple[str, str | None], ...] = (
     # contract rather than trusting it: the first draft left it out.
     ("/market/wire", None),
 )
+
+#: What makes an address a DELIBERATE smoke account rather than somebody's.
+#:
+#: The first clean run signed in as the owner's real account — `.env` held the
+#: wrong address — and the synthetic profile overwrote a profile in daily use.
+#: Nothing asked. A run that can quietly write to whoever is configured is a
+#: loaded gun pointed at whoever typed fastest.
+SMOKE_MARKER = "+smoke"
+
+#: A phrase the synthetic profile always carries, so a second run can recognise
+#: its own handiwork and not mistake it for somebody's real profile.
+SMOKE_SIGNATURE = "Testcase"
+
+#: Fields that mean a human's profile is in this row. `onboarded`, `plan` and
+#: the preferences are not: they are set by finishing setup, and an empty
+#: profile legitimately has them.
+PROFILE_CONTENT = ("name", "currentRole", "linkedinHeadline", "skills", "education")
+
+
+def refuse_write(email: str, profile: dict[str, Any]) -> str | None:
+    """Why this account must not be written to, or None.
+
+    Two independent rules, because either one alone would have let the incident
+    through:
+
+    1. **The address must say it is a smoke account.** The failure was a typo in
+       `.env`, so comparing the signed-in address with the configured one proves
+       nothing — both were the same wrong value. A marker in the address is
+       something a typo cannot accidentally produce.
+    2. **The account must not already hold a real profile.** That protects an
+       account whose address looks right, and it is the check that would have
+       stopped this run: the profile read one call earlier was a real one.
+    """
+    if SMOKE_MARKER not in email.split("@")[0]:
+        return (
+            f"SMOKE_EMAIL is {email}, which carries no '{SMOKE_MARKER}' marker. "
+            "The upload overwrites this account's profile, so it must be an address "
+            "created for that — ravisravi31+smoke@gmail.com, not ravisravi31@gmail.com."
+        )
+    held = {
+        field: str(profile.get(field) or "").strip()
+        for field in PROFILE_CONTENT
+        if str(profile.get(field) or "").strip()
+    }
+    if held and not any(SMOKE_SIGNATURE in value for value in held.values()):
+        shown = "; ".join(f"{k}={v[:40]}" for k, v in list(held.items())[:3])
+        return (
+            f"{email} already holds a profile this run did not write ({shown}). "
+            "Uploading would overwrite it. Use a fresh account, or pass "
+            "--overwrite-profile if this really is disposable."
+        )
+    return None
+
 
 #: Obviously synthetic, because it lands on the smoke account's real profile.
 SMOKE_PROFILE = [
@@ -258,6 +316,11 @@ def main() -> int:
     parser.add_argument(
         "--no-upload", action="store_true", help="skip the one write (the synthetic profile)"
     )
+    parser.add_argument(
+        "--overwrite-profile",
+        action="store_true",
+        help="write even though the account looks like somebody's real one",
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -266,6 +329,18 @@ def main() -> int:
 
     checks = read_surfaces(token, args.api)
     if not args.no_upload:
+        status, profile, _ms = _request(
+            f"{args.api}/profile", headers={"Authorization": f"Bearer {token}"}
+        )
+        refusal = (
+            refuse_write(settings.smoke_email, profile if isinstance(profile, dict) else {})
+            if status == 200
+            else f"could not read {args.api}/profile first ({status}), so the write is not safe"
+        )
+        if refusal and not args.overwrite_profile:
+            checks.append(Check("POST /onboarding/extract", False, f"REFUSED: {refusal}", 0))
+            return 0 if report(checks, sys.stdout) else 1
+        print(f"about to overwrite the profile of {settings.smoke_email}\n")
         checks.append(upload_profile(token, args.api))
         # Read back: the upload saves a profile, and the point of the write is
         # that the NEXT read sees it. This is where the upsert bug surfaced.

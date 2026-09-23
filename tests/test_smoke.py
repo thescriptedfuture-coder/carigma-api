@@ -117,3 +117,65 @@ def test_it_refuses_to_run_without_credentials() -> None:
         smoke.sign_in(Settings(smoke_email="", smoke_password=""))
 
     assert "SMOKE_EMAIL" in str(caught.value)
+
+
+# ── The account it may write to ─────────────────────────────────────────────
+#
+# The first clean run signed in as the owner's real account — `.env` held the
+# wrong address — and the synthetic profile overwrote a profile in daily use.
+# Nothing asked first.
+
+
+def test_it_refuses_an_address_that_is_not_a_smoke_account() -> None:
+    """The incident, exactly. Comparing the signed-in address with the
+    configured one would have proved nothing: both were the same wrong value."""
+    # An address the refusal's own example sentence cannot contain. The first
+    # version used the real one, which appears in that sentence as the
+    # counter-example — so the assertion passed with the interpolation removed.
+    refusal = smoke.refuse_write(
+        "daily.driver@example.com", {"name": "Ravi Kumar", "linkedinHeadline": "Data Analyst"}
+    )
+
+    assert refusal
+    assert "+smoke" in refusal
+    assert "daily.driver@example.com" in refusal, "the refusal must name the address it stopped"
+
+
+def test_it_refuses_an_account_that_already_holds_a_real_profile() -> None:
+    """The second rule, independent of the first: an address can look right and
+    still belong to somebody. This is the one that reads the row before writing
+    to it."""
+    refusal = smoke.refuse_write(
+        "someone+smoke@example.com", {"linkedinHeadline": "Head of Data, Acme"}
+    )
+
+    assert refusal
+    assert "already holds a profile" in refusal
+
+
+def test_an_empty_account_is_writable() -> None:
+    assert smoke.refuse_write("someone+smoke@example.com", {}) is None
+
+
+def test_it_recognises_its_own_previous_upload() -> None:
+    """Otherwise the second run would refuse forever, and a guard that blocks
+    the ordinary case gets bypassed with the override and stops guarding."""
+    previous = {"name": "Priya Testcase", "currentRole": "Senior Data Analyst at Example"}
+
+    assert smoke.refuse_write("someone+smoke@example.com", previous) is None
+
+
+def test_onboarding_state_alone_does_not_count_as_a_real_profile() -> None:
+    """`onboarded` and `plan` are set by finishing setup; an account with those
+    and nothing else is empty as far as this is concerned."""
+    assert (
+        smoke.refuse_write("someone+smoke@example.com", {"onboarded": True, "plan": "free"}) is None
+    )
+
+
+def test_a_refused_write_is_a_failure_not_a_quiet_skip() -> None:
+    """A run that reads 18 surfaces and silently does not write would report
+    the same green as one that proved the write path."""
+    checks = [smoke.Check("POST /onboarding/extract", False, "REFUSED: not a smoke account", 0)]
+
+    assert smoke.report(checks, io.StringIO()) is False
