@@ -82,7 +82,28 @@ NORMALISED: dict[str, Any] = {
         "applyLinks": {"linkedin": "https://www.linkedin.com/jobs/search?q=data+analyst"},
     },
     "status": "active",
-    "apply_kit": {"cv": {"name": "Ravi Kumar"}, "template": "classic"},
+    # The shape nine live rows actually carry, measured from the table rather
+    # than invented: V1 stored a whole CV, a gap list and an outreach block.
+    # The web declared `cv_id`, `ats` and a differently-named `outreach`, and
+    # the CV tab threw on `data.ats.coverage_pct`.
+    "apply_kit": {
+        "cv": {
+            "name": "Ravi Kumar",
+            "email": "ravi@example.com",
+            "coreSkills": ["SQL", "Power BI"],
+            "experience": ["Zomato — Data Analyst"],
+            "education": ["B.Tech, DTU"],
+            "certifications": [],
+            "keyAchievements": ["Cut reporting time 40%"],
+        },
+        "gaps": ["dbt", "Airflow", "Looker"],
+        "outreach": {
+            "bestChannel": "LinkedIn",
+            "messageTemplate": "Hi — I saw the Data Analyst role...",
+            "followUpTip": "Follow up after four working days.",
+        },
+        "template": "classic",
+    },
     "kit_created_at": TODAY,
     "first_seen": TODAY,
     "last_seen": TODAY,
@@ -286,6 +307,31 @@ def test_the_scan_line_says_nothing_when_no_row_carries_a_timestamp() -> None:
 
 
 # ── One job, and the apply kit ─────────────────────────────────────────────
+
+
+def test_a_job_from_before_the_skills_analysis_sends_null_not_an_empty_list(
+    wired,  # type: ignore[no-untyped-def]
+) -> None:
+    """Twenty-seven of the ninety-three live rows have no `matched_skills` key
+    inside `details` at all — they predate that analysis. Measured, not assumed.
+
+    The payload must carry `null` for those, and `[]` only when the comparison
+    RAN and found nothing (seventeen rows are in that state). Collapsing the two
+    would tell a user we compared their skills and found no overlap, when we
+    never compared.
+
+    This is also the case the web blanked on: `null.map(...)` unmounts the
+    detail page. The contract records the nullability here, and the web's
+    fixtures guard requires a fixture in this state.
+    """
+    client, _db = wired
+
+    body = client.get("/jobs/1", headers=auth(make_token())).json()
+
+    assert body["matched_skills"] is None, "an unanalysed row must not claim an empty comparison"
+    assert body["missing_skills"] is None
+    # The one key every generation carries.
+    assert body["key_requirements"] == ["Government ERP", "Public finance workflows"]
 
 
 def test_one_job_returns_the_same_shape_as_the_feed(wired) -> None:  # type: ignore[no-untyped-def]
