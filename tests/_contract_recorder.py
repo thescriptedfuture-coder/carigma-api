@@ -33,6 +33,9 @@ import re
 from typing import Any
 
 MANIFEST = pathlib.Path(__file__).resolve().parents[1] / "contract_keys.json"
+#: Which of those keys have ever been seen NULL. A key list says a field can
+#: appear; this says it can appear empty, which is the half the web needs.
+NULLABLE_FILE = pathlib.Path(__file__).resolve().parents[1] / "contract_nullable.json"
 
 #: Set once from the app, so a recorded path resolves to its ROUTE, not to
 #: whatever id the test happened to use. `/posts/week/THU` and `/posts/week/MON`
@@ -41,6 +44,7 @@ ROUTES: list[tuple[Any, str]] = []
 
 #: METHOD /path -> sorted key paths. Filled during the run.
 RECORDED: dict[str, set[str]] = {}
+NULLED: dict[str, set[str]] = {}
 
 
 def use_routes(app: Any) -> None:
@@ -107,12 +111,47 @@ def key_paths(value: Any, prefix: str = "") -> set[str]:
     return found
 
 
+def null_paths(value: Any, prefix: str = "") -> set[str]:
+    """Every readable path whose value was NULL in this response.
+
+    Recorded separately because the manifest answers "can this key appear" and
+    the web needs "can it appear empty". `/jobs/{id}` sends
+    `matched_skills: null` for the twenty-seven of ninety-three live rows whose
+    `details` jsonb predates the skills analysis — and the page called `.map`
+    on it, which blanked the surface. A key list cannot express that; this can.
+    """
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            here = f"{prefix}.{key}" if prefix else key
+            if child is None:
+                found.add(here)
+            else:
+                found |= null_paths(child, here)
+    elif isinstance(value, list):
+        for item in value:
+            found |= null_paths(item, f"{prefix}[]")
+    return found
+
+
 def record(method: str, path: str, status: int, body: Any) -> None:
     # Error bodies carry `detail`, not the success shape. Recording them would
     # put a 402's keys into the manifest for the endpoint's happy path.
     if status >= 400 or not isinstance(body, dict | list):
         return
-    RECORDED.setdefault(f"{method.upper()} {normalise(path)}", set()).update(key_paths(body))
+    endpoint = f"{method.upper()} {normalise(path)}"
+    RECORDED.setdefault(endpoint, set()).update(key_paths(body))
+    NULLED.setdefault(endpoint, set()).update(null_paths(body))
+
+
+def as_nullable() -> dict[str, list[str]]:
+    return {endpoint: sorted(paths) for endpoint, paths in sorted(NULLED.items()) if paths}
+
+
+def load_nullable() -> dict[str, list[str]]:
+    if not NULLABLE_FILE.exists():
+        return {}
+    return dict(json.loads(NULLABLE_FILE.read_text(encoding="utf-8")))
 
 
 def as_manifest() -> dict[str, list[str]]:
@@ -127,3 +166,4 @@ def load_manifest() -> dict[str, list[str]]:
 
 def write_manifest() -> None:
     MANIFEST.write_text(json.dumps(as_manifest(), indent=2) + "\n", encoding="utf-8")
+    NULLABLE_FILE.write_text(json.dumps(as_nullable(), indent=2) + "\n", encoding="utf-8")

@@ -1,0 +1,140 @@
+{
+  "GET /admin/credit-requests": [
+    "items[].resolved_at"
+  ],
+  "GET /admin/market": [
+    "batches[].expires_at",
+    "batches[].published_at",
+    "live"
+  ],
+  "GET /admin/overview": [
+    "low_credit.users[].last_active"
+  ],
+  "GET /admin/reengagement": [
+    "sequences[].closed_at",
+    "sequences[].last_sent_at",
+    "sequences[].next_due_at"
+  ],
+  "GET /admin/runs": [
+    "charge_rule_violations[].duration_ms",
+    "charge_rule_violations[].error",
+    "items[].duration_ms",
+    "items[].error"
+  ],
+  "GET /admin/system": [
+    "env.ADZUNA_APP_ID.hint",
+    "env.JSEARCH_API_KEY.hint",
+    "env.RAZORPAY_KEY_ID.hint",
+    "env.RAZORPAY_KEY_SECRET.hint"
+  ],
+  "GET /admin/users": [
+    "items[].created_at"
+  ],
+  "GET /credits": [
+    "balance"
+  ],
+  "GET /jobs/feed": [
+    "items[].apply_url",
+    "items[].job_type",
+    "items[].key_requirements",
+    "items[].match_score",
+    "items[].matched_skills",
+    "items[].missing_skills",
+    "items[].posted_at",
+    "items[].publisher",
+    "items[].salary",
+    "items[].salary_is_estimated",
+    "items[].source"
+  ],
+  "GET /jobs/{}": [
+    "apply_url",
+    "job_type",
+    "key_requirements",
+    "matched_skills",
+    "missing_skills",
+    "posted_at",
+    "publisher",
+    "salary",
+    "salary_is_estimated",
+    "source"
+  ],
+  "GET /market/wire": [
+    "batch_key"
+  ],
+  "GET /naukri/score": [
+    "dimensions[].needs",
+    "dimensions[].score",
+    "dimensions[].unavailable_reason",
+    "dimensions[].unlock_action",
+    "dimensions[].unlocked_by",
+    "optimized_at",
+    "score"
+  ],
+  "GET /posts/week": [
+    "paused_until",
+    "slots[].published_at",
+    "slots[].skip_note",
+    "slots[].skip_reason",
+    "streak.paused_because"
+  ],
+  "GET /posts/week/{}": [
+    "slot.drafts[].note",
+    "slot.published_at",
+    "slot.skip_note",
+    "slot.skip_reason"
+  ],
+  "GET /profile/updates/open": [
+    "change"
+  ],
+  "GET /referrals": [
+    "pending_note"
+  ],
+  "GET /weekly/contract": [
+    "contract",
+    "contract.decided_at",
+    "contract.proposed_at"
+  ],
+  "GET /weekly/review": [
+    "review",
+    "review.milestone"
+  ],
+  "POST /naukri/score": [
+    "dimensions[].needs",
+    "dimensions[].score",
+    "dimensions[].unavailable_reason",
+    "dimensions[].unlock_action",
+    "dimensions[].unlocked_by",
+    "score"
+  ],
+  "POST /onboarding/complete": [
+    "credits_granted",
+    "referral"
+  ],
+  "POST /payments/verify": [
+    "balance_after"
+  ],
+  "POST /posts/week/{}/mark-published": [
+    "slot.skip_note",
+    "slot.skip_reason",
+    "streak.paused_because"
+  ],
+  "POST /posts/week/{}/skip": [
+    "slot.published_at",
+    "slot.skip_note",
+    "slot.skip_reason",
+    "streak.paused_because"
+  ],
+  "POST /profile/updates/{}/decide": [
+    "applied_at"
+  ],
+  "POST /thread/{}/decide": [
+    "snooze_until"
+  ],
+  "POST /weekly/contract/approve": [
+    "contract.proposed_at"
+  ],
+  "POST /weekly/contract/re-entry": [
+    "contract.decided_at",
+    "contract.proposed_at"
+  ]
+}

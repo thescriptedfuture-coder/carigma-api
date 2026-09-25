@@ -219,8 +219,19 @@
   "GET /jobs/{}/apply-kit": [
     "created_at",
     "cv",
+    "cv.certifications",
+    "cv.coreSkills",
+    "cv.education",
+    "cv.email",
+    "cv.experience",
+    "cv.keyAchievements",
     "cv.name",
     "disclaimer",
+    "gaps",
+    "outreach",
+    "outreach.bestChannel",
+    "outreach.followUpTip",
+    "outreach.messageTemplate",
     "template"
   ],
   "GET /market/wire": [
