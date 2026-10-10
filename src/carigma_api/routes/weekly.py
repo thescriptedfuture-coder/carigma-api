@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.services.constants import CREDIT_COSTS
 from carigma_api.services.repository import user_client
 from carigma_api.services.review import (
     Direction,
@@ -73,7 +74,17 @@ class ApproveRequest(BaseModel):
 
 
 class CadenceRequest(BaseModel):
-    cadence: Cadence = Field(description="weekly | fortnightly")
+    #: An OPTIONAL BODY IS NOT AN OPTIONAL FIELD. `body: CadenceRequest | None =
+    #: None` accepts no body at all, and the moment a body IS present every
+    #: field in it is required again — so `{}`, which is what the web sends from
+    #: a button with nothing to choose, was answered with 422 "cadence: Field
+    #: required" for as long as the endpoint has existed. `None` and `{}` are
+    #: different bodies.
+    #:
+    #: `= Field(...)` with no `default=` reads as a default and is not one. That
+    #: is the trap, and it is why the fix is a default here rather than special
+    #: handling at the call site.
+    cadence: Cadence = Field(default=Cadence.WEEKLY, description="weekly | fortnightly")
 
 
 # ── Storage ────────────────────────────────────────────────────────────────
@@ -391,7 +402,15 @@ def _default_candidates() -> tuple[ContractItem, ...]:
     activities the product can actually deliver — no placeholder rows.
     """
     return (
-        ContractItem("content", "THU", "One post slot", 10, 12),
+        # Priced from the ONE cost table, not a literal. It read 12 — the price
+        # of `run_content`, a whole week's generation — on a row that offers a
+        # single slot, while the Posts surface quoted 3 for the same thing. A
+        # signature is a promise about a number, so two numbers is the defect.
+        #
+        # A first draft and a regeneration are the same work on the same slot,
+        # so they are one action at one price. A second entry meaning "but the
+        # first one" would be a second number that could drift.
+        ContractItem("content", "THU", "One post slot", 10, CREDIT_COSTS["regenerate_slot"]),
         ContractItem("naukri", "SAT", "Freshness refresh only", 3, 10),
         ContractItem("review", "SUN", "Review, 18:00", 10, 0),
     )
