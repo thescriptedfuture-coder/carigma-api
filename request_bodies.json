@@ -1,0 +1,115 @@
+[
+  {
+    "method": "POST",
+    "path": "/referrals/claim",
+    "keys": [
+      "code"
+    ],
+    "where": "src/auth/useClaimReferral.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/naukri/score",
+    "keys": null,
+    "where": "src/lib/queries.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/score/compute",
+    "keys": [
+      "onboarding"
+    ],
+    "where": "src/routes/decode/useDecode.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/profile/updates",
+    "keys": "unreadable",
+    "where": "src/components/carigma/ProfileChange.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/onboarding/complete",
+    "keys": "unreadable",
+    "where": "src/routes/decode/TargetsStep.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/onboarding/extract",
+    "keys": "unreadable",
+    "where": "src/routes/decode/UploadStep.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/reset-password",
+    "keys": [
+      "email"
+    ],
+    "where": "src/routes/ForgotPasswordPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/credits/request",
+    "keys": [
+      "note"
+    ],
+    "where": "src/routes/PricingPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/payments/topup",
+    "keys": [
+      "pack_key"
+    ],
+    "where": "src/routes/PricingPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/weekly/contract/re-entry",
+    "keys": [],
+    "where": "src/routes/ProgressPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/weekly/contract/approve",
+    "keys": "unreadable",
+    "where": "src/routes/ProgressPage.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/platforms",
+    "keys": [
+      "platforms"
+    ],
+    "where": "src/routes/SettingsPage.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/resume-retention",
+    "keys": [
+      "opt_in"
+    ],
+    "where": "src/routes/SettingsPage.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/email-preferences",
+    "keys": "unreadable",
+    "where": "src/routes/SettingsPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/score/fix",
+    "keys": [
+      "fix_key",
+      "rewrite"
+    ],
+    "where": "src/routes/SignalPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/score/compute",
+    "keys": [],
+    "where": "src/routes/SignalPage.tsx"
+  }
+]
