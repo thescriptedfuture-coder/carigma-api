@@ -232,6 +232,39 @@ def decline(contract: WeeklyContract, *, now: datetime | None = None) -> WeeklyC
     )
 
 
+def release(contract: WeeklyContract, *, now: datetime | None = None) -> WeeklyContract:
+    """Take the signature back, so the week can be changed.
+
+    An approved week had NO EXIT. `Signed` rendered three lines and no control,
+    the offer to plan only appears when there is no contract at all, and
+    `decline` refuses anything already decided — correctly, because a declined
+    week and an approved one are both answers and un-answering is not what
+    decline means. So a week signed on Sunday could not be touched again until
+    the following Monday, including one signed by mistake.
+
+    This is the third thing: not approve, not decline, but **withdraw the
+    signature**. The items come back exactly as they were, because the user is
+    editing their week rather than starting it over — re-proposing the default
+    would throw away the choices that made them sign.
+
+    An AUTO_ADOPTED week can be released too. Nobody agreed to that one in the
+    first place, so letting it stand unchangeable is the worse of the two.
+    """
+    if contract.state is ContractState.PROPOSED:
+        raise ContractTransitionError(f"week of {contract.week_start} is not signed")
+    if contract.state is ContractState.DECLINED:
+        # Declining already means "none of this". Reopening it would be the
+        # product arguing with an answer it was given.
+        raise ContractTransitionError(f"week of {contract.week_start} was declined")
+    return _replace(
+        contract,
+        state=ContractState.PROPOSED,
+        accepted_kinds=(),
+        decided_at=None,
+        proposed_at=now or datetime.now(UTC),
+    )
+
+
 def auto_adopt(contract: WeeklyContract, *, now: datetime | None = None) -> WeeklyContract:
     """Sunday passed unanswered — the conservative plan takes effect.
 

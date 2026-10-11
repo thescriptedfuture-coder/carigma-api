@@ -89,6 +89,20 @@
   "GET /referrals": [
     "pending_note"
   ],
+  "GET /today": [
+    "signal.matches",
+    "signal.matches.new",
+    "signal.matches.top[].company",
+    "signal.matches.top[].id",
+    "signal.matches.top[].match_score",
+    "signal.matches.top[].title",
+    "signal.pipeline",
+    "signal.score",
+    "signal.score.delta_30d",
+    "signal.score.measured_at",
+    "signal.score.value",
+    "week"
+  ],
   "GET /weekly/contract": [
     "contract",
     "contract.decided_at",
@@ -136,5 +150,8 @@
   "POST /weekly/contract/re-entry": [
     "contract.decided_at",
     "contract.proposed_at"
+  ],
+  "POST /weekly/contract/release": [
+    "contract.decided_at"
   ]
 }

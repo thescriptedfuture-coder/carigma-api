@@ -351,3 +351,53 @@ def test_re_entry_rows_stay_in_day_order() -> None:
     order = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     days = [i.day for i in lighter.items]
     assert days == sorted(days, key=order.index)
+
+
+# -- Withdrawing a signature -------------------------------------------------
+
+
+def test_an_approved_week_can_be_released_back_to_proposed() -> None:
+    """The exit an approved week did not have.
+
+    `Signed` rendered three lines and no control; the offer to plan only shows
+    with NO contract; `decline` refuses anything decided. So a week signed on
+    Sunday was unchangeable until the next Monday, including one signed by
+    mistake.
+    """
+    from carigma_api.services.weekly import release
+
+    signed = approve(contract(), now=NOW)
+    assert signed.state is ContractState.APPROVED
+
+    reopened = release(signed, now=NOW)
+
+    assert reopened.state is ContractState.PROPOSED
+    assert reopened.decided_at is None
+    assert reopened.accepted_kinds == ()
+    # The items survive: the user is EDITING their week, not starting over.
+    assert reopened.items == signed.items
+
+
+def test_an_auto_adopted_week_can_be_released_too() -> None:
+    """Nobody agreed to that one. Letting it stand unchangeable is worse."""
+    from carigma_api.services.weekly import auto_adopt, release
+
+    adopted = auto_adopt(contract(), now=NOW)
+    assert release(adopted, now=NOW).state is ContractState.PROPOSED
+
+
+def test_an_unsigned_week_has_no_signature_to_withdraw() -> None:
+    from carigma_api.services.weekly import ContractTransitionError, release
+
+    with pytest.raises(ContractTransitionError):
+        release(contract(), now=NOW)
+
+
+def test_a_declined_week_is_not_reopened() -> None:
+    """Declining already means "none of this". Reopening it would be the
+    product arguing with an answer it was given."""
+    from carigma_api.services.weekly import ContractTransitionError, release
+
+    declined = decline(contract(), now=NOW)
+    with pytest.raises(ContractTransitionError):
+        release(declined, now=NOW)

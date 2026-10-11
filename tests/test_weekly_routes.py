@@ -116,8 +116,65 @@ def test_approving_returns_the_signature_confirmation(client: TestClient) -> Non
     body = res.json()
     assert body["contract"]["state"] == "approved"
     assert body["contract"]["user_approved"] is True
-    assert body["confirmation"]["message"] == "See you Monday."
     assert body["confirmation"]["decided_at"]
+
+
+def test_signing_next_week_says_see_you_monday(client: TestClient) -> None:
+    """The Sunday ritual, which is where that sentence is true."""
+    from carigma_api.routes.weekly import signing_copy
+
+    next_monday = this_monday() + timedelta(days=7)
+    copy = signing_copy(
+        WeeklyContract(week_start=next_monday, items=items(), state=ContractState.APPROVED),
+        today=this_monday(),
+    )
+    assert copy["message"] == "See you Monday."
+
+
+def test_signing_a_week_already_running_never_sends_anyone_away(client: TestClient) -> None:
+    """A user can sign up on any day.
+
+    Re-entry proposes the CURRENT week, so anyone arriving on a Thursday signs
+    a week that has started — and was answered with "See you Monday", an
+    instruction to come back in three days from a product they had just that
+    moment committed to.
+    """
+    from carigma_api.routes.weekly import signing_copy
+
+    monday = this_monday()
+    signed = WeeklyContract(
+        week_start=monday,
+        items=(
+            ContractItem("content", "THU", "One post slot", 10, 3),
+            ContractItem("review", "SUN", "Review, 18:00", 10, 0),
+        ),
+        state=ContractState.APPROVED,
+        accepted_kinds=("content", "review"),
+    )
+
+    copy = signing_copy(signed, today=monday + timedelta(days=3))  # a Thursday
+
+    assert "Monday" not in copy["message"]
+    assert "Thu" in copy["message"]
+    assert "2 left" in copy["detail"]
+
+
+def test_signing_a_week_with_nothing_left_says_that_rather_than_a_next_day(
+    client: TestClient,
+) -> None:
+    from carigma_api.routes.weekly import signing_copy
+
+    monday = this_monday()
+    signed = WeeklyContract(
+        week_start=monday,
+        items=(ContractItem("content", "MON", "One post slot", 10, 3),),
+        state=ContractState.APPROVED,
+        accepted_kinds=("content",),
+    )
+
+    copy = signing_copy(signed, today=monday + timedelta(days=5))  # a Saturday
+
+    assert "already behind it" in copy["message"]
 
 
 def test_partial_approval_is_honoured_over_the_wire(client: TestClient) -> None:
@@ -544,3 +601,73 @@ def test_the_build_time_is_when_the_review_was_built(client: TestClient) -> None
 
     assert review["built_at"] == built.isoformat()
     assert "18:00" not in review["built_at"], "the hardcoded Sunday claim is gone"
+
+
+# ── Withdrawing a signature, over the wire ─────────────────────────────────
+
+
+def test_releasing_an_approved_week_returns_it_to_proposed(client: TestClient) -> None:
+    """The exit an approved week did not have.
+
+    `/weekly/contract/decline` exists and the web never calls it — and it would
+    not have helped: decline refuses anything already decided. So a signed week
+    could not be changed until the next Monday.
+    """
+    seed_week()
+    client.post(
+        "/weekly/contract/approve",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+
+    res = client.post(
+        "/weekly/contract/release",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+
+    assert res.status_code == 200
+    assert res.json()["contract"]["state"] == "proposed"
+    assert res.json()["contract"]["user_approved"] is False
+    # And it is readable back as proposed, not just returned that way.
+    body = client.get("/weekly/contract", headers=auth(make_token())).json()
+    assert body["contract"]["state"] == "proposed"
+
+
+def test_releasing_a_week_nobody_signed_is_a_409_not_a_silent_no_op(client: TestClient) -> None:
+    seed_week()
+    res = client.post(
+        "/weekly/contract/release",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "not_signed"
+
+
+def test_releasing_a_week_that_does_not_exist_is_a_404(client: TestClient) -> None:
+    res = client.post(
+        "/weekly/contract/release",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+    assert res.status_code == 404
+
+
+def test_reading_a_signed_week_carries_the_same_copy_the_signature_returned(
+    client: TestClient,
+) -> None:
+    """On a reload there is no POST response to read, so the page used to carry
+    its own literal — and that literal said "See you Monday" on a Thursday."""
+    seed_week()
+    client.post(
+        "/weekly/contract/approve",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+
+    body = client.get("/weekly/contract", headers=auth(make_token())).json()
+
+    assert body["confirmation"]["message"]
+    assert body["confirmation"]["detail"]

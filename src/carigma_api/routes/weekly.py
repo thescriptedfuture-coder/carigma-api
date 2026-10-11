@@ -54,10 +54,12 @@ from carigma_api.services.weekly import (
     ContractItem,
     ContractState,
     ContractTransitionError,
+    WeeklyContract,
     approve,
     consecutive_lapses,
     decline,
     presentation_for,
+    release,
 )
 from carigma_api.services.weekly_store import ContractStore, SupabaseContractStore
 
@@ -163,6 +165,10 @@ def render_review(week_start: date, earned: dict[str, Any]) -> dict[str, Any]:
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 
+#: Weekday index per contract day code, matching `date.weekday()`.
+_DAY_INDEX = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+
+
 def _monday_of(value: date) -> date:
     return value - timedelta(days=value.weekday())
 
@@ -205,7 +211,45 @@ def get_contract(
             "why": "Reviews are built Sunday evening from the week's real activity.",
             "next": "Your first review builds Sunday, 18:00.",
         }
+    elif contract.state.is_decided:
+        # The same copy the signature returned, on a reload. It used to exist
+        # only in the POST response, so the page had to carry its own literal —
+        # and that literal said "See you Monday" on a Thursday, forever.
+        payload["confirmation"] = signing_copy(contract, today=today)
     return payload
+
+
+def signing_copy(contract: WeeklyContract, *, today: date) -> dict[str, str]:
+    """What a signature means, on the day it is given.
+
+    **"See you Monday." was a literal**, on the server and again in the web
+    component beside it, and it was the only thing either of them said. Signing
+    a week that has already started — which is what re-entry proposes, and what
+    anyone arriving on a Thursday signs — was answered with an instruction to
+    come back in three days.
+
+    A user can sign up on any day. Nothing in this cycle may assume Monday is
+    near, so the copy is derived from the week being signed rather than
+    asserted.
+    """
+    if contract.week_start > today:
+        return {
+            "message": "See you Monday.",
+            "detail": "The signed plan is now the Thread's queue.",
+        }
+    remaining = [i for i in contract.in_force_items if _DAY_INDEX.get(i.day, 6) >= today.weekday()]
+    if not remaining:
+        # Signed after everything in it has passed. Saying "see you Monday"
+        # here would at least be true, but the week is the one that just ran.
+        return {
+            "message": "Signed, with the week already behind it.",
+            "detail": "Nothing is left on this one. Next week's plan arrives Sunday.",
+        }
+    first = remaining[0]
+    return {
+        "message": f"This week is yours. Next up: {first.day.title()}.",
+        "detail": f"{first.summary} — {len(remaining)} left on the plan.",
+    }
 
 
 @router.post("/contract/approve")
@@ -248,8 +292,7 @@ def approve_contract(
         "confirmation": {
             "state": str(signed.state),
             "decided_at": signed.decided_at.isoformat() if signed.decided_at else None,
-            "message": "See you Monday.",
-            "detail": "The signed plan is now the Thread's queue.",
+            **signing_copy(signed, today=datetime.now(UTC).date()),
         },
     }
 
@@ -281,6 +324,44 @@ def decline_contract(
 
     store.save(user.id, declined)
     return {"contract": declined.as_dict()}
+
+
+@router.post("/contract/release")
+def release_contract(
+    body: ApproveRequest,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Withdraw a signature so the week can be edited and signed again.
+
+    The exit an approved week did not have. Free: changing your mind about
+    unstarted work is not a run.
+    """
+    store = _deps(request, settings)
+    contract = store.load(user.id, body.week_start)
+    if contract is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "no_contract", "message": "There is no plan for that week."},
+        )
+    try:
+        reopened = release(contract, now=datetime.now(UTC))
+    except ContractTransitionError as exc:
+        logger.info("contract release refused: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "not_signed",
+                "message": "That week has no signature to withdraw.",
+            },
+        ) from exc
+
+    store.save(user.id, reopened)
+    return {
+        "contract": reopened.as_dict(),
+        "note": "Your signature is withdrawn. Nothing runs until you sign again.",
+    }
 
 
 @router.get("/review")
