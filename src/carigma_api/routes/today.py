@@ -36,7 +36,7 @@ from carigma_api.services.thread_store import (
     SupabaseThreadStore,
     surviving,
 )
-from carigma_api.services.today import load_signals
+from carigma_api.services.today import load_signals, read_sources, signal_row, week_strip
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,11 @@ def get_today(
         raise _unavailable("your day") from exc
 
     now = datetime.now(UTC)
-    signals = load_signals(client, user.id, profile, now=now)
+    # Read once, render twice. The ladder and the numbers under it come from
+    # the same rows, so the primary card cannot disagree with the signal row
+    # inside one response.
+    sources = read_sources(client, user.id, now=now)
+    signals = load_signals(client, user.id, profile, now=now, sources=sources)
     decision = choose(signals)
 
     try:
@@ -111,6 +115,16 @@ def get_today(
         # The deferred rungs, minus anything the user has already answered.
         "deferred": surviving(decision.deferred, decided, now=now),
         "onboarded": bool(profile.get("onboarded")),
+        # Spec 3.2's signal row and week strip. State, under the action — never
+        # instead of it, and never a health dashboard (8.5). The surface showed
+        # a five-card description of the product here instead, which is
+        # marketing on the one screen that exists to say what to do now.
+        "signal": signal_row(
+            sources,
+            new_matches=signals.new_match_count,
+            open_matches=signals.open_match_count,
+        ),
+        "week": week_strip(sources.plan, today=now.date(), plan_read=sources.plan_read),
     }
 
 

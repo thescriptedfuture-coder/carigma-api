@@ -47,6 +47,13 @@ class FakeTable:
     def order(self, *_a: Any, **_k: Any) -> FakeTable:
         return self
 
+    def limit(self, _n: int) -> FakeTable:
+        # The score history read is ordered and limited. Without this the chain
+        # raised AttributeError, the read was swallowed as "unreadable", and
+        # the recorded contract carried `signal.score: null` for every test —
+        # a shape the real API only produces when the table is DOWN.
+        return self
+
     def execute(self) -> Any:
         table = self._db.tables.setdefault(self._name, {})
         if self._name in self._db.failing:
@@ -448,3 +455,106 @@ def test_a_closed_application_is_not_an_upcoming_interview(wired) -> None:  # ty
     )
 
     assert client.get("/today", headers=token()).json()["primary_action"]["key"] == "standing"
+
+
+# ── The signal row and the week strip (spec 3.2) ───────────────────────────
+
+
+def test_today_carries_the_numbers_as_well_as_the_action(wired) -> None:  # type: ignore[no-untyped-def]
+    """Where "WHAT CARIGMA DOES" used to be."""
+    client, db, profiles = wired
+    uid = "11111111-1111-1111-1111-111111111111"
+    profiles.profile = {"name": "Ravi", "lastSeenJobsAt": (NOW - timedelta(days=2)).isoformat()}
+    db.seed("tracker", (1,), {"user_id": uid, "stage": "applied"})
+    db.seed("tracker", (2,), {"user_id": uid, "stage": "interview"})
+    db.seed(
+        "jobs_feed",
+        (1,),
+        {
+            "user_id": uid,
+            "id": 4412,
+            "title": "Data Analyst",
+            "company": "Zomato",
+            "match_score": 82,
+            "status": "active",
+            "first_seen": NOW.isoformat(),
+        },
+    )
+    db.seed(
+        "score_history",
+        (1,),
+        {"user_id": uid, "score": 72, "created_at": NOW.isoformat()},
+    )
+    db.seed(
+        "score_history",
+        (2,),
+        {"user_id": uid, "score": 66, "created_at": (NOW - timedelta(days=14)).isoformat()},
+    )
+
+    body = client.get("/today", headers=token()).json()
+
+    assert body["signal"]["score"] == {
+        "value": 72,
+        "delta_30d": 6,
+        "measured_at": NOW.isoformat(),
+    }
+    assert body["signal"]["pipeline"] == {"active": 2, "interviewing": 1}
+    assert body["signal"]["matches"] == {
+        "new": 1,
+        "open": 1,
+        # Named, not only counted. "2 new matches" is a number; "Data Analyst
+        # at Zomato, 82" is a reason to open the page.
+        "top": [{"id": 4412, "title": "Data Analyst", "company": "Zomato", "match_score": 82}],
+    }
+    assert [cell["day"] for cell in body["week"]] == [
+        "MON",
+        "TUE",
+        "WED",
+        "THU",
+        "FRI",
+        "SAT",
+        "SUN",
+    ]
+    assert sum(1 for cell in body["week"] if cell["is_today"]) == 1
+
+
+def test_a_broken_tracker_reports_no_pipeline_rather_than_an_empty_one(wired) -> None:  # type: ignore[no-untyped-def]
+    """The whole reason `Sources` keeps `None` apart from `[]`.
+
+    "0 active · 0 interviewing" is a statement about someone's job search. The
+    table being down is a statement about us.
+    """
+    client, db, profiles = wired
+    db.failing.add("tracker")
+    profiles.profile = {"name": "Ravi"}
+
+    body = client.get("/today", headers=token()).json()
+
+    assert body["signal"]["pipeline"] is None
+    # And the rest of the row still answers.
+    assert body["signal"]["matches"] == {"new": None, "open": 0, "top": []}
+
+
+def test_a_broken_score_history_reports_no_score_rather_than_zero(wired) -> None:  # type: ignore[no-untyped-def]
+    client, db, profiles = wired
+    db.failing.add("score_history")
+    profiles.profile = {"name": "Ravi"}
+
+    assert client.get("/today", headers=token()).json()["signal"]["score"] is None
+
+
+def test_a_broken_feed_and_a_broken_plan_report_nothing_rather_than_empty(wired) -> None:  # type: ignore[no-untyped-def]
+    """Records the `null` shapes as well as asserting them.
+
+    `contract_nullable.json` can only say a key is nullable if some test has
+    actually produced it null — a key list cannot express "can appear empty",
+    which is why the web's fixtures had ninety-six states nothing covered.
+    """
+    client, db, profiles = wired
+    db.failing.update({"jobs_feed", "content_loop", "content_weeks"})
+    profiles.profile = {"name": "Ravi"}
+
+    body = client.get("/today", headers=token()).json()
+
+    assert body["signal"]["matches"] is None
+    assert body["week"] is None
