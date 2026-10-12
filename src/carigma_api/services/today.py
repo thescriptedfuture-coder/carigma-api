@@ -37,6 +37,14 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from carigma_api.services.applications import (
+    OPEN_STAGES,
+    next_interview,
+    normalise_stage,
+)
+from carigma_api.services.applications import (
+    TABLE as APPLICATIONS,
+)
 from carigma_api.services.jobs.feed import DEFAULT_STATUSES
 from carigma_api.services.ladder import Signals
 from carigma_api.services.posts import SlotState
@@ -44,19 +52,6 @@ from carigma_api.services.posts_store import SupabasePlanStore
 
 logger = logging.getLogger(__name__)
 
-#: V1's applications table, and the only one with rows in it.
-#:
-#: This read `tracker` — a table that exists, is EMPTY, and has never held a
-#: row. `application_events` and `interview_preps` both key on
-#: `application_id`, a UUID that matches `job_applications.id` and nothing in
-#: `tracker`, so the parallel table was never wired to anything either.
-#:
-#: The consequence was silent in the worst direction: the read SUCCEEDED and
-#: returned nothing, so Today's interview rung could never fire and the
-#: pipeline stat reported a confident "0 active" to the one user with thirteen
-#: applications. `tracker` is the V1-vocabulary class at table scope — an
-#: invented name that reads as correct until you count the rows.
-APPLICATIONS = "job_applications"
 JOBS = "jobs_feed"
 SCORES = "score_history"
 
@@ -65,30 +60,6 @@ WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 #: How far back the score delta looks. The spec's "+6 in 30 days".
 DELTA_WINDOW = timedelta(days=30)
-
-#: The five stages V1 stores, in order. `resumeiq/db.py:JOB_STAGES`.
-JOB_STAGES = ("saved", "applied", "interview", "offer", "closed")
-
-#: Stages where an application is still live. `saved` is a bookmark, not an
-#: application; `offer` and `closed` are both finished, in opposite directions.
-OPEN_STAGES = ("applied", "interview")
-
-#: What V1 offers when a row is closed. `resumeiq/db.py:CLOSED_REASONS`.
-CLOSED_REASONS = ("Rejected", "Withdrew", "Ghosted", "Accepted elsewhere")
-
-
-def normalise_stage(status: Any) -> str:
-    """Any stored status onto the five-stage model.
-
-    `rejected` predates the `closed` + reason split and one live row still
-    carries it, so this is load-bearing rather than defensive. Ported from
-    `resumeiq/db.py:normalize_stage` so both products agree about what a row
-    means — the alternative is two readings of one column.
-    """
-    value = str(status or "").lower()
-    if value == "rejected":
-        return "closed"
-    return value if value in JOB_STAGES else "saved"
 
 
 def _parse(value: Any) -> datetime | None:
@@ -101,49 +72,8 @@ def _parse(value: Any) -> datetime | None:
         return None
 
 
-def _parse_day(value: Any) -> datetime | None:
-    """A date-only column as an aware datetime at UTC midnight.
-
-    `interview_on` holds `"2026-07-31"`. `datetime.fromisoformat` returns a
-    NAIVE datetime for that, and comparing it to an aware `now` raises — so a
-    single interview date would have 500'd the whole screen.
-    """
-    parsed = _parse(value)
-    if parsed is None:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 def _monday_of(value: date) -> date:
     return value - timedelta(days=value.weekday())
-
-
-def next_interview(rows: list[dict[str, Any]], *, now: datetime) -> tuple[datetime | None, str]:
-    """The soonest interview still ahead, and what to call it.
-
-    Finished applications are excluded even when they carry a date — an
-    interview you already had, or for a role that is gone, is not something to
-    prepare for. One live row is `closed` with an `interview_on` in July.
-
-    `interview_on` is a DATE (`"2026-07-31"`), not a timestamp. Parsed naively
-    it compares to an aware `now` with `TypeError`, which would have taken the
-    whole of Today down rather than one rung, so the day is anchored to UTC
-    midnight here.
-    """
-    upcoming: list[tuple[datetime, str]] = []
-    for row in rows:
-        if normalise_stage(row.get("status")) not in OPEN_STAGES:
-            continue
-        when = _parse_day(row.get("interview_on"))
-        if when is None or when < now:
-            continue
-        label = ", ".join(p for p in (row.get("company"), row.get("role")) if p)
-        upcoming.append((when, label))
-
-    if not upcoming:
-        return None, ""
-    soonest = min(upcoming, key=lambda pair: pair[0])
-    return soonest[0], soonest[1]
 
 
 def post_due_today(plan: Any, *, today: date) -> str | None:
@@ -438,8 +368,6 @@ def signal_row(sources: Sources, *, new_matches: int | None, open_matches: int) 
 
 
 __all__ = [
-    "CLOSED_REASONS",
-    "JOB_STAGES",
     "JOBS",
     "OPEN_STAGES",
     "normalise_stage",

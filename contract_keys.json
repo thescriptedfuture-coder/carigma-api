@@ -1,4 +1,7 @@
 {
+  "DELETE /tracker/{}": [
+    "removed"
+  ],
   "GET /admin/credit-requests": [
     "items",
     "items[].asked_at",
@@ -471,6 +474,50 @@
     "week[].optional",
     "week[].state"
   ],
+  "GET /tracker": [
+    "closed_reasons",
+    "columns",
+    "columns[].count",
+    "columns[].items",
+    "columns[].items[].closed_reason",
+    "columns[].items[].company",
+    "columns[].items[].created_at",
+    "columns[].items[].days_in_stage",
+    "columns[].items[].id",
+    "columns[].items[].interview_on",
+    "columns[].items[].link",
+    "columns[].items[].needs_follow_up",
+    "columns[].items[].notes",
+    "columns[].items[].role",
+    "columns[].items[].salary",
+    "columns[].items[].stage",
+    "columns[].items[].stage_label",
+    "columns[].items[].updated_at",
+    "columns[].label",
+    "columns[].stage",
+    "summary",
+    "summary.active",
+    "summary.interviewing",
+    "summary.needs_follow_up",
+    "summary.total"
+  ],
+  "GET /tracker/{}": [
+    "closed_reason",
+    "company",
+    "created_at",
+    "days_in_stage",
+    "events",
+    "id",
+    "interview_on",
+    "link",
+    "needs_follow_up",
+    "notes",
+    "role",
+    "salary",
+    "stage",
+    "stage_label",
+    "updated_at"
+  ],
   "GET /unsubscribe/{}": [
     "note",
     "readable",
@@ -536,6 +583,22 @@
     "streak.sentence",
     "streak.weeks",
     "title"
+  ],
+  "PATCH /tracker/{}": [
+    "closed_reason",
+    "company",
+    "created_at",
+    "days_in_stage",
+    "id",
+    "interview_on",
+    "link",
+    "needs_follow_up",
+    "notes",
+    "role",
+    "salary",
+    "stage",
+    "stage_label",
+    "updated_at"
   ],
   "POST /admin/market": [
     "batch_key",
@@ -760,6 +823,25 @@
     "decision",
     "item_key",
     "snooze_until"
+  ],
+  "POST /tracker": [
+    "closed_reason",
+    "company",
+    "created_at",
+    "days_in_stage",
+    "id",
+    "interview_on",
+    "link",
+    "needs_follow_up",
+    "notes",
+    "role",
+    "salary",
+    "stage",
+    "stage_label",
+    "updated_at"
+  ],
+  "POST /tracker/{}/note": [
+    "logged"
   ],
   "POST /unsubscribe/{}": [
     "done",
