@@ -44,7 +44,19 @@ from carigma_api.services.posts_store import SupabasePlanStore
 
 logger = logging.getLogger(__name__)
 
-TRACKER = "tracker"
+#: V1's applications table, and the only one with rows in it.
+#:
+#: This read `tracker` — a table that exists, is EMPTY, and has never held a
+#: row. `application_events` and `interview_preps` both key on
+#: `application_id`, a UUID that matches `job_applications.id` and nothing in
+#: `tracker`, so the parallel table was never wired to anything either.
+#:
+#: The consequence was silent in the worst direction: the read SUCCEEDED and
+#: returned nothing, so Today's interview rung could never fire and the
+#: pipeline stat reported a confident "0 active" to the one user with thirteen
+#: applications. `tracker` is the V1-vocabulary class at table scope — an
+#: invented name that reads as correct until you count the rows.
+APPLICATIONS = "job_applications"
 JOBS = "jobs_feed"
 SCORES = "score_history"
 
@@ -54,9 +66,29 @@ WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 #: How far back the score delta looks. The spec's "+6 in 30 days".
 DELTA_WINDOW = timedelta(days=30)
 
-#: Stages where an interview is still ahead of the user. A closed application
-#: has no upcoming anything, however its `interview_at` reads.
-OPEN_STAGES = ("applied", "screening", "interview")
+#: The five stages V1 stores, in order. `resumeiq/db.py:JOB_STAGES`.
+JOB_STAGES = ("saved", "applied", "interview", "offer", "closed")
+
+#: Stages where an application is still live. `saved` is a bookmark, not an
+#: application; `offer` and `closed` are both finished, in opposite directions.
+OPEN_STAGES = ("applied", "interview")
+
+#: What V1 offers when a row is closed. `resumeiq/db.py:CLOSED_REASONS`.
+CLOSED_REASONS = ("Rejected", "Withdrew", "Ghosted", "Accepted elsewhere")
+
+
+def normalise_stage(status: Any) -> str:
+    """Any stored status onto the five-stage model.
+
+    `rejected` predates the `closed` + reason split and one live row still
+    carries it, so this is load-bearing rather than defensive. Ported from
+    `resumeiq/db.py:normalize_stage` so both products agree about what a row
+    means — the alternative is two readings of one column.
+    """
+    value = str(status or "").lower()
+    if value == "rejected":
+        return "closed"
+    return value if value in JOB_STAGES else "saved"
 
 
 def _parse(value: Any) -> datetime | None:
@@ -69,6 +101,19 @@ def _parse(value: Any) -> datetime | None:
         return None
 
 
+def _parse_day(value: Any) -> datetime | None:
+    """A date-only column as an aware datetime at UTC midnight.
+
+    `interview_on` holds `"2026-07-31"`. `datetime.fromisoformat` returns a
+    NAIVE datetime for that, and comparing it to an aware `now` raises — so a
+    single interview date would have 500'd the whole screen.
+    """
+    parsed = _parse(value)
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def _monday_of(value: date) -> date:
     return value - timedelta(days=value.weekday())
 
@@ -76,18 +121,23 @@ def _monday_of(value: date) -> date:
 def next_interview(rows: list[dict[str, Any]], *, now: datetime) -> tuple[datetime | None, str]:
     """The soonest interview still ahead, and what to call it.
 
-    Closed applications are excluded even when they carry an `interview_at` —
-    an interview you already had, or for a role that is gone, is not something
-    to prepare for.
+    Finished applications are excluded even when they carry a date — an
+    interview you already had, or for a role that is gone, is not something to
+    prepare for. One live row is `closed` with an `interview_on` in July.
+
+    `interview_on` is a DATE (`"2026-07-31"`), not a timestamp. Parsed naively
+    it compares to an aware `now` with `TypeError`, which would have taken the
+    whole of Today down rather than one rung, so the day is anchored to UTC
+    midnight here.
     """
     upcoming: list[tuple[datetime, str]] = []
     for row in rows:
-        if row.get("closed_at") or str(row.get("stage") or "") not in OPEN_STAGES:
+        if normalise_stage(row.get("status")) not in OPEN_STAGES:
             continue
-        when = _parse(row.get("interview_at"))
+        when = _parse_day(row.get("interview_on"))
         if when is None or when < now:
             continue
-        label = ", ".join(p for p in (row.get("company"), row.get("title")) if p)
+        label = ", ".join(p for p in (row.get("company"), row.get("role")) if p)
         upcoming.append((when, label))
 
     if not upcoming:
@@ -168,10 +218,15 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
 
     tracker_rows: list[dict[str, Any]] | None
     try:
-        res = client.table(TRACKER).select("*").eq("user_id", user_id).execute()
+        res = (
+            client.table(APPLICATIONS)
+            .select("id,company,role,status,interview_on,closed_reason,updated_at")
+            .eq("user_id", user_id)
+            .execute()
+        )
         tracker_rows = res.data if res and isinstance(res.data, list) else []
     except Exception:
-        logger.exception("could not read the tracker for %s", user_id)
+        logger.exception("could not read the applications for %s", user_id)
         tracker_rows = None
 
     job_rows: list[dict[str, Any]] | None
@@ -291,13 +346,18 @@ def score_signal(rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
 
 
 def pipeline_signal(rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    """How many applications are live, and how many are at interview."""
+    """How many applications are live, and how many are at interview.
+
+    `saved` is excluded: a bookmark is not an application. So are `offer` and
+    `closed`, which are both finished.
+    """
     if rows is None:
         return None
-    live = [r for r in rows if not r.get("closed_at") and str(r.get("stage") or "") in OPEN_STAGES]
+    stages = [normalise_stage(r.get("status")) for r in rows]
+    live = [stage for stage in stages if stage in OPEN_STAGES]
     return {
         "active": len(live),
-        "interviewing": sum(1 for r in live if str(r.get("stage") or "") == "interview"),
+        "interviewing": sum(1 for stage in live if stage == "interview"),
     }
 
 
@@ -378,9 +438,12 @@ def signal_row(sources: Sources, *, new_matches: int | None, open_matches: int) 
 
 
 __all__ = [
+    "CLOSED_REASONS",
+    "JOB_STAGES",
     "JOBS",
     "OPEN_STAGES",
-    "TRACKER",
+    "normalise_stage",
+    "APPLICATIONS",
     "count_matches",
     "load_signals",
     "next_interview",

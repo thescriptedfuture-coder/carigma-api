@@ -108,12 +108,17 @@ def test_an_empty_tracker_is_a_real_zero() -> None:
     assert pipeline_signal([]) == {"active": 0, "interviewing": 0}
 
 
-def test_closed_applications_are_not_live_however_their_stage_reads() -> None:
+def test_only_live_stages_count_and_legacy_rejected_normalises() -> None:
+    """`saved` is a bookmark, not an application. `offer` and `closed` are both
+    finished. And one live row still says `rejected`, which predates the
+    `closed` + reason split — so the normaliser is load-bearing, not
+    defensive."""
     rows = [
-        {"stage": "applied"},
-        {"stage": "interview"},
-        {"stage": "interview", "closed_at": NOW.isoformat()},
-        {"stage": "offer"},
+        {"status": "saved"},
+        {"status": "applied"},
+        {"status": "interview"},
+        {"status": "offer"},
+        {"status": "rejected"},
     ]
     assert pipeline_signal(rows) == {"active": 2, "interviewing": 1}
 
@@ -219,3 +224,56 @@ def test_no_jobs_is_an_empty_preview_not_a_crash() -> None:
 
     assert matches_preview([]) == []
     assert matches_preview(None) == []
+
+
+# ── The table that had no rows ─────────────────────────────────────────────
+
+
+def test_a_date_only_interview_does_not_crash_the_comparison() -> None:
+    """`interview_on` holds `"2026-07-31"`.
+
+    `datetime.fromisoformat` makes that NAIVE, and comparing a naive datetime
+    to an aware `now` raises `TypeError` — which would have taken the whole of
+    Today down rather than one rung, the first time anyone had an interview.
+    """
+    from carigma_api.services.today import next_interview
+
+    rows = [
+        {
+            "status": "interview",
+            "company": "Zomato",
+            "role": "Data Analyst",
+            "interview_on": (NOW + timedelta(days=2)).date().isoformat(),
+        }
+    ]
+    when, label = next_interview(rows, now=NOW)
+    assert when is not None
+    assert when.tzinfo is not None
+    assert label == "Zomato, Data Analyst"
+
+
+def test_a_finished_application_is_not_an_upcoming_interview() -> None:
+    """One live row is `closed` with an `interview_on` in July."""
+    from carigma_api.services.today import next_interview
+
+    rows = [
+        {
+            "status": "closed",
+            "company": "Paytm",
+            "role": "Product Analyst",
+            "interview_on": (NOW + timedelta(days=2)).date().isoformat(),
+            "closed_reason": "Ghosted",
+        }
+    ]
+    assert next_interview(rows, now=NOW) == (None, "")
+
+
+def test_rejected_normalises_to_closed() -> None:
+    from carigma_api.services.today import normalise_stage
+
+    assert normalise_stage("rejected") == "closed"
+    assert normalise_stage("Applied") == "applied"
+    # Anything unrecognised is a bookmark, never silently "live".
+    assert normalise_stage("") == "saved"
+    assert normalise_stage(None) == "saved"
+    assert normalise_stage("screening") == "saved"

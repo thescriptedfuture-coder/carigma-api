@@ -1,6 +1,7 @@
 """Today and the thread, over HTTP.
 
-Fixtures reflect what the tables ACTUALLY hold: `tracker`, `content_loop` and
+Fixtures reflect what the tables ACTUALLY hold: `job_applications` carries
+thirteen rows for one user, `content_loop` and
 `thread_decisions` are empty, `score_history` covers 10 of 12 users and
 `jobs_feed` 6 of 12. The common beta state is partial, so that is the default
 case here rather than the exception.
@@ -236,7 +237,7 @@ def test_a_broken_tracker_does_not_take_the_whole_screen_down(wired) -> None:  #
     """Losing four working rungs to one broken source would be a worse answer
     than losing the rung."""
     client, db, profiles = wired
-    db.failing.add("tracker")
+    db.failing.add("job_applications")
     profiles.profile = {"name": "Ravi", "lastSeenJobsAt": (NOW - timedelta(days=1)).isoformat()}
     db.seed(
         "jobs_feed",
@@ -409,15 +410,17 @@ def test_an_upcoming_interview_reaches_the_screen_with_its_time(wired) -> None: 
     uid = "11111111-1111-1111-1111-111111111111"
     soon = NOW + timedelta(hours=30)
     db.seed(
-        "tracker",
+        "job_applications",
         (1,),
         {
             "user_id": uid,
-            "stage": "interview",
+            "status": "interview",
             "company": "Zomato",
-            "title": "Data Analyst",
-            "interview_at": soon.isoformat(),
-            "closed_at": None,
+            "role": "Data Analyst",
+            # A DATE, as the live column holds. Parsed naively it compares to
+            # an aware `now` with TypeError and takes the whole screen down.
+            "interview_on": soon.date().isoformat(),
+            "closed_reason": None,
         },
     )
 
@@ -442,15 +445,15 @@ def test_a_closed_application_is_not_an_upcoming_interview(wired) -> None:  # ty
     client, db, _profiles = wired
     uid = "11111111-1111-1111-1111-111111111111"
     db.seed(
-        "tracker",
+        "job_applications",
         (1,),
         {
             "user_id": uid,
-            "stage": "closed",
+            "status": "closed",
             "company": "Zomato",
-            "title": "Data Analyst",
-            "interview_at": (NOW + timedelta(hours=5)).isoformat(),
-            "closed_at": NOW.isoformat(),
+            "role": "Data Analyst",
+            "interview_on": (NOW + timedelta(hours=5)).date().isoformat(),
+            "closed_reason": "Ghosted",
         },
     )
 
@@ -465,8 +468,8 @@ def test_today_carries_the_numbers_as_well_as_the_action(wired) -> None:  # type
     client, db, profiles = wired
     uid = "11111111-1111-1111-1111-111111111111"
     profiles.profile = {"name": "Ravi", "lastSeenJobsAt": (NOW - timedelta(days=2)).isoformat()}
-    db.seed("tracker", (1,), {"user_id": uid, "stage": "applied"})
-    db.seed("tracker", (2,), {"user_id": uid, "stage": "interview"})
+    db.seed("job_applications", (1,), {"user_id": uid, "status": "applied"})
+    db.seed("job_applications", (2,), {"user_id": uid, "status": "interview"})
     db.seed(
         "jobs_feed",
         (1,),
@@ -525,7 +528,7 @@ def test_a_broken_tracker_reports_no_pipeline_rather_than_an_empty_one(wired) ->
     table being down is a statement about us.
     """
     client, db, profiles = wired
-    db.failing.add("tracker")
+    db.failing.add("job_applications")
     profiles.profile = {"name": "Ravi"}
 
     body = client.get("/today", headers=token()).json()
