@@ -145,12 +145,19 @@ def _keys_of(argument: str) -> list[str] | str:
             depth -= 1
         if ch == "," and depth == 0:
             name = piece.split(":", 1)[0].strip()
+            piece = ""
+            # A TRAILING COMMA leaves an empty piece, and Prettier writes one on
+            # every multi-line literal in this project. Reading that as a
+            # malformed key marked ordinary bodies "unreadable" — so the debt
+            # counter beneath this was counting the scanner's own defect as the
+            # codebase's, and five of its six entries were this.
+            if not name:
+                continue
             if name.startswith("..."):
                 return "unreadable"
             if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
                 return "unreadable"
             keys.append(name)
-            piece = ""
             continue
         piece += ch
     return keys

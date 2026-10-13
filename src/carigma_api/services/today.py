@@ -37,6 +37,14 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from carigma_api.services.applications import (
+    OPEN_STAGES,
+    next_interview,
+    normalise_stage,
+)
+from carigma_api.services.applications import (
+    TABLE as APPLICATIONS,
+)
 from carigma_api.services.jobs.feed import DEFAULT_STATUSES
 from carigma_api.services.ladder import Signals
 from carigma_api.services.posts import SlotState
@@ -44,7 +52,6 @@ from carigma_api.services.posts_store import SupabasePlanStore
 
 logger = logging.getLogger(__name__)
 
-TRACKER = "tracker"
 JOBS = "jobs_feed"
 SCORES = "score_history"
 
@@ -53,10 +60,6 @@ WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 #: How far back the score delta looks. The spec's "+6 in 30 days".
 DELTA_WINDOW = timedelta(days=30)
-
-#: Stages where an interview is still ahead of the user. A closed application
-#: has no upcoming anything, however its `interview_at` reads.
-OPEN_STAGES = ("applied", "screening", "interview")
 
 
 def _parse(value: Any) -> datetime | None:
@@ -71,29 +74,6 @@ def _parse(value: Any) -> datetime | None:
 
 def _monday_of(value: date) -> date:
     return value - timedelta(days=value.weekday())
-
-
-def next_interview(rows: list[dict[str, Any]], *, now: datetime) -> tuple[datetime | None, str]:
-    """The soonest interview still ahead, and what to call it.
-
-    Closed applications are excluded even when they carry an `interview_at` —
-    an interview you already had, or for a role that is gone, is not something
-    to prepare for.
-    """
-    upcoming: list[tuple[datetime, str]] = []
-    for row in rows:
-        if row.get("closed_at") or str(row.get("stage") or "") not in OPEN_STAGES:
-            continue
-        when = _parse(row.get("interview_at"))
-        if when is None or when < now:
-            continue
-        label = ", ".join(p for p in (row.get("company"), row.get("title")) if p)
-        upcoming.append((when, label))
-
-    if not upcoming:
-        return None, ""
-    soonest = min(upcoming, key=lambda pair: pair[0])
-    return soonest[0], soonest[1]
 
 
 def post_due_today(plan: Any, *, today: date) -> str | None:
@@ -168,10 +148,15 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
 
     tracker_rows: list[dict[str, Any]] | None
     try:
-        res = client.table(TRACKER).select("*").eq("user_id", user_id).execute()
+        res = (
+            client.table(APPLICATIONS)
+            .select("id,company,role,status,interview_on,closed_reason,updated_at")
+            .eq("user_id", user_id)
+            .execute()
+        )
         tracker_rows = res.data if res and isinstance(res.data, list) else []
     except Exception:
-        logger.exception("could not read the tracker for %s", user_id)
+        logger.exception("could not read the applications for %s", user_id)
         tracker_rows = None
 
     job_rows: list[dict[str, Any]] | None
@@ -291,13 +276,18 @@ def score_signal(rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
 
 
 def pipeline_signal(rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    """How many applications are live, and how many are at interview."""
+    """How many applications are live, and how many are at interview.
+
+    `saved` is excluded: a bookmark is not an application. So are `offer` and
+    `closed`, which are both finished.
+    """
     if rows is None:
         return None
-    live = [r for r in rows if not r.get("closed_at") and str(r.get("stage") or "") in OPEN_STAGES]
+    stages = [normalise_stage(r.get("status")) for r in rows]
+    live = [stage for stage in stages if stage in OPEN_STAGES]
     return {
         "active": len(live),
-        "interviewing": sum(1 for r in live if str(r.get("stage") or "") == "interview"),
+        "interviewing": sum(1 for stage in live if stage == "interview"),
     }
 
 
@@ -380,7 +370,8 @@ def signal_row(sources: Sources, *, new_matches: int | None, open_matches: int) 
 __all__ = [
     "JOBS",
     "OPEN_STAGES",
-    "TRACKER",
+    "normalise_stage",
+    "APPLICATIONS",
     "count_matches",
     "load_signals",
     "next_interview",

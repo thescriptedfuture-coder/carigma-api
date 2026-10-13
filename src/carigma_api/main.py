@@ -31,6 +31,7 @@ from carigma_api.routes import referrals as referral_routes
 from carigma_api.routes import score as score_routes
 from carigma_api.routes import settings as settings_routes
 from carigma_api.routes import today as today_routes
+from carigma_api.routes import tracker as tracker_routes
 from carigma_api.routes import unsubscribe as unsubscribe_routes
 from carigma_api.routes import weekly as weekly_routes
 from carigma_api.services import deploy, instances
@@ -148,6 +149,7 @@ def create_app() -> FastAPI:
     app.include_router(credits_routes.router)
     app.include_router(profile_routes.router)
     app.include_router(today_routes.router)
+    app.include_router(tracker_routes.router)
     app.include_router(referral_routes.router)
     app.include_router(onboarding_routes.router)
     app.include_router(unsubscribe_routes.router)

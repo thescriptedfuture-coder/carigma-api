@@ -103,6 +103,21 @@
     "signal.score.value",
     "week"
   ],
+  "GET /tracker": [
+    "columns[].items[].closed_reason",
+    "columns[].items[].interview_on",
+    "columns[].items[].link",
+    "columns[].items[].notes",
+    "columns[].items[].salary"
+  ],
+  "GET /tracker/{}": [
+    "closed_reason",
+    "events",
+    "interview_on",
+    "link",
+    "notes",
+    "salary"
+  ],
   "GET /weekly/contract": [
     "contract",
     "contract.decided_at",
@@ -111,6 +126,13 @@
   "GET /weekly/review": [
     "review",
     "review.milestone"
+  ],
+  "PATCH /tracker/{}": [
+    "closed_reason",
+    "interview_on",
+    "link",
+    "notes",
+    "salary"
   ],
   "POST /naukri/score": [
     "dimensions[].needs",
@@ -143,6 +165,16 @@
   ],
   "POST /thread/{}/decide": [
     "snooze_until"
+  ],
+  "POST /tracker": [
+    "closed_reason",
+    "created_at",
+    "days_in_stage",
+    "interview_on",
+    "link",
+    "notes",
+    "salary",
+    "updated_at"
   ],
   "POST /weekly/contract/approve": [
     "contract.proposed_at"

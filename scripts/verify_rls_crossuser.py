@@ -90,7 +90,12 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     # probe finds them missing, which is a phase of exposure.
     "content_loop": {"week_start": "2026-01-05", "day": "MON", "slot_date": "2026-01-05"},
     "content_weeks": {"week_start": "2026-01-05"},
+    # `tracker` is a V2-era table with zero rows that nothing writes to; it
+    # stays probed until it is dropped, so the probe keeps describing reality.
     "tracker": {"title": "rls-probe", "company": "rls-probe"},
+    # V1's pipeline, and the table `application_events.application_id` and
+    # `interview_preps.application_id` have always pointed at.
+    "job_applications": {"company": "rls-probe", "role": "rls-probe", "status": "saved"},
     "weekly_review": {"week_start": "2026-01-05"},
     # V2_006, the financial pair.
     "payments": {"credits": 0, "amount_inr": 0},
@@ -150,6 +155,11 @@ WRITES_AS_USER: dict[str, tuple[str, Any]] = {
     "jobs_feed": ("update", {"status": "dismissed", "dismiss_reason": "rls-probe"}),
     "payments": ("insert+update", {"status": "failed"}),  # record, then claim
     "user_subscriptions": ("update", {"cycles_credited": 0}),  # claim_cycles
+    # The pipeline. V1's tables, written by routes/tracker.py as the caller —
+    # never the service role, because every row here belongs to one person and
+    # a cross-user write is the Naukri class with someone's job search in it.
+    "job_applications": ("insert", None),  # routes/tracker.py add/move/remove
+    "application_events": ("insert", None),  # the timeline beside a stage move
 }
 
 #: Postgres's code for "new row violates row-level security policy".

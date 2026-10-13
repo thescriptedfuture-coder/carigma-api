@@ -75,6 +75,8 @@ READS: tuple[tuple[str, str | None], ...] = (
     ("/weekly/standing-by", None),
     ("/score/history", None),
     ("/jobs/feed", "items"),
+    # Five columns, always, so an empty pipeline and an unreadable one differ.
+    ("/tracker", "columns"),
     ("/naukri/score", None),
     ("/referrals", "code"),
     # Added by `tests/test_smoke.py`, which derives this list from the recorded

@@ -62,6 +62,7 @@ ACCEPTED: dict[tuple[str, str], str] = {
     ("reengagement.py", "_parse"): "unusable timestamp",
     ("run_store.py", "_parse"): "unusable timestamp",
     ("today.py", "_parse"): "unusable timestamp",
+    ("applications.py", "_parse"): "unusable timestamp; caller has no other branch",
     ("trigger_facts.py", "_parse"): "unusable timestamp",
     # ── Reasoned, and the reasoning is in the function.
     ("feed.py", "_is_new"): "an unreadable date must not be allowed to CLAIM novelty",
