@@ -42,8 +42,36 @@ JOB_STAGES: tuple[str, ...] = ("saved", "applied", "interview", "offer", "closed
 #: application; `offer` and `closed` are both finished, in opposite directions.
 OPEN_STAGES: tuple[str, ...] = ("applied", "interview")
 
-#: What V1 offers when a row is closed. `resumeiq/db.py:CLOSED_REASONS`.
-CLOSED_REASONS: tuple[str, ...] = ("Rejected", "Withdrew", "Ghosted", "Accepted elsewhere")
+#: What V1 offers when a row is closed, plus the one it never had.
+#:
+#: V1's four are `Rejected, Withdrew, Ghosted, Accepted elsewhere` — every one
+#: of them a way for the search to end badly or elsewhere. **There was no way
+#: to say you took THIS one**, which is the best outcome the product has and
+#: the only one it could not record. "Accepted elsewhere" sitting alone implies
+#: the offer in front of you is never the one you take.
+#:
+#: Named "Accepted this offer" rather than "Accepted" so it cannot be misread
+#: next to its neighbour at a glance.
+CLOSED_REASONS: tuple[str, ...] = (
+    "Accepted this offer",
+    "Rejected",
+    "Withdrew",
+    "Ghosted",
+    "Accepted elsewhere",
+)
+
+#: The reason that means the search ENDED WELL. Kept as a name rather than a
+#: string literal at the call sites, because three surfaces ask the question.
+ACCEPTED = "Accepted this offer"
+
+#: How long a closed application stays in the column before it folds away.
+#:
+#: FOLDS, not deletes. Removing someone's record of their own job search to
+#: keep a column short trades a permanent loss against a presentation problem —
+#: and "did I apply to this company before?" is a question the row is the only
+#: answer to. Nothing is scheduled and nothing is removed; the view stops
+#: listing them and says how many it is holding.
+FOLD_CLOSED_AFTER_DAYS = 30
 
 #: V1 nudges a follow-up after ten days in `applied`. Ported rather than picked.
 FOLLOW_UP_DAYS = 10
@@ -134,17 +162,39 @@ def board(rows: list[dict[str, Any]], *, now: datetime) -> list[dict[str, Any]]:
 
     Every stage appears even when empty: a board that hides its empty columns
     teaches a different shape of the pipeline every time it is opened.
+
+    **Closed folds, and only closed.** A search that runs for a year closes
+    dozens of applications and the column grows without bound, so rows closed
+    more than `FOLD_CLOSED_AFTER_DAYS` ago move to `folded` instead of `items`.
+    The count still counts them — the column says how many it is holding, and
+    the client can show them. Nothing is deleted and nothing is scheduled.
     """
     presented = [present(row, now=now) for row in rows]
-    return [
-        {
-            "stage": stage,
-            "label": STAGE_LABELS[stage],
-            "count": sum(1 for item in presented if item["stage"] == stage),
-            "items": [item for item in presented if item["stage"] == stage],
-        }
-        for stage in JOB_STAGES
-    ]
+    columns: list[dict[str, Any]] = []
+    for stage in JOB_STAGES:
+        here = [item for item in presented if item["stage"] == stage]
+        folded: list[dict[str, Any]] = []
+        if stage == "closed":
+            fresh: list[dict[str, Any]] = []
+            for item in here:
+                days = item["days_in_stage"]
+                # `None` days stays visible. We do not know when it closed, and
+                # hiding a row on the strength of a timestamp we could not read
+                # is the falsy-zero mistake wearing a different hat.
+                (folded if days is not None and days > FOLD_CLOSED_AFTER_DAYS else fresh).append(
+                    item
+                )
+            here = fresh
+        columns.append(
+            {
+                "stage": stage,
+                "label": STAGE_LABELS[stage],
+                "count": len(here) + len(folded),
+                "items": here,
+                "folded": folded,
+            }
+        )
+    return columns
 
 
 def summary(rows: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
@@ -200,7 +250,9 @@ def valid_interview_date(value: Any) -> date | None:
 
 
 __all__ = [
+    "ACCEPTED",
     "CLOSED_REASONS",
+    "FOLD_CLOSED_AFTER_DAYS",
     "EVENTS",
     "FOLLOW_UP_DAYS",
     "JOB_STAGES",

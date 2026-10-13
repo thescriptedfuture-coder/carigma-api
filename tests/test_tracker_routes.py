@@ -455,3 +455,101 @@ def test_a_populated_timeline_reads_back_in_full(wired: Any) -> None:
 
     assert {e["event_type"] for e in body["events"]} == {"stage_interview", "note"}
     assert all({"event_type", "note", "created_at"} <= set(e) for e in body["events"])
+
+
+# ── Closing well, and the column that would grow forever ───────────────────
+
+
+def test_the_search_can_end_because_you_took_the_offer(wired: Any) -> None:
+    """V1's four reasons were Rejected, Withdrew, Ghosted, Accepted elsewhere —
+    every one a way for the search to end badly or somewhere else. There was no
+    way to record the best outcome the product has."""
+    client, db = wired
+    db.seed("job_applications", application(id="a", status="offer"))
+
+    body = client.patch(
+        "/tracker/a",
+        json={"stage": "closed", "closed_reason": "Accepted this offer"},
+        headers=token(),
+    ).json()
+
+    assert body["closed_reason"] == "Accepted this offer"
+    assert "Accepted this offer" in client.get("/tracker", headers=token()).json()["closed_reasons"]
+
+
+def test_closed_applications_fold_away_but_are_never_removed(wired: Any) -> None:
+    """A year's search closes dozens, and the column grows without bound.
+
+    Folding is a view decision; DELETING would trade a permanent loss against a
+    presentation problem, and "did I apply here before?" is a question only the
+    row can answer.
+    """
+    client, db = wired
+    old = (NOW - timedelta(days=45)).isoformat()
+    db.seed("job_applications", application(id="old", status="closed", updated_at=old))
+    db.seed("job_applications", application(id="recent", status="closed"))
+
+    closed = next(
+        c
+        for c in client.get("/tracker", headers=token()).json()["columns"]
+        if c["stage"] == "closed"
+    )
+
+    assert [i["id"] for i in closed["items"]] == ["recent"]
+    assert [i["id"] for i in closed["folded"]] == ["old"]
+    # The count still counts them. The column knows what it is holding.
+    assert closed["count"] == 2
+
+
+def test_a_closed_row_with_no_readable_date_stays_visible(wired: Any) -> None:
+    """Hiding a row on the strength of a timestamp we could not read is the
+    falsy-zero mistake wearing a different hat."""
+    client, db = wired
+    db.seed(
+        "job_applications",
+        application(id="a", status="closed", updated_at=None, created_at=None),
+    )
+
+    closed = next(
+        c
+        for c in client.get("/tracker", headers=token()).json()["columns"]
+        if c["stage"] == "closed"
+    )
+    assert [i["id"] for i in closed["items"]] == ["a"]
+    assert closed["folded"] == []
+
+
+def test_only_closed_folds(wired: Any) -> None:
+    """An application sitting in `applied` for 112 days is the opposite of
+    something to hide — five live rows are in exactly that state."""
+    client, db = wired
+    db.seed(
+        "job_applications",
+        application(id="a", status="applied", updated_at=(NOW - timedelta(days=112)).isoformat()),
+    )
+
+    applied = next(
+        c
+        for c in client.get("/tracker", headers=token()).json()["columns"]
+        if c["stage"] == "applied"
+    )
+    assert len(applied["items"]) == 1
+    assert applied["folded"] == []
+
+
+def test_following_up_resets_the_clock_and_says_so_on_the_timeline(wired: Any) -> None:
+    """The nudge only cleared when a STAGE moved, so an application you did
+    chase went on asking to be chased."""
+    client, db = wired
+    db.seed(
+        "job_applications",
+        application(id="a", status="applied", updated_at=(NOW - timedelta(days=30)).isoformat()),
+    )
+    assert client.get("/tracker/a", headers=token()).json()["needs_follow_up"] is True
+
+    body = client.post("/tracker/a/followed-up", headers=token()).json()
+
+    assert body["needs_follow_up"] is False
+    assert body["days_in_stage"] == 0
+    events = [row for table, row in db.inserted if table == "application_events"]
+    assert events[-1]["note"] == "Followed up"

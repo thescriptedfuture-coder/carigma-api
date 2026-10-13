@@ -104,11 +104,19 @@
     "week"
   ],
   "GET /tracker": [
+    "columns[].folded[].closed_reason",
+    "columns[].folded[].interview_on",
+    "columns[].folded[].link",
+    "columns[].folded[].notes",
+    "columns[].folded[].salary",
     "columns[].items[].closed_reason",
+    "columns[].items[].created_at",
+    "columns[].items[].days_in_stage",
     "columns[].items[].interview_on",
     "columns[].items[].link",
     "columns[].items[].notes",
-    "columns[].items[].salary"
+    "columns[].items[].salary",
+    "columns[].items[].updated_at"
   ],
   "GET /tracker/{}": [
     "closed_reason",
@@ -175,6 +183,13 @@
     "notes",
     "salary",
     "updated_at"
+  ],
+  "POST /tracker/{}/followed-up": [
+    "closed_reason",
+    "interview_on",
+    "link",
+    "notes",
+    "salary"
   ],
   "POST /weekly/contract/approve": [
     "contract.proposed_at"
