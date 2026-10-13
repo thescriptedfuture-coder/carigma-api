@@ -26,9 +26,17 @@ class FakeTable:
         self._filters: dict[str, Any] = {}
         self._op: str | None = None
         self._payload: dict[str, Any] | None = None
+        self._columns: list[str] | None = None
 
-    def select(self, *_a: Any, **_k: Any) -> FakeTable:
+    def select(self, *columns: Any, **_k: Any) -> FakeTable:
         self._op = "select"
+        # Honour the projection. The first version returned whole rows, so the
+        # timeline came back with `id`, `user_id` and `application_id` that the
+        # real query never selects — and the recorded contract said the API
+        # sends them. A fake more generous than production is how a surface
+        # comes to read a field that is not there.
+        wanted = ",".join(str(c) for c in columns if c)
+        self._columns = None if not wanted or wanted == "*" else wanted.split(",")
         return self
 
     def insert(self, payload: dict[str, Any]) -> FakeTable:
@@ -80,7 +88,10 @@ class FakeTable:
             for key, _row in self._hits():
                 table.pop(key, None)
             return type("Res", (), {"data": []})()
-        return type("Res", (), {"data": [dict(r) for _k, r in self._hits()]})()
+        rows = [dict(r) for _k, r in self._hits()]
+        if self._columns is not None:
+            rows = [{c: row.get(c) for c in self._columns} for row in rows]
+        return type("Res", (), {"data": rows})()
 
 
 class FakeDB:
@@ -405,3 +416,42 @@ def test_a_failed_event_write_never_fails_the_move_that_worked(wired: Any) -> No
 
     assert res.status_code == 200
     assert res.json()["stage"] == "offer"
+
+
+def test_a_populated_timeline_reads_back_in_full(wired: Any) -> None:
+    """Also RECORDS the populated shape.
+
+    `contract_nullable.json` can only describe a state some test produced, and
+    the two tests above produce `[]` and `null` — so the event fields the web
+    renders would have been in no manifest at all, which is how a surface comes
+    to declare a field the API never sends.
+    """
+    client, db = wired
+    db.seed("job_applications", application(id="a", status="interview"))
+    db.seed(
+        "application_events",
+        {
+            "id": "e1",
+            "user_id": USER_ID,
+            "application_id": "a",
+            "event_type": "stage_interview",
+            "note": "Interview",
+            "created_at": (NOW - timedelta(days=1)).isoformat(),
+        },
+    )
+    db.seed(
+        "application_events",
+        {
+            "id": "e2",
+            "user_id": USER_ID,
+            "application_id": "a",
+            "event_type": "note",
+            "note": "Heard back",
+            "created_at": NOW.isoformat(),
+        },
+    )
+
+    body = client.get("/tracker/a", headers=token()).json()
+
+    assert {e["event_type"] for e in body["events"]} == {"stage_interview", "note"}
+    assert all({"event_type", "note", "created_at"} <= set(e) for e in body["events"])

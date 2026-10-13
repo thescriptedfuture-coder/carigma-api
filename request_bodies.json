@@ -30,7 +30,12 @@
   {
     "method": "POST",
     "path": "/onboarding/complete",
-    "keys": "unreadable",
+    "keys": [
+      "target_roles",
+      "cadence",
+      "platforms",
+      "location"
+    ],
     "where": "src/routes/decode/TargetsStep.tsx"
   },
   {
@@ -46,6 +51,16 @@
       "email"
     ],
     "where": "src/routes/ForgotPasswordPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/tracker",
+    "keys": [
+      "company",
+      "role",
+      "link"
+    ],
+    "where": "src/routes/JobHubPage.tsx"
   },
   {
     "method": "POST",
@@ -72,7 +87,10 @@
   {
     "method": "POST",
     "path": "/weekly/contract/approve",
-    "keys": "unreadable",
+    "keys": [
+      "week_start",
+      "accept"
+    ],
     "where": "src/routes/ProgressPage.tsx"
   },
   {
@@ -119,5 +137,14 @@
     "path": "/score/compute",
     "keys": [],
     "where": "src/routes/SignalPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/tracker",
+    "keys": [
+      "company",
+      "role"
+    ],
+    "where": "src/routes/TrackerPage.tsx"
   }
 ]

@@ -54,7 +54,11 @@ SNAPSHOT = ROOT / "scripts" / "snapshot_request_bodies.py"
 #: Calls whose body this scanner cannot read statically — a variable, a spread,
 #: a call. They are RECORDED rather than skipped, so they appear as something no
 #: guard covers instead of vanishing. A number that may only fall.
-UNREADABLE_BODIES = 5
+UNREADABLE_BODIES = 3
+# 5 -> 3, and three calls the guard had never seen became visible with them:
+# `/weekly/contract/approve`, `/onboarding/complete` and `/tracker`. The scanner
+# was choking on the TRAILING COMMA Prettier writes on every multi-line literal,
+# so this number was counting the scanner's own defect as the codebase's.
 
 
 def _recorded() -> list[dict[str, Any]]:
