@@ -297,6 +297,41 @@ def move_application(
     return present(_one(db, user.id, app_id), now=datetime.now(UTC))
 
 
+@router.post("/tracker/{app_id}/followed-up", status_code=status.HTTP_201_CREATED)
+def mark_followed_up(
+    app_id: str,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """ "Follow up?" was a chip that said something and did nothing.
+
+    A nudge with no action beside it is a reminder the product repeats at you
+    forever — the clock only moves when a stage does, so an application you DID
+    chase goes on asking to be chased.
+
+    This records the chase: an event on the timeline, and `updated_at` touched,
+    which is what `days_in_stage` is measured from. The nudge clears because
+    the thing it was nudging about happened.
+    """
+    db = _db(request, settings)
+    _one(db, user.id, app_id)
+    now = datetime.now(UTC).isoformat()
+    try:
+        db.table(TABLE).update({"updated_at": now}).eq("user_id", user.id).eq(
+            "id", app_id
+        ).execute()
+    except Exception as exc:
+        logger.exception("could not mark %s followed up", app_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "write_failed", "message": "We couldn't save that just now."},
+        ) from exc
+
+    _log(db, user.id, app_id, {"event_type": "note", "note": "Followed up"})
+    return present(_one(db, user.id, app_id), now=datetime.now(UTC))
+
+
 @router.post("/tracker/{app_id}/note", status_code=status.HTTP_201_CREATED)
 def add_note(
     app_id: str,

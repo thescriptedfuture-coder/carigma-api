@@ -90,9 +90,36 @@ NORMALISED: dict[str, Any] = {
         "cv": {
             "name": "Ravi Kumar",
             "email": "ravi@example.com",
+            "phone": "+91 XXXXX XXXXX",
+            "location": "Delhi, India",
+            "tagline": "Data Analyst | Power BI & SQL",
+            "summary": "Delhi-based analyst turning operational data into decisions.",
             "coreSkills": ["SQL", "Power BI"],
-            "experience": ["Zomato — Data Analyst"],
-            "education": ["B.Tech, DTU"],
+            # OBJECTS, measured across all nine stored kits. This fixture had
+            # strings, so the recorded contract described a CV nobody stores —
+            # and the web's page, typed from that contract, rendered an object
+            # as a React child and blanked `/jobs/{}/cv` for every job that
+            # HAS a kit. The nine rows that work were the nine that crashed.
+            "experience": [
+                {
+                    "title": "Data Analyst",
+                    "company": "Zomato",
+                    "location": "Gurugram",
+                    "duration": "2021 — now",
+                    "bullets": ["Built the cost dashboard that changed a budget line."],
+                    "keyImpact": "Cut reporting time 40%.",
+                }
+            ],
+            # `grade` is "" on every live row — a real empty string, not a
+            # missing key, and the surface has to render around it.
+            "education": [
+                {
+                    "degree": "B.Tech, Computer Science",
+                    "institution": "Delhi Technological University",
+                    "year": "2014 — 2018",
+                    "grade": "",
+                }
+            ],
             "certifications": [],
             "keyAchievements": ["Cut reporting time 40%"],
         },
