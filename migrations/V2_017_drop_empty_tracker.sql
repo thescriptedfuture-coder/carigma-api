@@ -47,16 +47,36 @@
 -- Idempotent. Safe to run twice.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-do $$
-begin
-  -- Refuse rather than destroy. A row here means something started writing
-  -- after this migration was written, and that is a conversation, not a drop.
-  if exists (select 1 from information_schema.tables
-             where table_schema = 'public' and table_name = 'tracker')
-     and (select count(*) from public.tracker) > 0 then
-    raise exception
-      'tracker is not empty — something writes to it now. Do not drop it.';
-  end if;
-end $$;
+-- ## Why no `DO $$ … $$` block
+--
+-- The first version wrapped the check in PL/pgSQL. The Supabase SQL editor
+-- answered `42601: syntax error at or near "if"` — it does not carry the
+-- dollar-quoted body through to the server intact, so the `begin … end` was
+-- parsed as plain SQL. The file was valid PostgreSQL and still unrunnable in
+-- the one place it has to run.
+--
+-- Plain statements instead. Step 1 REFUSES by failing: casting the message to
+-- `int` raises, and the message is the error text, so the reason arrives with
+-- the failure rather than in a comment nobody reads.
 
+-- ── 1 · Refuse if anything has started writing to it ───────────────────────
+-- Expect: one row, `safe_to_drop = 0`.
+-- If it raises `invalid input syntax for type integer: "tracker is not
+-- empty …"`, STOP. Something writes to this table now, and that is a
+-- conversation rather than a drop.
+--
+-- The passing branch is `'0'` rather than `'ok'` because BOTH branches are
+-- cast, and `'ok'::int` raises exactly like the refusal does — which would
+-- have made the safe path fail and the failure mean nothing.
+select (
+  case
+    when (select count(*) from public.tracker) = 0 then '0'
+    else 'tracker is not empty - something writes to it now - do not drop it'
+  end
+)::int as safe_to_drop;
+
+-- ── 2 · The drop ──────────────────────────────────────────────────────────
+-- `if exists` so re-running is a no-op. NO `cascade`: if anything has grown a
+-- dependency since, this must FAIL and be looked at rather than quietly take
+-- the dependant with it.
 drop table if exists public.tracker;
