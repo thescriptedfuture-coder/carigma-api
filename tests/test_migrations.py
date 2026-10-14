@@ -97,6 +97,30 @@ def test_migrations_directory_exists() -> None:
 #: not taken on trust — an opt-out nobody checks is a comment.
 V2_OWNED_CONSTRAINT = "carigma:v2-owned-constraint:"
 
+#: The same claim about a TABLE. A table V2 created is not V1's to protect, and
+#: one V2 created and never wrote to is worse than clutter: `tracker` had
+#: plausible columns, zero rows for its entire life, and `services/today.py`
+#: read it from the day the ladder was built. The read SUCCEEDED and returned
+#: nothing, so Today's interview rung could never fire and the pipeline stat
+#: told the one user with thirteen applications that he had none.
+#:
+#: Verified below against earlier migrations' `create table`, exactly like the
+#: constraint marker. "V2 owns it" stays a claim that has to be checked.
+V2_OWNED_TABLE = "carigma:v2-owned-table:"
+
+
+def _v2_created_tables(before: Path) -> set[str]:
+    """Tables an EARLIER V2 migration creates. The proof behind the marker."""
+    names: set[str] = set()
+    for path in _sql_files():
+        if path.name >= before.name:
+            continue
+        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
+        names.update(
+            re.findall(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?([a-z0-9_]+)", sql)
+        )
+    return names
+
 
 def _v2_created_constraints(before: Path) -> set[str]:
     """Constraint names an EARLIER V2 migration adds.
@@ -142,6 +166,27 @@ def test_migration_contains_no_destructive_statements(path: Path) -> None:
         for name in claimed:
             cleaned = re.sub(
                 rf"drop\s+constraint\s+(if\s+exists\s+)?{re.escape(name)}\s*;", " ", cleaned
+            )
+
+    # A table V2 created, verified the same way: the name has to appear in an
+    # earlier migration's `create table`, or the claim fails.
+    claimed_tables = {
+        name.strip().lower()
+        for name in re.findall(rf"{re.escape(V2_OWNED_TABLE)}\s*([a-z0-9_]+)", raw, re.I)
+    }
+    if claimed_tables:
+        actually_v2 = _v2_created_tables(path)
+        unverified = sorted(claimed_tables - actually_v2)
+        assert not unverified, (
+            f"{path.name} claims V2 owns the table {', '.join(unverified)}, but no "
+            f"earlier migration creates it. Either the name is wrong or the table "
+            f"is V1's — in which case it must not be dropped."
+        )
+        for name in claimed_tables:
+            cleaned = re.sub(
+                rf"drop\s+table\s+(if\s+exists\s+)?(public\.)?{re.escape(name)}\s*;",
+                " ",
+                cleaned,
             )
 
     for pattern, label in FORBIDDEN:

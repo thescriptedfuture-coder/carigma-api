@@ -240,16 +240,19 @@ def test_a_date_only_interview_does_not_crash_the_comparison() -> None:
 
     rows = [
         {
+            "id": "a1",
             "status": "interview",
             "company": "Zomato",
             "role": "Data Analyst",
             "interview_on": (NOW + timedelta(days=2)).date().isoformat(),
         }
     ]
-    when, label = next_interview(rows, now=NOW)
+    when, label, app_id = next_interview(rows, now=NOW)
     assert when is not None
     assert when.tzinfo is not None
     assert label == "Zomato, Data Analyst"
+    # The card opens THAT application, not the board.
+    assert app_id == "a1"
 
 
 def test_a_finished_application_is_not_an_upcoming_interview() -> None:
@@ -265,7 +268,7 @@ def test_a_finished_application_is_not_an_upcoming_interview() -> None:
             "closed_reason": "Ghosted",
         }
     ]
-    assert next_interview(rows, now=NOW) == (None, "")
+    assert next_interview(rows, now=NOW) == (None, "", None)
 
 
 def test_rejected_normalises_to_closed() -> None:

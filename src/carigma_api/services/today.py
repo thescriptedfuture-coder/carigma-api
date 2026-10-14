@@ -228,7 +228,7 @@ def load_signals(
     moment = now or datetime.now(UTC)
     read = sources or read_sources(client, user_id, now=moment)
 
-    when, label = next_interview(read.tracker or [], now=moment)
+    when, label, app_id = next_interview(read.tracker or [], now=moment)
     fresh, open_count = count_matches(
         read.jobs or [], last_seen=_parse(profile.get("lastSeenJobsAt"))
     )
@@ -237,6 +237,7 @@ def load_signals(
         now=moment,
         next_interview_at=when,
         interview_label=label,
+        interview_id=app_id,
         post_due_today=post_due_today(read.plan, today=moment.date()),
         pending_fix=pending_fix,
         new_match_count=fresh,

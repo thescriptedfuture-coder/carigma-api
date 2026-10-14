@@ -220,14 +220,16 @@ def event_for(stage: str, *, reason: str | None = None) -> dict[str, str]:
     return {"event_type": f"stage_{stage}", "note": STAGE_LABELS[stage]}
 
 
-def next_interview(rows: list[dict[str, Any]], *, now: datetime) -> tuple[datetime | None, str]:
+def next_interview(
+    rows: list[dict[str, Any]], *, now: datetime
+) -> tuple[datetime | None, str, str | None]:
     """The soonest interview still ahead, and what to call it.
 
     Finished applications are excluded even when they carry a date — one live
     row is `closed` with an `interview_on` in July. An interview you already
     had, or for a role that is gone, is not something to prepare for.
     """
-    upcoming: list[tuple[datetime, str]] = []
+    upcoming: list[tuple[datetime, str, str | None]] = []
     for row in rows:
         if normalise_stage(row.get("status")) not in OPEN_STAGES:
             continue
@@ -235,12 +237,12 @@ def next_interview(rows: list[dict[str, Any]], *, now: datetime) -> tuple[dateti
         if when is None or when < now:
             continue
         label = ", ".join(p for p in (row.get("company"), row.get("role")) if p)
-        upcoming.append((when, label))
+        app_id = row.get("id")
+        upcoming.append((when, label, str(app_id) if app_id else None))
 
     if not upcoming:
-        return None, ""
-    soonest = min(upcoming, key=lambda pair: pair[0])
-    return soonest[0], soonest[1]
+        return None, "", None
+    return min(upcoming, key=lambda found: found[0])
 
 
 def valid_interview_date(value: Any) -> date | None:

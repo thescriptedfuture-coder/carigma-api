@@ -390,6 +390,7 @@ def test_the_signals_type_carries_no_extra_state() -> None:
     assert fields == {
         "now",
         "next_interview_at",
+        "interview_id",
         "interview_label",
         "post_due_today",
         "pending_fix",
@@ -561,3 +562,34 @@ def test_a_broken_feed_and_a_broken_plan_report_nothing_rather_than_empty(wired)
 
     assert body["signal"]["matches"] is None
     assert body["week"] is None
+
+
+def test_the_interview_card_names_the_role_and_opens_that_application(wired) -> None:  # type: ignore[no-untyped-def]
+    """It said "Prep while there is still time to use it" behind a button
+    labelled "Open prep", and Interview Intelligence is not built.
+
+    The most time-bound card the product has was promising the one thing it
+    cannot do, and pointing at the board rather than the application.
+    """
+    client, db, profiles = wired
+    uid = "11111111-1111-1111-1111-111111111111"
+    profiles.profile = {"name": "Ravi"}
+    db.seed(
+        "job_applications",
+        (1,),
+        {
+            "user_id": uid,
+            "id": "app-7",
+            "status": "interview",
+            "company": "CRED",
+            "role": "Data Analyst",
+            "interview_on": (NOW + timedelta(days=2)).date().isoformat(),
+        },
+    )
+
+    card = client.get("/today", headers=token()).json()["primary_action"]
+
+    assert card["key"] == "interview_soon"
+    assert "CRED" in card["body"]
+    assert "prep" not in card["body"].lower()
+    assert card["primary"] == {"label": "Open the application", "route": "/tracker/app-7"}
