@@ -62,6 +62,9 @@ class Signals:
     #: "we could not check", which the route must handle before it gets here.
     next_interview_at: datetime | None = None
     interview_label: str = ""
+    #: Which application it is, so the card can open THAT one rather than the
+    #: board. `None` when the row carries no id, which no live row does.
+    interview_id: str | None = None
     #: A slot due today that is neither published nor skipped.
     post_due_today: str | None = None
     #: A fix the user has been offered and not applied.
@@ -106,8 +109,16 @@ def _interview(s: Signals) -> dict[str, Any]:
     hours = int((when - s.now).total_seconds() // 3600)
     return {
         "title": f"Interview {'today' if hours < 24 else 'in ' + str(hours // 24 + 1) + ' days'}",
-        "body": f"{s.interview_label}. Prep while there is still time to use it.".strip(". "),
-        "primary": {"label": "Open prep", "route": "/tracker"},
+        # Said "Prep while there is still time to use it" behind a button
+        # labelled "Open prep", and Interview Intelligence is not built — so the
+        # most time-bound card the product has promised the one thing it cannot
+        # do. It names the role and the date instead, which it knows.
+        "body": f"{s.interview_label}, {when:%a %d %b}.".strip(", "),
+        "primary": {
+            "label": "Open the application",
+            # The application itself when we know which, the board otherwise.
+            "route": f"/tracker/{s.interview_id}" if s.interview_id else "/tracker",
+        },
         "when": when.isoformat(),
     }
 
