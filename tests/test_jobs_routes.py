@@ -494,3 +494,58 @@ def test_no_jobs_endpoint_charges_credits() -> None:
         if forbidden == "execute":
             continue  # PostgREST's `.execute()`, not the run protocol's
         assert forbidden not in referenced, f"{forbidden!r} appears on the free jobs path"
+
+
+# ── The CV as a file ───────────────────────────────────────────────────────
+
+
+def test_the_cv_downloads_as_a_pdf_named_after_the_person(wired) -> None:  # type: ignore[no-untyped-def]
+    """V2 could preview a CV and not produce one. `Download PDF` was removed
+    when it turned out to have no handler, so the artifact most likely to be
+    sent to an employer could be read on screen and nowhere else."""
+    client, _db = wired
+
+    res = client.get("/jobs/2/cv.pdf", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/pdf"
+    assert res.content.startswith(b"%PDF-")
+    # The name reaches a downloads folder, so it carries the person.
+    assert 'filename="Ravi-Kumar-Modern-CV.pdf"' in res.headers["content-disposition"]
+
+
+def test_a_template_choice_is_honoured_and_reported_back(wired) -> None:  # type: ignore[no-untyped-def]
+    client, _db = wired
+
+    res = client.get("/jobs/2/cv.pdf?template=executive", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert res.headers["x-carigma-template"] == "executive"
+    assert "Executive" in res.headers["content-disposition"]
+
+
+def test_an_unknown_template_returns_the_default_rather_than_an_error(wired) -> None:  # type: ignore[no-untyped-def]
+    """A stale link should hand someone a CV, not an error about a layout they
+    never chose."""
+    client, _db = wired
+
+    res = client.get("/jobs/2/cv.pdf?template=sideways", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert res.headers["x-carigma-template"] == "modern"
+
+
+def test_a_job_with_no_kit_is_a_404_not_an_empty_document(wired) -> None:  # type: ignore[no-untyped-def]
+    """Eighty-four of ninety-three rows have no kit. A PDF rendered from
+    nothing is a page with a name on it and no career, and it would arrive
+    looking like a product that works."""
+    client, _db = wired
+
+    res = client.get("/jobs/1/cv.pdf", headers=auth(make_token()))
+
+    assert res.status_code == 404
+    assert res.json()["detail"]["error"] == "no_kit"
+
+
+def test_the_download_needs_a_verified_token(client: TestClient) -> None:
+    assert client.get("/jobs/2/cv.pdf").status_code == 401

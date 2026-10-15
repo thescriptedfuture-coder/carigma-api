@@ -45,6 +45,8 @@ ROOT = Path(__file__).resolve().parents[1]
 #: silence a missing dependency.
 ALIASES = {
     "docx": "python-docx",
+    # The six CV layouts import `fpdf`; the wheel is `fpdf2`.
+    "fpdf": "fpdf2",
     "jwt": "pyjwt",
     "pydantic_settings": "pydantic-settings",
 }

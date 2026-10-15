@@ -18,11 +18,12 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.services import cv_pdf
 from carigma_api.services.jobs.feed import DEFAULT_STATUSES, present_feed, present_job
 from carigma_api.services.repository import _as_rows, user_client
 
@@ -139,6 +140,50 @@ def get_apply_kit(
         # surface cannot render the kit without it.
         "disclaimer": "Review and adjust before sending — Carigma drafts, you verify.",
     }
+
+
+@router.get("/jobs/{job_id}/cv.pdf")
+def download_cv(
+    job_id: int,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+    template: str | None = None,
+) -> Response:
+    """The tailored CV as a file. Free.
+
+    V2 could preview a CV and not produce one — `Download PDF` was removed when
+    it turned out to have no handler, so the artifact most likely to be sent to
+    an employer could be read on screen and nowhere else.
+
+    Free because the kit already cost 15 credits, and this calls no model and
+    reaches no provider. V1 priced it identically.
+    """
+    row = _one(_db(request, settings), user.id, job_id)
+    kit = row.get("apply_kit")
+    cv = kit.get("cv") if isinstance(kit, dict) else None
+    if not isinstance(cv, dict) or not cv:
+        # A PDF rendered from nothing is a page with a name on it and no
+        # career, and it would arrive looking like a product that works.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "no_kit",
+                "message": "No apply kit has been built for this job yet.",
+            },
+        )
+
+    pdf, chosen, filename = cv_pdf.render(cv, template)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # Which layout actually came back, since an unknown key falls back
+            # to the default rather than failing.
+            "X-Carigma-Template": chosen,
+        },
+    )
 
 
 @router.post("/jobs/{job_id}/not-for-me")

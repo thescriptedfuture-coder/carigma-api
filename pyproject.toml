@@ -65,6 +65,11 @@ dependencies = [
     # which would change what the analyst sees for the same file.
     "pdfplumber>=0.11,<0.13",
     "python-docx>=1.1,<2",
+    # The CV templates, ported from V1 rather than redrawn. Same library and
+    # the same major version V1 pins, because the six layouts are measured in
+    # millimetres against fpdf2's text metrics — a different engine lays them
+    # out subtly differently and the port stops being a port.
+    "fpdf2>=2.7.8,<3",
 ]
 
 [project.optional-dependencies]
@@ -132,6 +137,20 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["pdfplumber.*", "docx.*"]
 ignore_missing_imports = true
+
+# `fpdf2` ships a `py.typed` but its drawing surface is loosely typed, and the
+# six CV layouts are a PORT of V1's `resumeiq/cv.py` — 900 lines of millimetre
+# arithmetic carried over so the documents a user sends to an employer stay
+# identical. Annotating every method would rewrite the thing we are trying not
+# to rewrite, and the diff against V1 would stop being readable.
+#
+# Scoped to the vendored module ONLY. Its boundary — `generate_cv_pdf`, which
+# is the whole surface the rest of the API touches — is typed, and
+# `tests/test_cv_pdf.py` renders every template from a real stored kit, which
+# is a stronger statement about this code than its annotations would be.
+[[tool.mypy.overrides]]
+module = ["carigma_api.services.cv_templates"]
+ignore_errors = true
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
