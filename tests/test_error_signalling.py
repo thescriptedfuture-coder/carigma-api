@@ -69,6 +69,10 @@ ACCEPTED: dict[tuple[str, str], str] = {
     ("thread_store.py", "is_suppressed"): "errs toward showing the user their own item back",
     ("runs.py", "stream"): "ends the stream; there is no other terminal value",
     ("unsubscribe.py", "resolve"): "a corrupt token and an invalid token are both 'bad link'",
+    # No row, a stale row and a failed read all mean the same to the caller:
+    # there is nothing here, go and fetch. The distinction that matters lives
+    # in `fetches_today`, where "cannot count" must NOT read as zero.
+    ("quota.py", "cached"): "no row, stale row and unreadable row are one answer: go fetch",
     # ── DECIDE. Listed so they are visible, not because they are settled.
     # `read_balance` was here, marked DECIDE, and is now FIXED rather than
     # accepted: it raises `CreditsUnavailable` on a read it could not complete,
