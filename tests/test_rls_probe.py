@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -55,25 +56,25 @@ SERVICE_ONLY: dict[str, str] = {
     "market_digests": "curated centrally in routes/market.py; users only read published rows",
 }
 
-#: Tables that belong to NOBODY, deliberately.
+#: Tables that belong to NOBODY, deliberately. Empty, and the reason is worth
+#: keeping.
 #:
-#: `jobs_cache` holds public job postings keyed by role and city. It is shared
-#: ON PURPOSE: one person's search warms it for everyone, and that sharing is
-#: the entire reason the JSearch daily cap can hold — a per-user cache would
-#: multiply the quota draw by the number of users and the cap would protect
-#: nothing.
+#: Its one entry was `jobs_cache`, filed here in S5 as "not owner-scoped and
+#: not service-only, because the write happens inside a user action". The
+#: proof below checked that the table had no `user_id` — true — and nothing
+#: checked that a user could reach it at all. V2_007 had made it service-role
+#: only. Every read through the user's client returned zero rows, every write
+#: was refused, and the JSearch cap read 0 through three real scans.
 #:
-#: So neither existing category fits. It is not owner-scoped (there is nobody
-#: to scope it to) and it is not service-only (the write happens inside a user
-#: action, and this project keeps the service key out of user paths).
+#: A category is a claim about the DATABASE. This one was believed rather than
+#: measured; `test_no_user_path_names_a_service_only_table` now reads what the
+#: migrations actually decided.
 #:
 #: **The claim is proved below, not asserted**: a table listed here must have
 #: no `user_id` column. The moment one appears, it has an owner and belongs in
 #: `WRITES_AS_USER` with a cross-user probe — the same rule as every other
 #: exemption in this repository.
-SHARED_NON_PERSONAL: dict[str, str] = {
-    "jobs_cache": "public postings keyed by role+city; shared so the daily cap can hold",
-}
+SHARED_NON_PERSONAL: dict[str, str] = {}
 
 
 def _module_constants(tree: ast.Module) -> dict[str, str]:
@@ -224,3 +225,141 @@ def test_upsert_conflict_targets_name_real_columns() -> None:
         if cols - columns_of(table):
             problems.append(f"{table}: {sorted(cols - columns_of(table))}")
     assert problems == [], problems
+
+
+# ── Reads, too: a table the user cannot see answers with NOTHING ───────────
+#
+# Everything above is about writes. The cap bug was a READ: `select … from
+# jobs_cache` through the user's client returned `[]` with no error, so "how
+# many calls today" was answered 0 by a table the caller was not allowed to
+# look in. RLS does not fail a read; it filters it to nothing. A count built on
+# a read the database will not let you make is a count of zero, forever.
+
+MIGRATIONS = ROOT / "migrations"
+
+#: Marker a migration uses to declare "RLS on, no policy, service role only".
+SERVICE_ONLY_MARKER = "carigma:rls-service-role-only"
+
+#: Modules that name a service-only table, and why the client they use there is
+#: the service role. A module NOT listed here may not name one at all.
+SERVICE_ROLE_MODULES: dict[str, str] = {
+    "routes/admin.py": "`_db` is `service_client`; admin reads across users by definition",
+    "routes/market.py": "each handler builds `service_client(settings)` behind the admin check",
+    "services/instances.py": "the startup heartbeat; main.py passes it the service client",
+    "services/referral_store.py": (
+        "`referral_for` and `activate` run only from the service-role upload path; "
+        "users reach `referrals` through SECURITY DEFINER functions, never a table read"
+    ),
+}
+
+
+def _service_only_tables() -> set[str]:
+    """What the MIGRATIONS make service-role only, read from the files.
+
+    Two forms: V2_007's `service_only text[] := array[...]`, and any table a
+    migration creates while declaring the marker and giving it no policy.
+    Derived rather than listed, because the list that failed was a belief
+    written in this file that the database disagreed with.
+    """
+    found: set[str] = set()
+    for path in sorted(MIGRATIONS.glob("V2_*.sql")):
+        raw = path.read_text(encoding="utf-8")
+        block = re.search(r"service_only\s+text\[\]\s*:=\s*array\[([^\]]*)\]", raw, re.I)
+        if block:
+            found |= set(re.findall(r"'([a-z0-9_]+)'", block.group(1)))
+        if SERVICE_ONLY_MARKER not in raw:
+            continue
+        sql = "\n".join(line for line in raw.splitlines() if not line.strip().startswith("--"))
+        for table in re.findall(
+            r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?(\w+)", sql, re.I
+        ):
+            has_policy = re.search(
+                rf"create\s+policy[^;]*\son\s+(?:public\.)?{re.escape(table)}\b", sql, re.I
+            )
+            if not has_policy:
+                found.add(table.lower())
+    return found
+
+
+SERVICE_ONLY_TABLES = _service_only_tables()
+
+
+def _tables_named_by_module() -> dict[str, set[str]]:
+    """Every `.table(X)` in `src/` — read or write — by module, with `X`
+    resolved through literals, module constants and imported constants."""
+    paths = sorted((ROOT / "src").rglob("*.py"))
+    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in paths}
+    by_module = {_module_name(path): _module_constants(tree) for path, tree in trees.items()}
+
+    out: dict[str, set[str]] = {}
+    for path, tree in trees.items():
+        constants = dict(by_module[_module_name(path)])
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module in by_module:
+                for alias in node.names:
+                    value = by_module[node.module].get(alias.name)
+                    if value is not None:
+                        constants[alias.asname or alias.name] = value
+        named: set[str] = set()
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "table"
+                and node.args
+            ):
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                named.add(arg.value)
+            elif isinstance(arg, ast.Name) and arg.id in constants:
+                named.add(constants[arg.id])
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # `quota.CACHE`, `store.TABLE`: a constant reached through an
+                # imported module.
+                for module, values in by_module.items():
+                    if module.endswith("." + arg.value.id) and arg.attr in values:
+                        named.add(values[arg.attr])
+        if named:
+            rel = path.relative_to(ROOT / "src" / "carigma_api").as_posix()
+            out[rel] = named
+    return out
+
+
+NAMED_BY_MODULE = _tables_named_by_module()
+
+
+def test_the_migrations_declare_the_service_only_tables_this_is_about() -> None:
+    """A sweep that found none would pass on anything."""
+    assert {"jobs_cache", "email_log", "digest_log", "api_instances"} <= SERVICE_ONLY_TABLES
+
+
+def test_no_user_path_names_a_service_only_table() -> None:
+    """The cap bug, as a rule.
+
+    `services/jobs/quota.py` named `jobs_cache` and was handed the user's
+    client. Nothing here can see WHICH client a call gets — that is decided at
+    runtime — so the rule is drawn at the module: naming a service-only table
+    is allowed only in a module declared above as service-role, with the
+    reason.
+    """
+    offenders = sorted(
+        f"{module} names {sorted(tables & SERVICE_ONLY_TABLES)}"
+        for module, tables in NAMED_BY_MODULE.items()
+        if tables & SERVICE_ONLY_TABLES and module not in SERVICE_ROLE_MODULES
+    )
+    assert offenders == [], (
+        "these modules reach tables the migrations made service-role only. Through "
+        "a user's client every read returns ZERO ROWS with no error and every write "
+        "is refused: " + "; ".join(offenders)
+    )
+
+
+def test_every_declared_service_role_module_still_names_one() -> None:
+    """A stale exemption is a hole that reads as a decision."""
+    stale = sorted(
+        module
+        for module in SERVICE_ROLE_MODULES
+        if not (NAMED_BY_MODULE.get(module, set()) & SERVICE_ONLY_TABLES)
+    )
+    assert stale == [], f"declared service-role but names no service-only table: {stale}"

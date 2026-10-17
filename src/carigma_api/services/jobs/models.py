@@ -19,6 +19,8 @@ bug they prevent:
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -58,6 +60,10 @@ class NormalizedJob:
     # information, and is shown as absence rather than filled with a guess.
     salary: str | None = None
     posted_at: datetime | None = None
+    #: When the SOURCE says the posting closes. Usually None: most boards do
+    #: not publish one, and absence is not "open forever" — `feed.is_current`
+    #: falls back to when the posting was last seen alive.
+    expires_at: datetime | None = None
     description: str | None = None
 
     # Who is hosting the posting we link to (SimplyHired, Shine, the employer).
@@ -78,34 +84,25 @@ class NormalizedJob:
 
     @property
     def dedupe_key(self) -> str:
-        """Cross-source identity: title + company + location.
+        """Identity across rescans and across providers: V1's key, exactly.
 
-        Two providers listing the same role must collapse to one card. Matching
-        on source id cannot do that — the ids are per-provider by definition.
+        `sha1("company title")[:16]` after folding everything that is not a
+        letter or digit to a space — `resumeiq/jobs_feed.py:dedup_key`.
+
+        ## Why V1's, and not a better one
+
+        V2 shipped its own readable `title|company|location`. Every row V1 had
+        written — 93 of them, with users' dismissals and paid apply kits on
+        them — carried the hash, so no V2 scan could ever recognise one. The
+        first real scan brought back a posting Ravi had dismissed in July, as
+        new, with a fresh "New today". The key is the join between a scan and
+        a decision the user already made; a second spelling of it severs that
+        join silently.
+
+        Location is left out, as V1 leaves it out. JSearch reported one ETS
+        posting as "New Delhi, IN" at 04:41 and "IN" at 04:47, and the
+        location-bearing key filed it twice. One title at one company in two
+        cities is, in practice, one requisition.
         """
-        return "|".join(
-            part.strip().lower()
-            for part in (self.title, self.company, _canonical_location(self.location))
-        )
-
-
-def _canonical_location(location: str) -> str:
-    """Normalise the location enough for dedupe to work across providers.
-
-    Providers disagree cosmetically about the same place ("Bengaluru, KA, India"
-    vs "Bangalore, India"), and a dedupe that misses those shows the user the
-    same job twice.
-    """
-    text = (location or "").strip().lower()
-    for noise in (", india", " india"):
-        if text.endswith(noise):
-            text = text[: -len(noise)]
-    aliases = {
-        "bengaluru": "bangalore",
-        "gurgaon": "gurugram",
-        "bombay": "mumbai",
-        "new delhi": "delhi",
-        "ncr": "delhi",
-    }
-    head = text.split(",")[0].strip()
-    return aliases.get(head, head)
+        base = re.sub(r"[^a-z0-9]+", " ", f"{self.company} {self.title}".lower()).strip()
+        return hashlib.sha1(base.encode(), usedforsecurity=False).hexdigest()[:16]

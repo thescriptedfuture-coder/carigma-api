@@ -35,8 +35,11 @@
   ],
   "GET /jobs/feed": [
     "items[].apply_url",
+    "items[].expires_at",
+    "items[].first_seen",
     "items[].job_type",
     "items[].key_requirements",
+    "items[].last_seen",
     "items[].match_score",
     "items[].matched_skills",
     "items[].missing_skills",
@@ -44,10 +47,23 @@
     "items[].publisher",
     "items[].salary",
     "items[].salary_is_estimated",
-    "items[].source"
+    "items[].source",
+    "older[].apply_url",
+    "older[].expires_at",
+    "older[].job_type",
+    "older[].key_requirements",
+    "older[].matched_skills",
+    "older[].missing_skills",
+    "older[].posted_at",
+    "older[].publisher",
+    "older[].salary",
+    "older[].salary_is_estimated",
+    "older[].source",
+    "scan.last_scan_at"
   ],
   "GET /jobs/{}": [
     "apply_url",
+    "expires_at",
     "job_type",
     "key_requirements",
     "matched_skills",
@@ -141,6 +157,9 @@
     "link",
     "notes",
     "salary"
+  ],
+  "POST /jobs/scan": [
+    "new_jobs[].match_score"
   ],
   "POST /naukri/score": [
     "dimensions[].needs",

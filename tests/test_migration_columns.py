@@ -171,7 +171,10 @@ def code_columns() -> dict[str, set[tuple[str, str, int]]]:
                     arg = inner.args[0]
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                         for col in arg.value.split(","):
-                            col = col.strip()
+                            # PostgREST spells a renamed JSON path
+                            # `alias:column->>key`. The COLUMN is what must
+                            # exist; the alias is ours and the key is inside it.
+                            col = col.strip().split(":", 1)[-1].split("->", 1)[0].strip()
                             if col and col != "*" and "(" not in col:
                                 bucket.add((col, rel, inner.lineno))
     return found

@@ -23,7 +23,10 @@ from fastapi.testclient import TestClient
 from carigma_api.routes import jobs as routes
 from tests.conftest import USER_ID, auth, make_token
 
-NOW = datetime(2026, 8, 15, 9, 0, tzinfo=UTC)
+#: REAL now, not a fixed date. The feed folds postings with no sign of life
+#: for three weeks into `older`, measured from the moment the request is
+#: served — so a fixture dated in August is, correctly, history by October.
+NOW = datetime.now(UTC).replace(microsecond=0)
 YESTERDAY = (NOW - timedelta(days=2)).isoformat()
 TODAY = NOW.isoformat()
 
@@ -194,20 +197,26 @@ class FakeTable:
     def execute(self) -> Any:
         if self._db.fail:
             raise RuntimeError("db down")
-        # Two tables, one fake. The cache rows are kept apart because a scan
-        # reads BOTH and a shared list would count job rows against the quota.
+        # The call log and the run history are kept apart from the feed, so a
+        # scan's bookkeeping is never mistaken for a posting.
         source = (
-            self._db.cache_rows
-            if self._table == "jobs_cache"
+            self._db.ledger
+            if self._table == "jobs_provider_calls"
             else self._db.runs
             if self._table == "agent_runs"
             else self._db.rows
         )
         if self._op == "insert":
             added = self._payload if isinstance(self._payload, list) else [self._payload]
-            source.extend(dict(r) for r in added)
+            # Echoed back WITH an id, as Postgres does — a scan names its new
+            # rows by the id the database gave them.
+            echoed = []
+            for row in added:
+                self._db.next_id += 1
+                echoed.append({"id": self._db.next_id, **row})
+            source.extend(dict(r) for r in echoed)
             self._db.inserted.extend(dict(r) for r in added)
-            return type("Res", (), {"data": [dict(r) for r in added]})()
+            return type("Res", (), {"data": [dict(r) for r in echoed]})()
         hits = [r for r in source if self._matches(r)]
         if self._op == "update":
             for row in hits:
@@ -215,17 +224,37 @@ class FakeTable:
         return type("Res", (), {"data": [dict(r) for r in hits]})()
 
 
+class _Rpc:
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def execute(self) -> Any:
+        return type("Res", (), {"data": self._value})()
+
+
 class FakeDB:
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self.rows = [dict(r) for r in (rows if rows is not None else [V1_ONLY, NORMALISED])]
-        self.cache_rows: list[dict[str, Any]] = []
+        #: What `jsearch_calls_today()` returns. The real function adds V1's
+        #: fetches to V2's call log; here it is just the number.
+        self.calls_today: Any = 0
+        self.ledger: list[dict[str, Any]] = []
         # Previous scans, for the six-hour gate.
         self.runs: list[dict[str, Any]] = []
         self.inserted: list[dict[str, Any]] = []
+        self.next_id = 500
         self.fail = False
 
     def table(self, name: str) -> FakeTable:
+        # Production refuses a user-scoped read of `jobs_cache` by returning
+        # NOTHING, and a fake that answered it is how the cap passed every
+        # test while enforcing nothing. Nothing on the user path may name it.
+        assert name != "jobs_cache", "jobs_cache is service-role only (V2_007)"
         return FakeTable(self, name)
+
+    def rpc(self, name: str, _params: dict[str, Any] | None = None) -> _Rpc:
+        assert name == "jsearch_calls_today", name
+        return _Rpc(self.calls_today)
 
 
 @pytest.fixture
@@ -364,7 +393,7 @@ def test_the_scan_line_says_nothing_when_no_row_carries_a_timestamp() -> None:
     reading a default date would say the second."""
     from carigma_api.services.jobs.feed import scan_summary
 
-    summary = scan_summary([{"title": "x"}], today=NOW.date())
+    summary = scan_summary([{"title": "x"}], now=NOW)
 
     assert summary["last_scan_at"] is None
 
@@ -641,7 +670,7 @@ def scanning(wired, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped
     gateway = FakeGateway()
     # `build_gateway` returns the gateway AND the recorded providers, so the
     # scan can say whether it was answered from the cache.
-    monkeypatch.setattr(routes, "build_gateway", lambda settings, db: (gateway, []))
+    monkeypatch.setattr(routes, "build_gateway", lambda settings, db, user_id: gateway)
     monkeypatch.setattr(routes, "_scorer", lambda settings: lambda *_a, **_k: {"items": []})
     monkeypatch.setattr(routes, "ProfileRepository", lambda client: _FakeProfiles())
     return client, db, gateway
@@ -681,11 +710,7 @@ def test_the_shared_quota_is_checked_before_credits_and_before_the_provider(scan
     provider at all.
     """
     client, db, gateway = scanning
-    # REAL now. This module's `NOW` is a fixed historical date, and the cap
-    # counts fetches since midnight TODAY — so fixture-dated rows fall
-    # outside the window and the count comes back 0.
-    today = datetime.now(UTC).isoformat()
-    db.cache_rows = [{"source": "jsearch", "fetched_at": today} for _ in range(25)]
+    db.calls_today = 25
 
     res = client.post("/jobs/scan", headers=auth(make_token()))
 
@@ -898,3 +923,185 @@ def test_a_failed_scan_does_not_start_the_clock(scanning, monkeypatch) -> None: 
     ]
 
     assert client.post("/jobs/scan", headers=auth(make_token())).status_code == 200
+
+
+# ── New today, and older postings ──────────────────────────────────────────
+
+
+def _posting(id_: int, **kw: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        **NORMALISED,
+        "id": id_,
+        "apply_kit": None,
+        "kit_created_at": None,
+        "details": {"source": "jsearch", "apply_url": f"https://example.com/{id_}"},
+    }
+    row.update(kw)
+    return row
+
+
+def _ago(**delta: float) -> str:
+    return (datetime.now(UTC) - timedelta(**delta)).isoformat()
+
+
+def test_new_today_means_first_seen_in_the_last_24_hours() -> None:
+    """Spec 3.4 and V1. The first V2 version compared UTC calendar dates, so a
+    scan at 04:30 IST (23:00 UTC the day before) was never "new today"."""
+    from carigma_api.services.jobs.feed import present_feed
+
+    now = datetime(2026, 10, 18, 1, 0, tzinfo=UTC)
+    rows = [
+        _posting(1, first_seen="2026-10-17T23:00:00+00:00", last_seen="2026-10-17T23:00:00+00:00"),
+        _posting(2, first_seen="2026-10-16T23:30:00+00:00", last_seen="2026-10-17T23:00:00+00:00"),
+    ]
+    flags = {i["id"]: i["is_new_today"] for i in present_feed(rows, now=now)["items"]}
+
+    assert flags == {1: True, 2: False}
+
+
+def test_postings_with_no_sign_of_life_for_three_weeks_fold_into_older(wired) -> None:  # type: ignore[no-untyped-def]
+    """Ravi's feed held 58 active postings, 45 of them unseen since July and
+    August, and the thirteen live ones were scattered through it."""
+    client, db = wired
+    db.rows = [
+        # The shape most folded rows really have: V1-era, board searches only.
+        _posting(
+            1,
+            first_seen=_ago(days=60),
+            last_seen=_ago(days=60),
+            details={"applyLinks": {"naukri": "https://www.naukri.com/business-analyst-jobs"}},
+        ),
+        _posting(2, first_seen=_ago(days=60), last_seen=_ago(days=1)),
+        _posting(3, first_seen=_ago(hours=2), last_seen=_ago(hours=2)),
+    ]
+
+    body = client.get("/jobs/feed", headers=auth(make_token())).json()
+
+    assert [i["id"] for i in body["older"]] == [1]
+    assert sorted(i["id"] for i in body["items"]) == [2, 3], "seen yesterday is still alive"
+    assert body["older_after_days"] == 21
+    assert body["scan"]["surfaced"] == 2, "the header must agree with the list on screen"
+
+
+def test_a_recent_posting_date_keeps_a_posting_the_scans_have_not_returned(wired) -> None:  # type: ignore[no-untyped-def]
+    client, db = wired
+    db.rows = [
+        _posting(
+            1,
+            first_seen=_ago(days=40),
+            last_seen=_ago(days=40),
+            details={"source": "jsearch", "posted_at": _ago(days=5)},
+        )
+    ]
+
+    body = client.get("/jobs/feed", headers=auth(make_token())).json()
+
+    assert [i["id"] for i in body["items"]] == [1]
+
+
+def test_the_sources_closing_date_decides_when_it_gave_one(wired) -> None:  # type: ignore[no-untyped-def]
+    """Ravi's rule: when we know how long a posting is open, keep it exactly
+    that long — in both directions."""
+    client, db = wired
+    db.rows = [
+        # Not seen for two months, but the source says it is open another month.
+        _posting(
+            1,
+            last_seen=_ago(days=60),
+            first_seen=_ago(days=60),
+            details={"expires_at": (datetime.now(UTC) + timedelta(days=30)).isoformat()},
+        ),
+        # Seen an hour ago, but the source says it closed yesterday.
+        _posting(
+            2,
+            last_seen=_ago(hours=1),
+            first_seen=_ago(hours=1),
+            details={"expires_at": _ago(days=1)},
+        ),
+    ]
+
+    body = client.get("/jobs/feed", headers=auth(make_token())).json()
+
+    assert [i["id"] for i in body["items"]] == [1]
+    assert [i["id"] for i in body["older"]] == [2]
+
+
+def test_saved_postings_and_paid_kits_never_fold(wired) -> None:  # type: ignore[no-untyped-def]
+    client, db = wired
+    db.rows = [
+        _posting(1, status="saved", first_seen=_ago(days=90), last_seen=_ago(days=90)),
+        _posting(
+            2,
+            kit_created_at=_ago(days=80),
+            apply_kit={"cv": {"name": "x"}},
+            first_seen=_ago(days=90),
+            last_seen=_ago(days=90),
+        ),
+    ]
+
+    body = client.get("/jobs/feed", headers=auth(make_token())).json()
+
+    assert sorted(i["id"] for i in body["items"]) == [1, 2]
+    assert body["older"] == []
+
+
+def test_a_posting_with_no_dates_at_all_stays_because_hiding_needs_a_reason(wired) -> None:  # type: ignore[no-untyped-def]
+    client, db = wired
+    db.rows = [_posting(1, first_seen=None, last_seen=None)]
+
+    body = client.get("/jobs/feed", headers=auth(make_token())).json()
+
+    assert [i["id"] for i in body["items"]] == [1]
+
+
+# ── The scan names what is new ─────────────────────────────────────────────
+
+
+def test_a_scan_names_the_new_postings_so_the_surface_can_point_at_them(
+    scanning, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """ "3 new roles — marked New today below" pointed at three rows scored
+    18, 45 and 48, which the score sort had put mid-list. A name is where to
+    look; a count is only that something happened."""
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    client, db, gateway = scanning
+    db.rows = []
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: _FakeCredits())
+    gateway.found = [
+        NormalizedJob(
+            source="jsearch",
+            source_id="1",
+            title="Data Analyst",
+            company="Zomato",
+            location="Gurugram",
+            apply_url="https://example.com/1",
+        )
+    ]
+    monkeypatch.setattr(
+        routes,
+        "_scorer",
+        lambda settings: lambda *_a, **_k: {"items": [{"id": 0, "match_score": 61}]},
+    )
+
+    body = client.post("/jobs/scan", headers=auth(make_token())).json()
+
+    assert body["new_jobs"] == [
+        {"id": db.rows[0]["id"], "title": "Data Analyst", "company": "Zomato", "match_score": 61}
+    ]
+    # And the posting kept its apply link through the scoring write.
+    assert db.rows[0]["details"]["apply_url"] == "https://example.com/1"
+    assert db.rows[0]["match_score"] == 61
+
+
+def test_the_six_hour_wait_is_said_as_a_wait_not_a_utc_clock(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """ "Opens at 10:47 UTC" is a sum an IST reader has to do, and gets wrong."""
+    client, db, _gateway = scanning
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: _FakeCredits())
+    db.runs = [_scan_run(hours_ago=2)]
+
+    message = client.post("/jobs/scan", headers=auth(make_token())).json()["detail"]["message"]
+
+    assert "finished about 2 hours ago" in message
+    assert "opens in about 4 hours" in message
+    assert "UTC" not in message

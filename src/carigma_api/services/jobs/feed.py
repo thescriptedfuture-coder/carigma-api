@@ -39,12 +39,36 @@ says so.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 #: Rows the user dismissed stay dismissed. "Not for me" is a decision, and
 #: re-showing it would make the feedback pointless.
 DEFAULT_STATUSES = ("active", "saved")
+
+#: Spec 3.4 and V1 (`jobs_feed.is_new_today`): "first seen within 24h". The
+#: first V2 version compared UTC calendar dates, which made a 05:00 IST scan
+#: "yesterday" and could not agree with V1 about the same row.
+NEW_FOR = timedelta(hours=24)
+
+#: How long a posting stays in the main list after the last sign it was open.
+#:
+#: ## Why a window, and why this one
+#:
+#: Measured 2026-10-17: Ravi's feed held 58 active postings, 45 of them first
+#: seen in July and August and never seen again. The list was mostly
+#: history, and the thirteen live ones were scattered through it by score.
+#:
+#: The source's own closing date is used when it gives one. Most do not, so
+#: the fallback is the newest evidence the posting was alive — the source's
+#: posting date, or the last scan that returned it. Three weeks without either
+#: is past most boards' active life, and well past the point an application
+#: tends to be read.
+#:
+#: "Older" is a read-time fold, not a deletion and not a cron. The row stays,
+#: so a posting that shows up again is recognised rather than announced as
+#: new, and a dismissal stays a dismissal.
+STALE_AFTER = timedelta(days=21)
 
 
 def _list_or_none(value: Any) -> list[str] | None:
@@ -90,16 +114,73 @@ def _apply_options(details: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _is_new(first_seen: Any, today: date) -> bool:
-    if not isinstance(first_seen, str):
-        return False
+def _when(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
     try:
-        return datetime.fromisoformat(first_seen.replace("Z", "+00:00")).date() == today
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def present_job(row: dict[str, Any], *, today: date) -> dict[str, Any]:
+def _is_new(first_seen: Any, now: datetime) -> bool:
+    seen = _when(first_seen)
+    return seen is not None and timedelta(0) <= now - seen <= NEW_FOR
+
+
+def _detail(row: dict[str, Any], key: str) -> Any:
+    """A `details` key, or the same key at the top level.
+
+    Today reads `posted_at:details->>posted_at` rather than the whole jsonb,
+    which can carry a full job description per row; the Jobs page reads
+    `details`. Both shapes mean the same posting.
+    """
+    if key in row:
+        return row[key]
+    raw = row.get("details")
+    return raw.get(key) if isinstance(raw, dict) else None
+
+
+def is_current(row: dict[str, Any], *, now: datetime) -> bool:
+    """Whether a posting belongs in the main list, or in "older".
+
+    In order, and the first rule that applies decides:
+
+    1. **Saved** stays. The user said so.
+    2. **Has an apply kit** stays. It was paid for, and its owner may be
+       mid-application.
+    3. **The source's closing date**, when it published one, decides both ways
+       — a posting open until December stays even if no scan has seen it.
+    4. Otherwise the **newest evidence it was open** — posted, or returned by a
+       scan — within `STALE_AFTER`.
+    5. **No evidence at all** stays. Hiding needs a reason; "we cannot tell"
+       is not one.
+    """
+    if str(row.get("status") or "") == "saved":
+        return True
+    if row.get("apply_kit") or row.get("kit_created_at"):
+        return True
+
+    closes = _when(_detail(row, "expires_at"))
+    if closes is not None:
+        return closes > now
+
+    evidence = [
+        when
+        for when in (
+            _when(row.get("last_seen")),
+            _when(_detail(row, "posted_at")),
+            _when(row.get("first_seen")),
+        )
+        if when is not None
+    ]
+    if not evidence:
+        return True
+    return now - max(evidence) <= STALE_AFTER
+
+
+def present_job(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     """One stored row, as the client reads it.
 
     Every optional field is passed through as `None` when the row does not
@@ -135,21 +216,28 @@ def present_job(row: dict[str, Any], *, today: date) -> dict[str, Any]:
         "publisher": details.get("publisher"),
         "source": details.get("source"),
         "posted_at": details.get("posted_at"),
+        # The source's closing date. Usually None — most boards publish none.
+        "expires_at": details.get("expires_at"),
         "first_seen": row.get("first_seen"),
-        "is_new_today": _is_new(row.get("first_seen"), today),
+        # The last scan that returned it — what "older" is measured from.
+        "last_seen": row.get("last_seen"),
+        "is_new_today": _is_new(row.get("first_seen"), now),
         "status": row.get("status"),
         "has_apply_kit": bool(row.get("apply_kit")),
     }
 
 
-def scan_summary(rows: list[dict[str, Any]], *, today: date) -> dict[str, Any]:
+def scan_summary(
+    rows: list[dict[str, Any]], *, now: datetime, current: int | None = None
+) -> dict[str, Any]:
     """What the header line can truthfully say about the last scan.
 
     `last_scan_at` is `None` when no row carries a timestamp — which the
-    surface must render as "never scanned", not as an old date.
+    surface must render as "never scanned", not as an old date. `surfaced`
+    counts the main list, so it agrees with what is on screen.
     """
     seen: list[str] = [value for row in rows if isinstance(value := row.get("last_seen"), str)]
-    new_today = sum(1 for row in rows if _is_new(row.get("first_seen"), today))
+    new_today = sum(1 for row in rows if _is_new(row.get("first_seen"), now))
     sources: set[str] = set()
     for row in rows:
         detail = row.get("details")
@@ -158,19 +246,45 @@ def scan_summary(rows: list[dict[str, Any]], *, today: date) -> dict[str, Any]:
     return {
         "last_scan_at": max(seen) if seen else None,
         "new_count": new_today,
-        "surfaced": len(rows),
+        "surfaced": len(rows) if current is None else current,
         "sources": sorted(sources),
     }
 
 
-def present_feed(rows: list[dict[str, Any]], *, now: datetime | None = None) -> dict[str, Any]:
-    today = (now or datetime.now(UTC)).date()
-    items = [present_job(row, today=today) for row in rows]
+def _by_score(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Best match first, and a row with no score sorts last rather than as zero.
-    items.sort(
-        key=lambda item: (item["match_score"] is None, -(item["match_score"] or 0))
+    return sorted(
+        items, key=lambda item: (item["match_score"] is None, -(item["match_score"] or 0))
     )  # falsy-ok: None already sorts last via the first tuple element
-    return {"items": items, "scan": scan_summary(rows, today=today)}
 
 
-__all__ = ["DEFAULT_STATUSES", "present_feed", "present_job", "scan_summary"]
+def present_feed(rows: list[dict[str, Any]], *, now: datetime | None = None) -> dict[str, Any]:
+    """The main list, and the older postings folded beneath it.
+
+    `older` is sent, not dropped: the surface shows how many and lets the user
+    open them. A list that silently loses forty rows is the same failure as one
+    that silently keeps them.
+    """
+    moment = now or datetime.now(UTC)
+    current: list[dict[str, Any]] = []
+    older: list[dict[str, Any]] = []
+    for row in rows:
+        (current if is_current(row, now=moment) else older).append(present_job(row, now=moment))
+    return {
+        "items": _by_score(current),
+        "older": _by_score(older),
+        # The rule's own number, so the surface's sentence cannot drift from it.
+        "older_after_days": STALE_AFTER.days,
+        "scan": scan_summary(rows, now=moment, current=len(current)),
+    }
+
+
+__all__ = [
+    "DEFAULT_STATUSES",
+    "NEW_FOR",
+    "STALE_AFTER",
+    "is_current",
+    "present_feed",
+    "present_job",
+    "scan_summary",
+]

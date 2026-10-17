@@ -84,12 +84,17 @@ def top_match(client: Any, user_id: str, *, now: datetime) -> dict[str, Any] | N
 
     `first_seen` rather than `last_seen`: a job re-confirmed by today's scan is
     not new, and announcing it would make the same posting news twice.
+
+    `status = 'active'`. This filtered on `'new'`, a status no row has ever
+    had — V1 writes `active | dismissed | saved`, and so does V2 — so the
+    trigger could never fire, and nothing said so: an empty result reads
+    exactly like a quiet week.
     """
     res = (
         client.table("jobs_feed")
         .select("id,title,company,match_score,why_match,first_seen")
         .eq("user_id", user_id)
-        .eq("status", "new")
+        .eq("status", "active")
         .order("match_score", desc=True)
         .limit(1)
         .execute()

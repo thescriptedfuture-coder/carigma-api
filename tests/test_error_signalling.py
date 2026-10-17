@@ -65,14 +65,18 @@ ACCEPTED: dict[tuple[str, str], str] = {
     ("applications.py", "_parse"): "unusable timestamp; caller has no other branch",
     ("trigger_facts.py", "_parse"): "unusable timestamp",
     # ── Reasoned, and the reasoning is in the function.
-    ("feed.py", "_is_new"): "an unreadable date must not be allowed to CLAIM novelty",
+    # `_is_new` moved its parse here; an unreadable date still cannot claim
+    # novelty, and now cannot claim the posting is old either — `is_current`
+    # treats "no usable date" as "cannot tell", which keeps it.
+    ("feed.py", "_when"): "unusable timestamp; callers treat it as no evidence",
     ("thread_store.py", "is_suppressed"): "errs toward showing the user their own item back",
     ("runs.py", "stream"): "ends the stream; there is no other terminal value",
     ("unsubscribe.py", "resolve"): "a corrupt token and an invalid token are both 'bad link'",
-    # No row, a stale row and a failed read all mean the same to the caller:
-    # there is nothing here, go and fetch. The distinction that matters lives
-    # in `fetches_today`, where "cannot count" must NOT read as zero.
-    ("quota.py", "cached"): "no row, stale row and unreadable row are one answer: go fetch",
+    # `None` is never a count. A failed call and a reply that is not a plain
+    # integer both mean "cannot count", and both REFUSE the scan — which is
+    # the whole point: 0 is the answer that would have to be told apart, and
+    # neither path can produce it.
+    ("quota.py", "calls_today"): "every None means 'cannot count', and None refuses",
     # Fail-open, deliberately and unlike V1. A failed ranking call and a
     # response that scored nothing both leave every job UNSCORED — which the
     # feed renders as "not analysed" either way. V1 filled the gap with a

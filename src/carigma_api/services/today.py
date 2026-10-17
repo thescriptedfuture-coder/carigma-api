@@ -45,7 +45,7 @@ from carigma_api.services.applications import (
 from carigma_api.services.applications import (
     TABLE as APPLICATIONS,
 )
-from carigma_api.services.jobs.feed import DEFAULT_STATUSES
+from carigma_api.services.jobs.feed import DEFAULT_STATUSES, is_current
 from carigma_api.services.ladder import Signals
 from carigma_api.services.posts import SlotState
 from carigma_api.services.posts_store import SupabasePlanStore
@@ -94,8 +94,16 @@ def post_due_today(plan: Any, *, today: date) -> str | None:
     return None
 
 
+def _open(rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Postings the Jobs page shows in its MAIN list — the same rule, so Today
+    cannot count 58 "open" matches while the Jobs page shows 13."""
+    return [
+        r for r in rows if str(r.get("status") or "") in DEFAULT_STATUSES and is_current(r, now=now)
+    ]
+
+
 def count_matches(
-    rows: list[dict[str, Any]], *, last_seen: datetime | None
+    rows: list[dict[str, Any]], *, last_seen: datetime | None, now: datetime | None = None
 ) -> tuple[int | None, int]:
     """(new since last seen, currently open).
 
@@ -103,7 +111,7 @@ def count_matches(
     "since" from, and both alternatives lie: everything-is-new invents a
     comparison, nothing-is-new hides a full feed.
     """
-    active = [r for r in rows if str(r.get("status") or "") in DEFAULT_STATUSES]
+    active = _open(rows, now or datetime.now(UTC))
     if last_seen is None:
         return None, len(active)
 
@@ -166,7 +174,13 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
         # a reason to open the page.
         res = (
             client.table(JOBS)
-            .select("id,title,company,match_score,status,first_seen")
+            # The dates `is_current` reads, pulled out of `details` by path
+            # rather than selecting the jsonb, which can hold a full job
+            # description per row.
+            .select(
+                "id,title,company,match_score,status,first_seen,last_seen,kit_created_at,"
+                "posted_at:details->>posted_at,expires_at:details->>expires_at"
+            )
             .eq("user_id", user_id)
             .execute()
         )
@@ -230,7 +244,7 @@ def load_signals(
 
     when, label, app_id = next_interview(read.tracker or [], now=moment)
     fresh, open_count = count_matches(
-        read.jobs or [], last_seen=_parse(profile.get("lastSeenJobsAt"))
+        read.jobs or [], last_seen=_parse(profile.get("lastSeenJobsAt")), now=moment
     )
 
     return Signals(
@@ -325,7 +339,9 @@ def week_strip(plan: Any, *, today: date, plan_read: bool = True) -> list[dict[s
 PREVIEW = 2
 
 
-def matches_preview(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def matches_preview(
+    rows: list[dict[str, Any]] | None, *, now: datetime | None = None
+) -> list[dict[str, Any]]:
     """The strongest couple of open matches, named.
 
     Sorted by match score, and a row without one sorts last rather than being
@@ -333,7 +349,7 @@ def matches_preview(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """
     if not rows:
         return []
-    active = [r for r in rows if str(r.get("status") or "") in DEFAULT_STATUSES]
+    active = _open(rows, now or datetime.now(UTC))
     active.sort(
         key=lambda r: r["match_score"] if isinstance(r.get("match_score"), int | float) else -1,
         reverse=True,
@@ -363,7 +379,7 @@ def signal_row(sources: Sources, *, new_matches: int | None, open_matches: int) 
         else {
             "new": new_matches,
             "open": open_matches,
-            "top": matches_preview(sources.jobs),
+            "top": matches_preview(sources.jobs, now=sources.now),
         },
     }
 

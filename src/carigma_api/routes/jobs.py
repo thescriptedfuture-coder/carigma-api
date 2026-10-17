@@ -1,15 +1,14 @@
-"""The jobs feed. Roadmap §9.
+"""The jobs feed and Career Scout. Roadmap §9.
 
-    GET  /jobs/feed                free — reads what has been scanned
+    GET  /jobs/feed                free — the main list, and the older postings
     GET  /jobs/{id}                free
     GET  /jobs/{id}/apply-kit      free — returns the STORED kit, or 404
+    GET  /jobs/{id}/cv.pdf         free — the kit was already paid for
     POST /jobs/{id}/not-for-me     free — records a decision
+    POST /jobs/scan                15 credits, and nothing when it finds nothing
 
-Every route here is free. Nothing on this path calls a provider or an agent, so
-there is no work to charge for: the scan that populates `jobs_feed` is V1's
-today and will be its own action when V2 owns it.
-
-The web has been calling these four against MSW since P4. They did not exist.
+`scan` is the only priced endpoint here, and
+`test_only_the_scan_charges_anything` holds every other one to free.
 """
 
 from __future__ import annotations
@@ -128,7 +127,7 @@ def get_job(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, Any]:
     row = _one(_db(request, settings), user.id, job_id)
-    return present_job(row, today=datetime.now(UTC).date())
+    return present_job(row, now=datetime.now(UTC))
 
 
 @router.get("/jobs/{job_id}/apply-kit")
@@ -163,31 +162,29 @@ def get_apply_kit(
     }
 
 
-def build_gateway(settings: Settings, db: Any) -> tuple[JobsGateway, list[quota.RecordedProvider]]:
+def build_gateway(settings: Settings, db: Any, user_id: str) -> JobsGateway:
     """The providers, in fallback order, each one counted at the call.
 
     JSearch first because its coverage of Indian postings is better; Adzuna is
     the top-up when JSearch returns thin. Both are wrapped in
-    `RecordedProvider`, so no path reaches the network without leaving the row
-    the daily cap counts — the first version recorded nothing, and the cap read
-    zero through two real scans.
-
-    The wrappers are returned too, so the scan can say whether its answer came
-    from a search made just now or from one made earlier.
+    `RecordedProvider`, so no path reaches the network without first leaving
+    the row the daily cap counts — and if that row cannot be written, the call
+    is not made.
     """
-    recorded = [
-        quota.RecordedProvider(
-            JSearchProvider(api_key=settings.jsearch_api_key, host=settings.jsearch_host),
-            db,
-            ttl_hours=settings.jobs_cache_ttl_hours,
-        ),
-        quota.RecordedProvider(
-            AdzunaProvider(app_id=settings.adzuna_app_id, app_key=settings.adzuna_app_key),
-            db,
-            ttl_hours=settings.jobs_cache_ttl_hours,
-        ),
-    ]
-    return JobsGateway(list(recorded)), recorded
+    return JobsGateway(
+        [
+            quota.RecordedProvider(
+                JSearchProvider(api_key=settings.jsearch_api_key, host=settings.jsearch_host),
+                db,
+                user_id=user_id,
+            ),
+            quota.RecordedProvider(
+                AdzunaProvider(app_id=settings.adzuna_app_id, app_key=settings.adzuna_app_key),
+                db,
+                user_id=user_id,
+            ),
+        ]
+    )
 
 
 #: Spec 3.4: "Rescan now (rate-limit 1/6h; disabled tooltip `Next scan at
@@ -226,6 +223,19 @@ def last_scan_at(db: Any, user_id: str) -> datetime | None:
     return max(stamps) if stamps else None
 
 
+def _span(delta: timedelta) -> str:
+    """A duration as a person says it. Relative, because a clock time needs a
+    timezone and the server does not know the reader's: "opens at 10:47 UTC"
+    is a sum an IST user has to do in their head, and gets wrong by 5:30."""
+    minutes = max(1, round(delta.total_seconds() / 60))
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes / 60
+    if hours < 1.5:
+        return "about an hour"
+    return f"about {round(hours)} hours"
+
+
 #: A provider that ANSWERED, possibly with nothing. `jsearch: 0` is a search
 #: that ran and matched nothing; `jsearch: unavailable` is one that did not run.
 _ANSWERED = re.compile(r"^\w+: \d+$")
@@ -244,40 +254,6 @@ def _scorer(settings: Settings) -> scoring.Scorer:
         return result if isinstance(result, dict) else {}
 
     return call
-
-
-def _annotate(
-    db: Any,
-    *,
-    user_id: str,
-    jobs: list[Any],
-    annotations: dict[int, scoring.Annotation],
-) -> None:
-    """Write the scores onto rows that already exist.
-
-    Separate from `persist` on purpose. Persisting is what makes a posting
-    exist for this user and must not depend on the model; annotating is extra
-    and is allowed to do nothing. A job nobody scored keeps `match_score` NULL,
-    which the feed renders as "not analysed" — V1 showed 70%.
-    """
-    for index, annotation in annotations.items():
-        row = scoring.merge({}, annotation)
-        if not row:
-            continue
-        try:
-            # The table name as a LITERAL. The RLS sweep reads `db.table(...)`
-            # to decide which table a write touches, and a variable is a write
-            # it cannot classify — "a guard that inspects one representation
-            # misses a violation that uses another", from the other side.
-            # `test_the_annotate_literal_matches_the_store` stops the two
-            # spellings drifting.
-            db.table("jobs_feed").update(row).eq("user_id", user_id).eq(
-                "dedup_key", jobs[index].dedupe_key
-            ).execute()
-        except Exception:
-            # The posting is saved and real. Losing its annotation is a worse
-            # feed, not a failed scan, and the run has already been paid for.
-            logger.exception("could not annotate %s", jobs[index].dedupe_key)
 
 
 @router.post("/jobs/scan")
@@ -329,16 +305,18 @@ async def scan(
     # The six-hour gate, before the quota and before credits: it is the
     # cheapest refusal and it is about this user alone.
     previous = last_scan_at(db, user.id)
-    if previous is not None and datetime.now(UTC) - previous < RESCAN_AFTER:
+    now = datetime.now(UTC)
+    if previous is not None and now - previous < RESCAN_AFTER:
         ready = previous + RESCAN_AFTER
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
                 "error": "scanned_recently",
                 "message": (
-                    f"Your last scan finished at {previous:%H:%M} UTC. The next one opens at "
-                    f"{ready:%H:%M} UTC — new postings rarely appear faster than that, and "
-                    "a scan that finds nothing new still costs 15 credits. Nothing was charged."
+                    f"Your last scan finished {_span(now - previous)} ago. The next one opens "
+                    f"in {_span(ready - now)} — new postings rarely appear faster than that, "
+                    "and a scan that finds nothing new still costs 15 credits. "
+                    "Nothing was charged."
                 ),
                 "next_scan_at": ready.isoformat(),
             },
@@ -379,7 +357,7 @@ async def scan(
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
 
-    gateway, recorded = build_gateway(settings, db)
+    gateway = build_gateway(settings, db, user.id)
     #: What the search said, kept outside `work` because an EMPTY run returns
     #: `{}` — the only shape `runs.execute` will not charge for — and the
     #: notes would otherwise be lost with it.
@@ -402,20 +380,32 @@ async def scan(
         annotations = scoring.score(found, profile, scorer=_scorer(settings))
 
         reporter.step("save", "Saving what is new")
-        new, again = store.persist(db, user_id=user.id, jobs=found)
-        _annotate(db, user_id=user.id, jobs=found, annotations=annotations)
+        saved = store.persist(db, user_id=user.id, jobs=found)
+        scores = store.annotate(
+            db, user_id=user.id, jobs=found, annotations=annotations, stored=saved.details
+        )
 
         return {
             "found": len(found),
-            "new": new,
-            "seen_again": again,
+            "new": len(saved.new),
+            "seen_again": saved.seen_again,
             "scored": len(annotations),
             "sources": list(gateway.provider_names),
             "notes": notes,
-            # Said, because a list from a search made earlier today is a
-            # different fact from one made just now.
-            "from_cache": any(r.served_from_cache for r in recorded),
             "searched_for": {"role": role, "city": city or None},
+            # NAMED, not only counted. "3 new roles — marked New today below"
+            # pointed at three rows scored 18, 45 and 48, which the score sort
+            # had put in the middle of a 58-row list. A count tells someone
+            # something happened; a name tells them where to look.
+            "new_jobs": [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "company": row["company"],
+                    "match_score": scores.get(row["dedup_key"]),
+                }
+                for row in saved.new
+            ],
         }
 
     settled = await runs_service.execute(
@@ -433,8 +423,8 @@ async def scan(
             "scored": 0,
             "sources": list(gateway.provider_names),
             "notes": searched["notes"],
-            "from_cache": any(r.served_from_cache for r in recorded),
             "searched_for": {"role": role, "city": city or None},
+            "new_jobs": [],
             "credits": settled.credits.as_dict() if settled.credits else None,
         }
 
