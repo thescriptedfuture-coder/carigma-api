@@ -232,3 +232,137 @@ def test_a_role_full_of_punctuation_still_makes_one_key() -> None:
     )
     assert key.startswith("jsearch:")
     assert len(key) < 120
+
+
+# ── The wiring, which is what was actually missing ─────────────────────────
+
+
+class _Inner:
+    """A provider that counts how often it is really called."""
+
+    name = "jsearch"
+
+    def __init__(self, jobs: list[Any] | None = None, fail: bool = False) -> None:
+        self.calls = 0
+        self.jobs = jobs or []
+        self.fail = fail
+
+    def available(self) -> bool:
+        return True
+
+    def search(self, *, role: str, city: str, limit: int = 20) -> list[Any]:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("provider down")
+        return list(self.jobs)
+
+
+def _job() -> Any:
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    return NormalizedJob(
+        source="jsearch",
+        source_id="1",
+        title="Data Analyst",
+        company="Zomato",
+        location="Gurugram, India",
+        apply_url="https://example.com/1",
+    )
+
+
+def test_a_real_call_leaves_a_row_the_cap_counts() -> None:
+    """THE test that was missing.
+
+    S5 built the counter and the refusal. S6 wired the refusal into the scan
+    and never recorded a single call, so the count was permanently zero and the
+    first two real scans spent shared JSearch quota without either being
+    counted. Every piece was tested; the wiring between them was not.
+    """
+    from carigma_api.services.jobs.quota import RecordedProvider
+
+    db = FakeDB()
+    inner = _Inner([_job()])
+    provider = RecordedProvider(inner, db, ttl_hours=48)
+
+    assert fetches_today(db) == 0
+    provider.search(role="Data Analyst", city="Delhi")
+
+    assert inner.calls == 1
+    assert fetches_today(db) == 1
+
+
+def test_the_same_search_inside_the_ttl_costs_no_quota() -> None:
+    from carigma_api.services.jobs.quota import RecordedProvider
+
+    db = FakeDB()
+    inner = _Inner([_job()])
+    provider = RecordedProvider(inner, db, ttl_hours=48)
+
+    first = provider.search(role="Data Analyst", city="Delhi")
+    second = provider.search(role="Data Analyst", city="Delhi")
+
+    assert inner.calls == 1, "the second identical search reached the provider"
+    assert provider.served_from_cache is True
+    assert [j.title for j in second] == [j.title for j in first]
+    # Still one call on the cap's books, because there was one call.
+    assert fetches_today(db) == 1
+
+
+def test_a_failed_call_is_not_cached_as_no_jobs() -> None:
+    """An empty payload written on a timeout would serve "no jobs" for 48
+    hours on the strength of one bad request."""
+    from carigma_api.services.jobs.quota import RecordedProvider
+
+    db = FakeDB()
+    provider = RecordedProvider(_Inner(fail=True), db, ttl_hours=48)
+
+    try:
+        provider.search(role="Data Analyst", city="Delhi")
+    except RuntimeError:
+        pass
+    assert db.rows == []
+
+
+def test_an_empty_answer_is_cached_because_it_is_an_answer() -> None:
+    """ "JSearch has nothing for this today" is worth not asking again."""
+    from carigma_api.services.jobs.quota import RecordedProvider
+
+    db = FakeDB()
+    inner = _Inner([])
+    provider = RecordedProvider(inner, db, ttl_hours=48)
+
+    provider.search(role="Rare Role", city="Delhi")
+    provider.search(role="Rare Role", city="Delhi")
+
+    assert inner.calls == 1
+
+
+def test_a_cached_job_comes_back_whole() -> None:
+    from carigma_api.services.jobs.models import ApplyOption, NormalizedJob
+    from carigma_api.services.jobs.quota import from_payload, to_payload
+
+    original = NormalizedJob(
+        source="jsearch",
+        source_id="9",
+        title="BI Analyst",
+        company="Razorpay",
+        location="Bangalore, India",
+        apply_url="https://example.com/9",
+        apply_options=(ApplyOption(publisher="LinkedIn", url="https://li/9", is_direct=False),),
+        salary="₹15-20 LPA",
+        posted_at=NOW,
+        publisher="LinkedIn",
+    )
+    rebuilt = from_payload(to_payload(original))
+
+    assert rebuilt is not None
+    assert rebuilt.dedupe_key == original.dedupe_key
+    assert rebuilt.apply_options == original.apply_options
+    assert rebuilt.posted_at == original.posted_at
+    assert rebuilt.salary == "₹15-20 LPA"
+
+
+def test_a_malformed_cache_row_is_skipped_rather_than_shown_half_built() -> None:
+    from carigma_api.services.jobs.quota import from_payload
+
+    assert from_payload({"title": "no source, no id"}) is None
