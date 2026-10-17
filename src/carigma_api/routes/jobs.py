@@ -15,7 +15,8 @@ The web has been calling these four against MSW since P4. They did not exist.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -162,19 +163,72 @@ def get_apply_kit(
     }
 
 
-def build_gateway(settings: Settings) -> JobsGateway:
-    """The providers, in fallback order.
+def build_gateway(settings: Settings, db: Any) -> tuple[JobsGateway, list[quota.RecordedProvider]]:
+    """The providers, in fallback order, each one counted at the call.
 
     JSearch first because its coverage of Indian postings is better; Adzuna is
-    the top-up when JSearch returns thin, and is not capped here because it has
-    its own free tier and is not the key V1 is drawing on.
+    the top-up when JSearch returns thin. Both are wrapped in
+    `RecordedProvider`, so no path reaches the network without leaving the row
+    the daily cap counts — the first version recorded nothing, and the cap read
+    zero through two real scans.
+
+    The wrappers are returned too, so the scan can say whether its answer came
+    from a search made just now or from one made earlier.
     """
-    return JobsGateway(
-        [
+    recorded = [
+        quota.RecordedProvider(
             JSearchProvider(api_key=settings.jsearch_api_key, host=settings.jsearch_host),
+            db,
+            ttl_hours=settings.jobs_cache_ttl_hours,
+        ),
+        quota.RecordedProvider(
             AdzunaProvider(app_id=settings.adzuna_app_id, app_key=settings.adzuna_app_key),
-        ]
-    )
+            db,
+            ttl_hours=settings.jobs_cache_ttl_hours,
+        ),
+    ]
+    return JobsGateway(list(recorded)), recorded
+
+
+#: Spec 3.4: "Rescan now (rate-limit 1/6h; disabled tooltip `Next scan at
+#: 15:12`)". V1 enforces it server-side. The first V2 scan did not, and the
+#: second real scan ran six minutes after the first, cost 15 credits, and found
+#: one new posting.
+RESCAN_AFTER = timedelta(hours=6)
+
+
+def last_scan_at(db: Any, user_id: str) -> datetime | None:
+    """When this user's last scan that FOUND something finished.
+
+    A failed or empty scan does not start the clock — it charged nothing and
+    told the user nothing, and making them wait six hours to try again after a
+    provider timeout would punish them for our bad day.
+    """
+    try:
+        res = (
+            db.table("agent_runs")
+            .select("finished_at,status")
+            .eq("user_id", user_id)
+            .eq("agent", "jobs")
+            .eq("status", "succeeded")
+            .execute()
+        )
+    except Exception:
+        logger.exception("could not read the last scan for %s", user_id)
+        return None
+    stamps = []
+    for row in res.data or []:
+        try:
+            when = datetime.fromisoformat(str(row.get("finished_at")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        stamps.append(when if when.tzinfo else when.replace(tzinfo=UTC))
+    return max(stamps) if stamps else None
+
+
+#: A provider that ANSWERED, possibly with nothing. `jsearch: 0` is a search
+#: that ran and matched nothing; `jsearch: unavailable` is one that did not run.
+_ANSWERED = re.compile(r"^\w+: \d+$")
 
 
 def _scorer(settings: Settings) -> scoring.Scorer:
@@ -271,6 +325,26 @@ async def scan(
         )
 
     db = _db(request, settings)
+
+    # The six-hour gate, before the quota and before credits: it is the
+    # cheapest refusal and it is about this user alone.
+    previous = last_scan_at(db, user.id)
+    if previous is not None and datetime.now(UTC) - previous < RESCAN_AFTER:
+        ready = previous + RESCAN_AFTER
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "scanned_recently",
+                "message": (
+                    f"Your last scan finished at {previous:%H:%M} UTC. The next one opens at "
+                    f"{ready:%H:%M} UTC — new postings rarely appear faster than that, and "
+                    "a scan that finds nothing new still costs 15 credits. Nothing was charged."
+                ),
+                "next_scan_at": ready.isoformat(),
+            },
+            headers={"X-Error-Code": "scanned_recently"},
+        )
+
     if (blocked := quota.refusal(db, cap=settings.jsearch_daily_cap)) is not None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -305,15 +379,23 @@ async def scan(
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
 
-    gateway = build_gateway(settings)
+    gateway, recorded = build_gateway(settings, db)
+    #: What the search said, kept outside `work` because an EMPTY run returns
+    #: `{}` — the only shape `runs.execute` will not charge for — and the
+    #: notes would otherwise be lost with it.
+    searched: dict[str, Any] = {"notes": []}
 
     def work(reporter: RunReporter) -> dict[str, Any]:
         reporter.step("search", f"Searching for {role} in {city or 'your area'}")
         found, notes = gateway.search(role=role, city=city)
+        searched["notes"] = notes
         if not found:
-            # An empty result is not a failure, and it is not a success either.
-            # `runs.execute` charges only a NON-EMPTY success, so raising here
-            # is what makes "nothing found" free.
+            if any(_ANSWERED.match(note) for note in notes):
+                # A source ANSWERED and matched nothing. That is a real result
+                # — "no postings for this role in this city today" — and it is
+                # free: `{}` is the empty result `runs.execute` will not bill.
+                return {}
+            # Nobody answered. That is a failure, and it says so.
             raise UpstreamError("; ".join(notes) or "No job source returned anything.")
 
         reporter.step("rank", f"Ranking {len(found)} postings against your profile")
@@ -330,18 +412,38 @@ async def scan(
             "scored": len(annotations),
             "sources": list(gateway.provider_names),
             "notes": notes,
+            # Said, because a list from a search made earlier today is a
+            # different fact from one made just now.
+            "from_cache": any(r.served_from_cache for r in recorded),
+            "searched_for": {"role": role, "city": city or None},
         }
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store
     )
 
+    if settled.status is runs_service.RunStatus.EMPTY:
+        # A search ran and matched nothing. Not an error — a 200 with the
+        # facts, so the surface can say what was searched for rather than
+        # pretend something broke.
+        return {
+            "found": 0,
+            "new": 0,
+            "seen_again": 0,
+            "scored": 0,
+            "sources": list(gateway.provider_names),
+            "notes": searched["notes"],
+            "from_cache": any(r.served_from_cache for r in recorded),
+            "searched_for": {"role": role, "city": city or None},
+            "credits": settled.credits.as_dict() if settled.credits else None,
+        }
+
     if settled.status is not runs_service.RunStatus.SUCCEEDED:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "error": "scan_failed",
-                "message": "We couldn't search for roles just now. You weren't charged.",
+                "message": "We couldn't reach the job sources just now. You weren't charged.",
             },
             headers={"X-Error-Code": "scan_failed"},
         )

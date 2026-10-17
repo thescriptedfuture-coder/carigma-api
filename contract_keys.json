@@ -676,9 +676,13 @@
     "credits.charged",
     "credits.reason",
     "found",
+    "from_cache",
     "new",
     "notes",
     "scored",
+    "searched_for",
+    "searched_for.city",
+    "searched_for.role",
     "seen_again",
     "sources"
   ],

@@ -196,7 +196,13 @@ class FakeTable:
             raise RuntimeError("db down")
         # Two tables, one fake. The cache rows are kept apart because a scan
         # reads BOTH and a shared list would count job rows against the quota.
-        source = self._db.cache_rows if self._table == "jobs_cache" else self._db.rows
+        source = (
+            self._db.cache_rows
+            if self._table == "jobs_cache"
+            else self._db.runs
+            if self._table == "agent_runs"
+            else self._db.rows
+        )
         if self._op == "insert":
             added = self._payload if isinstance(self._payload, list) else [self._payload]
             source.extend(dict(r) for r in added)
@@ -213,6 +219,8 @@ class FakeDB:
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self.rows = [dict(r) for r in (rows if rows is not None else [V1_ONLY, NORMALISED])]
         self.cache_rows: list[dict[str, Any]] = []
+        # Previous scans, for the six-hour gate.
+        self.runs: list[dict[str, Any]] = []
         self.inserted: list[dict[str, Any]] = []
         self.fail = False
 
@@ -631,7 +639,9 @@ def scanning(wired, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped
             return self.found, self.notes
 
     gateway = FakeGateway()
-    monkeypatch.setattr(routes, "build_gateway", lambda settings: gateway)
+    # `build_gateway` returns the gateway AND the recorded providers, so the
+    # scan can say whether it was answered from the cache.
+    monkeypatch.setattr(routes, "build_gateway", lambda settings, db: (gateway, []))
     monkeypatch.setattr(routes, "_scorer", lambda settings: lambda *_a, **_k: {"items": []})
     monkeypatch.setattr(routes, "ProfileRepository", lambda client: _FakeProfiles())
     return client, db, gateway
@@ -746,18 +756,41 @@ def test_a_scan_that_finds_jobs_saves_them_and_charges_once(scanning, monkeypatc
     assert body["sources"] == ["jsearch", "adzuna"]
 
 
-def test_a_scan_that_finds_nothing_charges_nothing(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """An empty result is not a failure and not a success. `runs.execute`
-    charges only a NON-EMPTY success, so finding nothing has to be free."""
+def test_a_search_that_matched_nothing_is_an_answer_and_is_free(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A source ANSWERED and found nothing. That is "no postings for this role
+    in this city today" — a real result, said as one, and free.
+
+    It used to raise, and the surface said "We couldn't search for roles just
+    now", which is a different fact and a false one.
+    """
     client, _db, gateway = scanning
     credits = _FakeCredits()
     monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
     gateway.found = []
+    gateway.notes = ["jsearch: 0", "adzuna: 0"]
+
+    res = client.post("/jobs/scan", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["found"] == 0
+    assert body["searched_for"] == {"role": "Data Analyst", "city": "Delhi"}
+    assert credits.charged == []
+
+
+def test_a_search_nobody_answered_is_a_failure_and_says_so(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Every source down is NOT "no jobs". The ProviderUnavailable rule:
+    "nothing to report" and "we couldn't look" must never render the same."""
+    client, _db, gateway = scanning
+    credits = _FakeCredits()
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
+    gateway.found = []
+    gateway.notes = ["jsearch: unavailable", "adzuna: failed"]
 
     res = client.post("/jobs/scan", headers=auth(make_token()))
 
     assert res.status_code == 503
-    assert "weren't charged" in res.json()["detail"]["message"]
+    assert "couldn't reach the job sources" in res.json()["detail"]["message"]
     assert credits.charged == []
 
 
@@ -790,3 +823,78 @@ def test_a_dead_model_still_saves_the_real_postings(scanning, monkeypatch) -> No
     assert body["new"] == 1
     # Saved, and honestly unscored.
     assert body["scored"] == 0
+
+
+# ── One scan per six hours (spec 3.4) ──────────────────────────────────────
+
+
+def _scan_run(hours_ago: float, status: str = "succeeded") -> dict[str, Any]:
+    return {
+        "user_id": USER_ID,
+        "agent": "jobs",
+        "status": status,
+        "finished_at": (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat(),
+    }
+
+
+def test_a_rescan_inside_six_hours_is_refused_free_with_the_time_it_opens(
+    scanning, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """V1 enforced this; the first V2 scan did not. The second real scan ran
+    six minutes after the first, cost 15 credits, and found one posting."""
+    client, db, gateway = scanning
+    credits = _FakeCredits()
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
+    db.runs = [_scan_run(hours_ago=0.1)]
+
+    res = client.post("/jobs/scan", headers=auth(make_token()))
+
+    assert res.status_code == 429
+    detail = res.json()["detail"]
+    assert detail["error"] == "scanned_recently"
+    assert detail["next_scan_at"]
+    assert "Nothing was charged" in detail["message"]
+    assert gateway.calls == 0
+    assert credits.charged == []
+
+
+def test_after_six_hours_the_scan_opens_again(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    client, db, gateway = scanning
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: _FakeCredits())
+    db.runs = [_scan_run(hours_ago=7)]
+    gateway.found = [
+        NormalizedJob(
+            source="jsearch",
+            source_id="1",
+            title="Data Analyst",
+            company="Zomato",
+            location="Gurugram",
+            apply_url="https://example.com/1",
+        )
+    ]
+
+    assert client.post("/jobs/scan", headers=auth(make_token())).status_code == 200
+
+
+def test_a_failed_scan_does_not_start_the_clock(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """It charged nothing and found nothing. Making someone wait six hours
+    after a provider timeout would punish them for our bad day."""
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    client, db, gateway = scanning
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: _FakeCredits())
+    db.runs = [_scan_run(hours_ago=0.1, status="failed"), _scan_run(hours_ago=0.2, status="empty")]
+    gateway.found = [
+        NormalizedJob(
+            source="jsearch",
+            source_id="1",
+            title="Data Analyst",
+            company="Zomato",
+            location="Gurugram",
+            apply_url="https://example.com/1",
+        )
+    ]
+
+    assert client.post("/jobs/scan", headers=auth(make_token())).status_code == 200

@@ -38,6 +38,8 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from carigma_api.services.jobs.models import ApplyOption, NormalizedJob
+
 logger = logging.getLogger(__name__)
 
 CACHE = "jobs_cache"
@@ -167,8 +169,121 @@ def remember(db: Any, *, key: str, source: str, payload: list[dict[str, Any]]) -
         logger.exception("could not write the jobs cache for %s", key)
 
 
+# ── Counting at the call, which is the only place that knows ───────────────
+
+
+def to_payload(job: NormalizedJob) -> dict[str, Any]:
+    """A job as the cache stores it. Everything the model carries, nothing more."""
+    return {
+        "source": job.source,
+        "source_id": job.source_id,
+        "title": job.title,
+        "company": job.company,
+        "location": job.location,
+        "apply_url": job.apply_url,
+        "apply_options": [
+            {"publisher": o.publisher, "url": o.url, "is_direct": o.is_direct}
+            for o in job.apply_options
+        ],
+        "salary": job.salary,
+        "posted_at": job.posted_at.isoformat() if job.posted_at else None,
+        "description": job.description,
+        "publisher": job.publisher,
+        "job_type": job.job_type,
+    }
+
+
+def from_payload(raw: dict[str, Any]) -> NormalizedJob | None:
+    """A cached job back as the model. `None` for a row we cannot rebuild —
+    a malformed cache entry is skipped rather than shown half-built."""
+    try:
+        posted = raw.get("posted_at")
+        return NormalizedJob(
+            source=str(raw["source"]),
+            source_id=str(raw["source_id"]),
+            title=str(raw["title"]),
+            company=str(raw["company"]),
+            location=str(raw.get("location") or ""),
+            apply_url=str(raw.get("apply_url") or ""),
+            apply_options=tuple(
+                ApplyOption(
+                    publisher=str(o.get("publisher") or ""),
+                    url=str(o["url"]),
+                    is_direct=bool(o.get("is_direct")),
+                )
+                for o in raw.get("apply_options") or []
+                if isinstance(o, dict) and o.get("url")
+            ),
+            salary=raw.get("salary"),
+            posted_at=datetime.fromisoformat(posted)
+            if isinstance(posted, str) and posted
+            else None,
+            description=raw.get("description"),
+            publisher=raw.get("publisher"),
+            job_type=raw.get("job_type"),
+        )
+    except (KeyError, TypeError, ValueError):
+        logger.warning("skipping a cached job we could not rebuild")
+        return None
+
+
+class RecordedProvider:
+    """A provider whose every real call leaves a row the cap can count.
+
+    ## The bug this exists for
+
+    S5 built `fetches_today`, `refusal` and `remember`. S6 wired `refusal` into
+    the scan and never called `remember` — so the count the cap reads was
+    permanently zero, and the first two real scans spent shared JSearch quota
+    without either being counted. The cap was still a number and a comment,
+    one release after it was reported fixed.
+
+    The repair is to count at the CALL rather than at the route. A route can
+    forget to record; a provider wrapped in this cannot reach the network
+    without passing through it.
+
+    ## And the cache is the same door
+
+    A fresh cached answer for this (role, city, source) is returned without
+    calling anything, which costs no quota at all. A cache row is written after
+    every successful call — empty answers included, because "JSearch has
+    nothing for this today" is worth not asking again for 48 hours.
+
+    A FAILED call is not recorded: an empty payload written on a failure would
+    serve "no jobs" for two days on the strength of a timeout.
+    """
+
+    def __init__(self, inner: Any, db: Any, *, ttl_hours: int) -> None:
+        self._inner = inner
+        self._db = db
+        self._ttl = ttl_hours
+        self.name: str = inner.name
+        #: Whether the last `search` was answered from the cache. The scan
+        #: says so, because a result from an earlier search is a different
+        #: fact from a result from just now.
+        self.served_from_cache = False
+
+    def available(self) -> bool:
+        return bool(self._inner.available())
+
+    def search(self, *, role: str, city: str, limit: int = 20) -> list[NormalizedJob]:
+        key = query_key(role=role, city=city, source=self.name)
+        hit = cached(self._db, key=key, ttl_hours=self._ttl)
+        if hit is not None:
+            self.served_from_cache = True
+            return [job for job in (from_payload(r) for r in hit) if job is not None]
+
+        self.served_from_cache = False
+        found = self._inner.search(role=role, city=city, limit=limit)
+        remember(self._db, key=key, source=self.name, payload=[to_payload(j) for j in found])
+        return list(found)
+
+
 __all__ = [
     "CACHE",
+    "RecordedProvider",
+    "from_payload",
+    "to_payload",
     "CAPPED_SOURCE",
     "cached",
     "fetches_today",
