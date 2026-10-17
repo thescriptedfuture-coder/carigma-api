@@ -85,6 +85,15 @@ def normalise(path: str) -> str:
     (`/posts/week/${day}` vs `${slot}`), and a boundary check that depended on
     two sides choosing the same variable name would fail on correct code.
     """
+    # LITERAL routes first. `/jobs/{job_id}`'s regex is `[^/]+`, which matches
+    # the word "scan" quite happily — so `POST /jobs/scan` was recorded under
+    # the key `POST /jobs/{}` and two endpoints shared one entry. Whichever
+    # happened to come first in the table won, which is not a rule at all.
+    #
+    # A path that IS a route wins over a path that merely fits one.
+    for regex, fmt in ROUTES:
+        if "{" not in fmt and regex.match(path):
+            return fmt
     for regex, fmt in ROUTES:
         if regex.match(path):
             return re.sub(r"\{[^}]+\}", "{}", fmt)

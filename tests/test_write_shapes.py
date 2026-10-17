@@ -48,6 +48,11 @@ EXEMPT: dict[tuple[str, str, str], str] = {
     ("repository.py", "profiles", "upsert"): "tests/test_profile_keys.py walks profile_to_db",
     ("admin.py", "credit_ledger", "insert"): "test_ledger_row_fits_the_table, below",
     ("payments.py", "payments", "insert"): "row is a parameter; test_payments_roundtrip covers it",
+    # `scoring.merge` builds this row, so the sweep sees a variable rather
+    # than a literal dict. Every key it can write is asserted in
+    # test_jobs_scoring.py::test_merge_writes_only_what_the_model_actually_said,
+    # against the three columns `present_job` reads back out.
+    ("jobs.py", "jobs_feed", "update"): "row is scoring.merge output; test_jobs_scoring covers it",
     ("send_emails.py", "email_log", "insert"): "derived from the literal row above it, minus keys",
     ("send_emails.py", "reengagement_sequences", "update"): "the dict is a parameter",
 }

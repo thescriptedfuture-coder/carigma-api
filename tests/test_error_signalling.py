@@ -73,6 +73,11 @@ ACCEPTED: dict[tuple[str, str], str] = {
     # there is nothing here, go and fetch. The distinction that matters lives
     # in `fetches_today`, where "cannot count" must NOT read as zero.
     ("quota.py", "cached"): "no row, stale row and unreadable row are one answer: go fetch",
+    # Fail-open, deliberately and unlike V1. A failed ranking call and a
+    # response that scored nothing both leave every job UNSCORED — which the
+    # feed renders as "not analysed" either way. V1 filled the gap with a
+    # fabricated 70%; honest absence is the whole point of returning {}.
+    ("scoring.py", "score"): "a failed ranking and an empty one both mean: these jobs are unscored",
     # ── DECIDE. Listed so they are visible, not because they are settled.
     # `read_balance` was here, marked DECIDE, and is now FIXED rather than
     # accepted: it raises `CreditsUnavailable` on a read it could not complete,

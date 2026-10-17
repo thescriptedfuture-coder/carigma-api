@@ -140,10 +140,12 @@ DISMISSED: dict[str, Any] = {**V1_ONLY, "id": 3, "status": "dismissed", "match_s
 
 
 class FakeTable:
-    def __init__(self, db: FakeDB):
+    def __init__(self, db: FakeDB, table: str = "jobs_feed"):
         self._db = db
+        self._table = table
         self._filters: dict[str, Any] = {}
         self._in: tuple[str, list[Any]] | None = None
+        self._gte: tuple[str, Any] | None = None
         self._op: str | None = None
         self._payload: dict[str, Any] | None = None
 
@@ -153,6 +155,13 @@ class FakeTable:
 
     def update(self, payload: dict[str, Any]) -> FakeTable:
         self._op, self._payload = "update", payload
+        return self
+
+    def insert(self, payload: Any) -> FakeTable:
+        # A scan INSERTS new postings. Without this the fake raised
+        # AttributeError inside the run, which `runs.execute` reports as a
+        # failed run — so the success path could not be tested at all.
+        self._op, self._payload = "insert", payload
         return self
 
     def eq(self, column: str, value: Any) -> FakeTable:
@@ -166,17 +175,34 @@ class FakeTable:
     def order(self, *_a: Any, **_k: Any) -> FakeTable:
         return self
 
+    def gte(self, column: str, value: Any) -> FakeTable:
+        # The quota count filters on `fetched_at >= midnight`. Without this the
+        # chain raised, `fetches_today` read that as "cannot count", and the
+        # cap test passed on the WRONG refusal — right status, wrong reason.
+        self._gte = (column, value)
+        return self
+
     def _matches(self, row: dict[str, Any]) -> bool:
         if any(str(row.get(k)) != str(v) for k, v in self._filters.items()):
             return False
         if self._in and row.get(self._in[0]) not in self._in[1]:
+            return False
+        if self._gte and str(row.get(self._gte[0], "")) < str(self._gte[1]):
             return False
         return True
 
     def execute(self) -> Any:
         if self._db.fail:
             raise RuntimeError("db down")
-        hits = [r for r in self._db.rows if self._matches(r)]
+        # Two tables, one fake. The cache rows are kept apart because a scan
+        # reads BOTH and a shared list would count job rows against the quota.
+        source = self._db.cache_rows if self._table == "jobs_cache" else self._db.rows
+        if self._op == "insert":
+            added = self._payload if isinstance(self._payload, list) else [self._payload]
+            source.extend(dict(r) for r in added)
+            self._db.inserted.extend(dict(r) for r in added)
+            return type("Res", (), {"data": [dict(r) for r in added]})()
+        hits = [r for r in source if self._matches(r)]
         if self._op == "update":
             for row in hits:
                 row.update(self._payload or {})
@@ -186,10 +212,12 @@ class FakeTable:
 class FakeDB:
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self.rows = [dict(r) for r in (rows if rows is not None else [V1_ONLY, NORMALISED])]
+        self.cache_rows: list[dict[str, Any]] = []
+        self.inserted: list[dict[str, Any]] = []
         self.fail = False
 
-    def table(self, _name: str) -> FakeTable:
-        return FakeTable(self)
+    def table(self, name: str) -> FakeTable:
+        return FakeTable(self, name)
 
 
 @pytest.fixture
@@ -469,31 +497,62 @@ def test_a_blank_reason_is_refused(wired) -> None:  # type: ignore[no-untyped-de
     assert db.rows[0]["status"] == "active"
 
 
-# ── Nothing on this path charges ───────────────────────────────────────────
+# ── What may charge, and what may not ──────────────────────────────────────
 
 
-def test_no_jobs_endpoint_charges_credits() -> None:
-    """Reading a feed is not a run. Asserted against the module's AST — string
-    constants included, because a table name is a literal and the
-    identifier-only version of this guard once passed with
-    `db.table('credits').update(...)` sitting on a free path."""
+def test_only_the_scan_charges_anything() -> None:
+    """Reading a feed is not a run, and neither is downloading a CV already
+    paid for. One endpoint in this module costs credits; the rest must not be
+    able to.
+
+    Asserted per FUNCTION rather than per module. The whole-module version was
+    right until `POST /jobs/scan` existed, and the lazy repair — delete the
+    guard — would have taken the protection off five free endpoints to admit
+    one priced one.
+
+    Still an AST walk including STRING CONSTANTS, because a table name is a
+    literal: the identifier-only version of this guard once passed with
+    `db.table('credits').update(...)` sitting on a free path.
+    """
     import ast
     import inspect
 
     tree = ast.parse(inspect.getsource(routes))
-    referenced: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            referenced.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            referenced.add(node.attr)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            referenced.add(node.value)
 
-    for forbidden in ("credits", "credit_ledger", "charge_for_result", "apply_delta", "execute"):
-        if forbidden == "execute":
-            continue  # PostgREST's `.execute()`, not the run protocol's
-        assert forbidden not in referenced, f"{forbidden!r} appears on the free jobs path"
+    #: The one priced endpoint, and what prices it.
+    PRICED = {"scan"}
+    MONEY = ("credits", "credit_ledger", "charge_for_result", "apply_delta")
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.name in PRICED or node.name.startswith("_"):
+            continue
+
+        referenced: set[str] = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name):
+                referenced.add(inner.id)
+            elif isinstance(inner, ast.Attribute):
+                referenced.add(inner.attr)
+            elif isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                referenced.add(inner.value)
+
+        for forbidden in MONEY:
+            if forbidden in referenced:
+                offenders.append(f"{node.name} references {forbidden!r}")
+
+    assert offenders == [], "these are free endpoints and must stay free: " + "; ".join(offenders)
+
+
+def test_the_priced_list_names_an_endpoint_that_exists() -> None:
+    """An exemption needs a proof. `scan` naming nothing would quietly exempt
+    a function that no longer exists while the real one went unchecked."""
+    import inspect
+
+    assert hasattr(routes, "scan")
+    assert inspect.iscoroutinefunction(routes.scan)
 
 
 # ── The CV as a file ───────────────────────────────────────────────────────
@@ -549,3 +608,185 @@ def test_a_job_with_no_kit_is_a_404_not_an_empty_document(wired) -> None:  # typ
 
 def test_the_download_needs_a_verified_token(client: TestClient) -> None:
     assert client.get("/jobs/2/cv.pdf").status_code == 401
+
+
+# ── The scan ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def scanning(wired, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """A scan with every outside edge replaced: no provider, no model, no money."""
+    client, db = wired
+
+    class FakeGateway:
+        provider_names = ("jsearch", "adzuna")
+
+        def __init__(self) -> None:
+            self.found: list[Any] = []
+            self.notes: list[str] = ["jsearch: 2"]
+            self.calls = 0
+
+        def search(self, **_kw: Any) -> tuple[list[Any], list[str]]:
+            self.calls += 1
+            return self.found, self.notes
+
+    gateway = FakeGateway()
+    monkeypatch.setattr(routes, "build_gateway", lambda settings: gateway)
+    monkeypatch.setattr(routes, "_scorer", lambda settings: lambda *_a, **_k: {"items": []})
+    monkeypatch.setattr(routes, "ProfileRepository", lambda client: _FakeProfiles())
+    return client, db, gateway
+
+
+class _FakeProfiles:
+    profile: dict[str, Any] = {"targetRoles": "Data Analyst", "location": "Delhi"}
+
+    def load(self, _user_id: str) -> dict[str, Any]:
+        return dict(self.profile)
+
+
+def test_the_scan_needs_a_verified_token(client: TestClient) -> None:
+    assert client.post("/jobs/scan").status_code == 401
+
+
+def test_a_profile_with_no_target_role_is_refused_before_any_quota_is_spent(scanning) -> None:  # type: ignore[no-untyped-def]
+    """Scanning for "" returns whatever the provider feels like, and finding
+    that out costs a search that belongs to live V1 users."""
+    client, _db, gateway = scanning
+    _FakeProfiles.profile = {"targetRoles": "", "location": "Delhi"}
+    try:
+        res = client.post("/jobs/scan", headers=auth(make_token()))
+    finally:
+        _FakeProfiles.profile = {"targetRoles": "Data Analyst", "location": "Delhi"}
+
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"] == "no_target_role"
+    assert gateway.calls == 0
+
+
+def test_the_shared_quota_is_checked_before_credits_and_before_the_provider(scanning) -> None:  # type: ignore[no-untyped-def]
+    """V1 and V2 draw on one JSearch key and live V1 users have first claim.
+
+    You should not have to be able to afford something to be told it is
+    impossible — and a scan that would exceed the cap must not reach a
+    provider at all.
+    """
+    client, db, gateway = scanning
+    # REAL now. This module's `NOW` is a fixed historical date, and the cap
+    # counts fetches since midnight TODAY — so fixture-dated rows fall
+    # outside the window and the count comes back 0.
+    today = datetime.now(UTC).isoformat()
+    db.cache_rows = [{"source": "jsearch", "fetched_at": today} for _ in range(25)]
+
+    res = client.post("/jobs/scan", headers=auth(make_token()))
+
+    assert res.status_code == 429
+    assert res.json()["detail"]["error"] == "quota_reached"
+    # The NUMBER, not just the refusal. Both refusals — "cap reached" and
+    # "could not count" — say nothing was charged, so asserting that alone
+    # would pass on a fake whose cache read simply threw.
+    assert "25 of 25" in res.json()["detail"]["message"]
+    assert gateway.calls == 0
+
+
+class _FakeCredits:
+    """Enough of a credit store to let a run settle, so the SUCCESS path is
+    exercised rather than only its refusals.
+
+    A surface covered entirely by its refusals looks better tested than one
+    covered by its successes, because refusal tests are easy and there are more
+    of them. This is the one that records what a scan actually returns.
+    """
+
+    def __init__(self) -> None:
+        self.charged: list[tuple[str, int]] = []
+        self.balance = 500
+
+    def read_balance(self, _user_id: str) -> int:
+        return self.balance
+
+    def apply_delta(self, user_id: str, delta: int, reason: str, **_kw: Any) -> int:
+        self.charged.append((reason, delta))
+        self.balance += delta
+        return self.balance
+
+
+def test_a_scan_that_finds_jobs_saves_them_and_charges_once(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    client, db, gateway = scanning
+    credits = _FakeCredits()
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
+    gateway.found = [
+        NormalizedJob(
+            source="jsearch",
+            source_id="1",
+            title="Data Analyst",
+            company="Zomato",
+            location="Gurugram, India",
+            apply_url="https://example.com/1",
+            description="SQL and Power BI.",
+        )
+    ]
+    monkeypatch.setattr(
+        routes,
+        "_scorer",
+        lambda settings: (
+            lambda *_a, **_k: {"items": [{"id": 0, "match_score": 82, "why_match": "SQL."}]}
+        ),
+    )
+
+    res = client.post("/jobs/scan", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["found"] == 1
+    assert body["new"] == 1
+    assert body["seen_again"] == 0
+    assert body["scored"] == 1
+    assert body["sources"] == ["jsearch", "adzuna"]
+
+
+def test_a_scan_that_finds_nothing_charges_nothing(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An empty result is not a failure and not a success. `runs.execute`
+    charges only a NON-EMPTY success, so finding nothing has to be free."""
+    client, _db, gateway = scanning
+    credits = _FakeCredits()
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
+    gateway.found = []
+
+    res = client.post("/jobs/scan", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert "weren't charged" in res.json()["detail"]["message"]
+    assert credits.charged == []
+
+
+def test_a_dead_model_still_saves_the_real_postings(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """V1's answer here was a fabricated 70% on every job. A real posting is
+    worth showing without the fit copy; the absence must look like absence."""
+    from carigma_api.services.jobs.models import NormalizedJob
+
+    client, db, gateway = scanning
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: _FakeCredits())
+    gateway.found = [
+        NormalizedJob(
+            source="jsearch",
+            source_id="1",
+            title="Data Analyst",
+            company="Zomato",
+            location="Gurugram, India",
+            apply_url="https://example.com/1",
+        )
+    ]
+
+    def dead(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("anthropic is down")
+
+    monkeypatch.setattr(routes, "_scorer", lambda settings: dead)
+
+    body = client.post("/jobs/scan", headers=auth(make_token())).json()
+
+    assert body["found"] == 1
+    assert body["new"] == 1
+    # Saved, and honestly unscored.
+    assert body["scored"] == 0

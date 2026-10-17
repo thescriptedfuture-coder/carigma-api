@@ -213,3 +213,22 @@ def test_the_row_carries_only_keys_the_presenter_reads() -> None:
     assert details["apply_options"] == [
         {"publisher": "LinkedIn", "url": "https://li/1", "is_direct": False}
     ]
+
+
+def test_the_annotate_literal_matches_the_store() -> None:
+    """`routes/jobs.py` writes `db.table("jobs_feed")` as a literal, because the
+    RLS sweep reads the argument to decide which table a write touches and a
+    variable is a write it cannot classify.
+
+    Two spellings of one table is exactly the duplication this project removes,
+    so the duplication is made safe here rather than left to notice.
+    """
+    import inspect
+
+    from carigma_api.routes import jobs as routes
+    from carigma_api.services.jobs.store import TABLE
+
+    source = inspect.getsource(routes._annotate)
+    assert f'db.table("{TABLE}")' in source, (
+        f"the annotate write no longer names {TABLE!r} as a literal"
+    )

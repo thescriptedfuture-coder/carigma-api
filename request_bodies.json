@@ -64,6 +64,12 @@
   },
   {
     "method": "POST",
+    "path": "/jobs/scan",
+    "keys": null,
+    "where": "src/routes/JobsPage.tsx"
+  },
+  {
+    "method": "POST",
     "path": "/credits/request",
     "keys": [
       "note"

@@ -670,6 +670,18 @@
     "message",
     "received"
   ],
+  "POST /jobs/scan": [
+    "credits",
+    "credits.balance_after",
+    "credits.charged",
+    "credits.reason",
+    "found",
+    "new",
+    "notes",
+    "scored",
+    "seen_again",
+    "sources"
+  ],
   "POST /jobs/{}/not-for-me": [
     "dismiss_reason",
     "id",

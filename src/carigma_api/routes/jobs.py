@@ -23,9 +23,29 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
+from carigma_api.services import credits as credits_service
 from carigma_api.services import cv_pdf
+from carigma_api.services import runs as runs_service
+from carigma_api.services.ai import UpstreamError, call_claude_json
+from carigma_api.services.credits import InsufficientCredits
+from carigma_api.services.jobs import (
+    AdzunaProvider,
+    JobsGateway,
+    JSearchProvider,
+    quota,
+    scoring,
+    store,
+)
 from carigma_api.services.jobs.feed import DEFAULT_STATUSES, present_feed, present_job
-from carigma_api.services.repository import _as_rows, user_client
+from carigma_api.services.repository import (
+    ProfileRepository,
+    SupabaseCreditStore,
+    _as_rows,
+    user_client,
+)
+from carigma_api.services.run_store import SupabaseRunStore
+from carigma_api.services.runs import RunReporter
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +159,196 @@ def get_apply_kit(
         # Shipped in the payload rather than hard-coded in a component, so a
         # surface cannot render the kit without it.
         "disclaimer": "Review and adjust before sending — Carigma drafts, you verify.",
+    }
+
+
+def build_gateway(settings: Settings) -> JobsGateway:
+    """The providers, in fallback order.
+
+    JSearch first because its coverage of Indian postings is better; Adzuna is
+    the top-up when JSearch returns thin, and is not capped here because it has
+    its own free tier and is not the key V1 is drawing on.
+    """
+    return JobsGateway(
+        [
+            JSearchProvider(api_key=settings.jsearch_api_key, host=settings.jsearch_host),
+            AdzunaProvider(app_id=settings.adzuna_app_id, app_key=settings.adzuna_app_key),
+        ]
+    )
+
+
+def _scorer(settings: Settings) -> scoring.Scorer:
+    """The ranking call, bound to the real client.
+
+    Separate from `build_gateway` so a test can replace one without the other:
+    a scan with a working provider and a dead model is a real state, and it is
+    the one where V1 invented a 70% score.
+    """
+
+    def call(system: str, user: str, max_tokens: int) -> dict[str, Any]:
+        result = call_claude_json(system, user, max_tokens, api_key=settings.anthropic_api_key)
+        return result if isinstance(result, dict) else {}
+
+    return call
+
+
+def _annotate(
+    db: Any,
+    *,
+    user_id: str,
+    jobs: list[Any],
+    annotations: dict[int, scoring.Annotation],
+) -> None:
+    """Write the scores onto rows that already exist.
+
+    Separate from `persist` on purpose. Persisting is what makes a posting
+    exist for this user and must not depend on the model; annotating is extra
+    and is allowed to do nothing. A job nobody scored keeps `match_score` NULL,
+    which the feed renders as "not analysed" — V1 showed 70%.
+    """
+    for index, annotation in annotations.items():
+        row = scoring.merge({}, annotation)
+        if not row:
+            continue
+        try:
+            # The table name as a LITERAL. The RLS sweep reads `db.table(...)`
+            # to decide which table a write touches, and a variable is a write
+            # it cannot classify — "a guard that inspects one representation
+            # misses a violation that uses another", from the other side.
+            # `test_the_annotate_literal_matches_the_store` stops the two
+            # spellings drifting.
+            db.table("jobs_feed").update(row).eq("user_id", user_id).eq(
+                "dedup_key", jobs[index].dedupe_key
+            ).execute()
+        except Exception:
+            # The posting is saved and real. Losing its annotation is a worse
+            # feed, not a failed scan, and the run has already been paid for.
+            logger.exception("could not annotate %s", jobs[index].dedupe_key)
+
+
+@router.post("/jobs/scan")
+async def scan(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Career Scout. 15 credits (`run_jobs`), and nothing on a failure.
+
+    The order below is the one the posts route learned the hard way: replay,
+    then rate limit, then the STRUCTURAL refusals, then credits. You should not
+    have to be able to afford something to be told it is impossible.
+
+    The structural refusal here is the shared quota. V1 and V2 draw on one
+    JSearch key and live V1 users have first claim, so a scan that would exceed
+    today's cap is refused before any question about credits and before any
+    provider call. `quota.refusal` also refuses when it CANNOT COUNT, because
+    zero and unknown must not read the same when the resource is somebody
+    else's.
+    """
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    client = user_client(settings, token)
+    credit_store = SupabaseCreditStore(client)
+    run_store = SupabaseRunStore(client)
+    action = "run_jobs"
+
+    if (replayed := replay_if_seen(run_store, user.id, request, agent="jobs")) is not None:
+        return replayed
+
+    enforce_agent_rate_limit(user.id, "jobs")
+
+    profile = ProfileRepository(client).load(user.id)
+    role = str(profile.get("targetRoles") or "").split(",")[0].strip()
+    city = str(profile.get("location") or "").strip()
+    if not role:
+        # Scanning for "" returns whatever the provider feels like. A scan with
+        # no target is not a scan, and it would spend shared quota to find out.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "no_target_role",
+                "message": "Set a target role first — a scan needs something to look for.",
+            },
+        )
+
+    db = _db(request, settings)
+    if (blocked := quota.refusal(db, cap=settings.jsearch_daily_cap)) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "quota_reached", "message": blocked},
+            headers={"X-Error-Code": "quota_reached"},
+        )
+
+    try:
+        credits_service.check_affordable(
+            credit_store, user.id, action, enforced=settings.credits_enforced
+        )
+    except credits_service.CreditsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "credits_unavailable",
+                "message": (
+                    "We couldn't check your credits just now, so you weren't "
+                    "charged and nothing ran. Try again in a moment."
+                ),
+            },
+            headers={"X-Error-Code": "credits_unavailable"},
+        ) from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(f"A scan costs {exc.required} credits. You have {exc.balance}."),
+            headers={"X-Error-Code": "insufficient_credits"},
+        ) from exc
+
+    run = runs_service.new_run(user.id, "jobs")
+    if key := idempotency_key(request):
+        run_store.remember_idempotency(user.id, key, run.id)
+
+    gateway = build_gateway(settings)
+
+    def work(reporter: RunReporter) -> dict[str, Any]:
+        reporter.step("search", f"Searching for {role} in {city or 'your area'}")
+        found, notes = gateway.search(role=role, city=city)
+        if not found:
+            # An empty result is not a failure, and it is not a success either.
+            # `runs.execute` charges only a NON-EMPTY success, so raising here
+            # is what makes "nothing found" free.
+            raise UpstreamError("; ".join(notes) or "No job source returned anything.")
+
+        reporter.step("rank", f"Ranking {len(found)} postings against your profile")
+        annotations = scoring.score(found, profile, scorer=_scorer(settings))
+
+        reporter.step("save", "Saving what is new")
+        new, again = store.persist(db, user_id=user.id, jobs=found)
+        _annotate(db, user_id=user.id, jobs=found, annotations=annotations)
+
+        return {
+            "found": len(found),
+            "new": new,
+            "seen_again": again,
+            "scored": len(annotations),
+            "sources": list(gateway.provider_names),
+            "notes": notes,
+        }
+
+    settled = await runs_service.execute(
+        run, work, credit_store=credit_store, action=action, run_store=run_store
+    )
+
+    if settled.status is not runs_service.RunStatus.SUCCEEDED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "scan_failed",
+                "message": "We couldn't search for roles just now. You weren't charged.",
+            },
+            headers={"X-Error-Code": "scan_failed"},
+        )
+
+    return {
+        **settled.result,
+        "credits": settled.credits.as_dict() if settled.credits else None,
     }
 
 
