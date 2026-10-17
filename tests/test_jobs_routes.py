@@ -739,7 +739,13 @@ class _FakeCredits:
     def read_balance(self, _user_id: str) -> int:
         return self.balance
 
-    def apply_delta(self, user_id: str, delta: int, reason: str, **_kw: Any) -> int:
+    def apply_delta(
+        self, user_id: str, delta: int, reason: str, balance_after: int | None = None, **_kw: Any
+    ) -> int:
+        # The real signature. This took three positional arguments while
+        # `charge_for_result` passes four, so every charge raised, was caught
+        # and logged "delivering unbilled" — and the test named "charges once"
+        # passed without ever asserting a charge. Found in S7.
         self.charged.append((reason, delta))
         self.balance += delta
         return self.balance
@@ -779,6 +785,8 @@ def test_a_scan_that_finds_jobs_saves_them_and_charges_once(scanning, monkeypatc
     assert body["seen_again"] == 0
     assert body["scored"] == 1
     assert body["sources"] == ["jsearch", "adzuna"]
+    # The half of the name this test never checked.
+    assert credits.charged == [("Career Scout run", -15)]
 
 
 def test_a_search_that_matched_nothing_is_an_answer_and_is_free(scanning, monkeypatch) -> None:  # type: ignore[no-untyped-def]

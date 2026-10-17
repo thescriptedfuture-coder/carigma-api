@@ -800,6 +800,28 @@
     "streak.sentence",
     "streak.weeks"
   ],
+  "POST /posts/week/{}/regenerate": [
+    "credits",
+    "credits.balance_after",
+    "credits.charged",
+    "credits.reason",
+    "slot",
+    "slot.date",
+    "slot.day",
+    "slot.drafts",
+    "slot.drafts[].body",
+    "slot.drafts[].index",
+    "slot.drafts[].note",
+    "slot.drafts[].reading_seconds",
+    "slot.drafts[].word_count",
+    "slot.optional",
+    "slot.published_at",
+    "slot.skip_note",
+    "slot.skip_reason",
+    "slot.state",
+    "slot.time_label",
+    "slot.variant_count"
+  ],
   "POST /posts/week/{}/skip": [
     "charged",
     "retrains",

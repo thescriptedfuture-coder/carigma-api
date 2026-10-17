@@ -26,9 +26,10 @@ from pydantic import BaseModel, Field
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
+from carigma_api.services import content_writer
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
-from carigma_api.services.ai import UpstreamError
+from carigma_api.services.ai import call_claude_json
 from carigma_api.services.credits import InsufficientCredits
 from carigma_api.services.posts import (
     Draft,
@@ -43,7 +44,11 @@ from carigma_api.services.posts import (
     skip,
 )
 from carigma_api.services.posts_store import SupabasePlanStore
-from carigma_api.services.repository import SupabaseCreditStore, user_client
+from carigma_api.services.repository import (
+    ProfileRepository,
+    SupabaseCreditStore,
+    user_client,
+)
 from carigma_api.services.run_store import SupabaseRunStore
 from carigma_api.services.runs import RunReporter
 
@@ -108,6 +113,16 @@ def _find(plan: WeekPlan, day: str) -> Slot:
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"error": "no_slot", "message": "There is no slot on that day this week."},
     )
+
+
+def _writer(settings: Settings) -> content_writer.Writer:
+    """The drafting call, bound to the real client. A seam, so a test can put a
+    dead or a dishonest model behind the route without touching the network."""
+
+    def call(system: str, user: str, max_tokens: int) -> object:
+        return call_claude_json(system, user, max_tokens, api_key=settings.anthropic_api_key)
+
+    return call
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -263,9 +278,12 @@ async def post_regenerate(
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, Any]:
-    """New drafts for one slot. 3 credits (§21 Q4) — priced low on purpose.
+    """Drafts for one slot — the first ones, or fresh ones. 3 credits (§21 Q4).
 
     Goes through `runs.execute` so a failed or empty generation charges nothing.
+    "Empty" includes a reply whose every draft failed `content_writer.check` —
+    an invented figure or a blank to fill is not a draft, and the user is not
+    charged for the model's mistake.
     """
     token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
     client = user_client(settings, token)
@@ -300,6 +318,47 @@ async def post_regenerate(
             },
         )
 
+    # The second structural refusal: nothing to write FROM. A profile with no
+    # experience, skills or about text would get a stranger's career, and the
+    # rule is that every claim in a draft is one the user made first.
+    try:
+        previous = store.load(user.id, week_start - timedelta(days=7))
+    except Exception:
+        # Last week only sharpens the brief — what was declined, what was used.
+        # Its absence makes the drafts less informed, not wrong.
+        logger.exception("could not read last week's plan for %s", user.id)
+        previous = None
+    try:
+        profile = ProfileRepository(client).load(user.id)
+    except Exception as exc:
+        # Unreadable is not "empty". Writing from an empty profile would be
+        # writing from nothing; refusing costs a retry, and nothing else.
+        logger.exception("could not read the profile for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "profile_unavailable",
+                "message": (
+                    "We couldn't read your profile just now, and drafts are written "
+                    "from it. You weren't charged and nothing ran."
+                ),
+            },
+        ) from exc
+    try:
+        brief = content_writer.brief_for(profile, slot, week=plan, previous=previous)
+    except content_writer.NothingToWriteFrom as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "nothing_to_write_from",
+                "message": (
+                    "Add your experience or skills to your profile first. Drafts are "
+                    "written from what you've told us, and we won't invent a career "
+                    "to fill the page. Nothing was charged."
+                ),
+            },
+        ) from exc
+
     try:
         credits_service.check_affordable(
             credit_store, user.id, action, enforced=settings.credits_enforced
@@ -333,15 +392,30 @@ async def post_regenerate(
         run_store.remember_idempotency(user.id, key, run.id)
 
     def work(reporter: RunReporter) -> dict[str, Any]:
-        reporter.step("draft", "Drafting fresh variants")
-        # Content Intelligence's generator lands with the agent port. Until it
-        # does this raises rather than returning invented copy — an empty or
-        # failed run charges nothing, which is the correct behaviour either way.
-        raise UpstreamError("Content Intelligence is not wired up yet.")
+        reporter.step("draft", f"Writing {content_writer.VARIANTS} drafts for {slot.day}")
+        drafts = content_writer.write(brief, writer=_writer(settings))
+        reporter.step("check", "Checking each against what your profile says")
+        # `{}` is the one shape `runs.execute` will not charge for. Every draft
+        # dropped by the check is the model's failure, not the user's purchase.
+        return {"drafts": drafts} if drafts else {}
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store
     )
+
+    if settled.status is runs_service.RunStatus.EMPTY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "nothing_usable",
+                "message": (
+                    "Every draft came back with something we won't put under your "
+                    "name — a figure your profile doesn't contain, or a blank to fill "
+                    "in — so none were kept. You weren't charged."
+                ),
+            },
+            headers={"X-Error-Code": "nothing_usable"},
+        )
 
     if settled.status is not runs_service.RunStatus.SUCCEEDED:
         raise HTTPException(

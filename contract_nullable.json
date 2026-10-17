@@ -181,6 +181,11 @@
     "slot.skip_reason",
     "streak.paused_because"
   ],
+  "POST /posts/week/{}/regenerate": [
+    "slot.published_at",
+    "slot.skip_note",
+    "slot.skip_reason"
+  ],
   "POST /posts/week/{}/skip": [
     "slot.published_at",
     "slot.skip_note",
