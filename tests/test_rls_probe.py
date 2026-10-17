@@ -55,6 +55,26 @@ SERVICE_ONLY: dict[str, str] = {
     "market_digests": "curated centrally in routes/market.py; users only read published rows",
 }
 
+#: Tables that belong to NOBODY, deliberately.
+#:
+#: `jobs_cache` holds public job postings keyed by role and city. It is shared
+#: ON PURPOSE: one person's search warms it for everyone, and that sharing is
+#: the entire reason the JSearch daily cap can hold — a per-user cache would
+#: multiply the quota draw by the number of users and the cap would protect
+#: nothing.
+#:
+#: So neither existing category fits. It is not owner-scoped (there is nobody
+#: to scope it to) and it is not service-only (the write happens inside a user
+#: action, and this project keeps the service key out of user paths).
+#:
+#: **The claim is proved below, not asserted**: a table listed here must have
+#: no `user_id` column. The moment one appears, it has an owner and belongs in
+#: `WRITES_AS_USER` with a cross-user probe — the same rule as every other
+#: exemption in this repository.
+SHARED_NON_PERSONAL: dict[str, str] = {
+    "jobs_cache": "public postings keyed by role+city; shared so the daily cap can hold",
+}
+
 
 def _module_constants(tree: ast.Module) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -133,15 +153,31 @@ def test_the_sweep_found_the_writes_it_is_about() -> None:
 
 
 def test_every_table_written_in_src_is_probed_or_declared_service_only() -> None:
-    unclassified = WRITTEN - set(probe.WRITES_AS_USER) - set(SERVICE_ONLY)
+    unclassified = (
+        WRITTEN - set(probe.WRITES_AS_USER) - set(SERVICE_ONLY) - set(SHARED_NON_PERSONAL)
+    )
     assert unclassified == set(), (
         f"{sorted(unclassified)} are written by the API but neither probed as the user "
         "(verify_rls_crossuser.WRITES_AS_USER) nor declared service-only here"
     )
 
 
+def test_nothing_shared_has_an_owner() -> None:
+    """The proof behind `SHARED_NON_PERSONAL`.
+
+    A table with a `user_id` HAS an owner, and declaring it ownerless would
+    exempt real per-user rows from every cross-user check in this repository.
+    An exemption needs a proof, not a name.
+    """
+    with_owners = sorted(t for t in SHARED_NON_PERSONAL if "user_id" in columns_of(t))
+    assert with_owners == [], (
+        f"{with_owners} carry a `user_id`, so they have an owner. Move them to "
+        "WRITES_AS_USER with a cross-user probe."
+    )
+
+
 def test_no_entry_describes_a_table_nothing_writes() -> None:
-    stale = (set(probe.WRITES_AS_USER) | set(SERVICE_ONLY)) - WRITTEN
+    stale = (set(probe.WRITES_AS_USER) | set(SERVICE_ONLY) | set(SHARED_NON_PERSONAL)) - WRITTEN
     assert stale == set(), f"listed but never written in src/: {sorted(stale)}"
 
 
