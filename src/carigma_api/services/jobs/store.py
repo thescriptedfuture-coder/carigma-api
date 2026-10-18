@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from carigma_api.services.cv_writer import DESCRIPTION_CHARS
 from carigma_api.services.jobs import scoring
 from carigma_api.services.jobs.models import NormalizedJob
 
@@ -67,6 +68,11 @@ def provider_facts(job: NormalizedJob) -> dict[str, Any]:
         "source": job.source,
         "posted_at": job.posted_at.isoformat() if job.posted_at else None,
         "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+        # Read by the CV Architect, not by `present_job`: a CV tailored to the
+        # posting's own text, as V1's was. It was dropped at the boundary until
+        # S7, so every V2-scanned job could be tailored only to its title and
+        # extracted requirements. Capped at what the tailoring reads.
+        "description": (job.description or "")[:DESCRIPTION_CHARS] or None,
     }
 
 

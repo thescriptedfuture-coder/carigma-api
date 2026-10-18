@@ -184,14 +184,21 @@ def get_slot(
     return {
         "slot": slot.as_dict(),
         "review": [n.as_dict() for n in _review_notes(slot)],
-        # The flow, stated in the payload so no client has to invent the copy —
+        # Why this post is worth the user's ten minutes. Reported from the
+        # first real use: a page with three drafts and no word on what they
+        # are FOR reads as busywork. Stated, not inflated — no reach figures,
+        # no promises about recruiters; only what is true of every profile.
+        "why": (
+            "When someone opens your LinkedIn profile, your recent posts are on it — "
+            "what you know, in your own words. Each draft here is written from your profile."
+        ),
+        # What to do, and WHERE. In the payload so no client invents the copy,
         # and so "we never auto-post" is asserted by the API itself.
-        "flow": [
-            {"step": 1, "label": "Review — edit on paper"},
-            {"step": 2, "label": "Copy — clipboard, LinkedIn opens"},
-            {"step": 3, "label": "Mark published — you say so"},
-            {"step": 4, "label": "Logged — streak + Sunday review"},
-        ],
+        #
+        # This was four terse labels at the bottom of the page — "Copy —
+        # clipboard, LinkedIn opens" among them, while the button beside it
+        # only copied. Each step now says what to press and what happens.
+        "flow": _flow(len(slot.drafts)),
         "disclaimer": (
             "Carigma never posts for you. Mark published is you telling us you "
             "shipped it — the streak counts what you shipped, not what we drafted."
@@ -440,6 +447,46 @@ async def post_regenerate(
         "slot": updated.as_dict(),
         "credits": settled.credits.as_dict() if settled.credits else None,
     }
+
+
+def _flow(drafts: int) -> list[dict[str, Any]]:
+    """The three steps from a draft to a post, with the count taken from the
+    drafts actually there — the check drops some, so "three" is not a given.
+    No "above" or "below": where the drafts sit is the surface's business."""
+    which = (
+        f"{drafts} drafts are ready"
+        if drafts > 1
+        else "Your draft is ready"
+        if drafts == 1
+        else "Write the drafts first"
+    )
+    return [
+        {
+            "step": 1,
+            "label": "Pick a draft and make it yours",
+            "detail": (
+                f"{which} — choose the one that sounds most like you, and edit it on the "
+                "paper. It's your post now."
+            ),
+        },
+        {
+            "step": 2,
+            "label": "Copy it and post it on LinkedIn",
+            "detail": (
+                "Copy & open LinkedIn copies the text and opens LinkedIn in a new tab. "
+                "Start a post there, paste it (Ctrl+V) and post it yourself — Carigma never "
+                "posts for you."
+            ),
+        },
+        {
+            "step": 3,
+            "label": "Come back and mark it published — you say so",
+            "detail": (
+                "That's what your streak and your Sunday review count: what you shipped, "
+                "not what we drafted."
+            ),
+        },
+    ]
 
 
 def _review_notes(slot: Slot) -> list[ReviewNote]:

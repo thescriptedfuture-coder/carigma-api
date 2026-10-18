@@ -556,8 +556,9 @@ def test_only_the_scan_charges_anything() -> None:
 
     tree = ast.parse(inspect.getsource(routes))
 
-    #: The one priced endpoint, and what prices it.
-    PRICED = {"scan"}
+    #: The priced endpoints, and what prices them. `build_apply_kit` joined in
+    #: S7: the CV Architect, 15 credits, V1's price.
+    PRICED = {"scan", "build_apply_kit"}
     MONEY = ("credits", "credit_ledger", "charge_for_result", "apply_delta")
 
     offenders: list[str] = []
@@ -588,8 +589,8 @@ def test_the_priced_list_names_an_endpoint_that_exists() -> None:
     a function that no longer exists while the real one went unchecked."""
     import inspect
 
-    assert hasattr(routes, "scan")
-    assert inspect.iscoroutinefunction(routes.scan)
+    for name in ("scan", "build_apply_kit"):
+        assert inspect.iscoroutinefunction(getattr(routes, name)), name
 
 
 # ── The CV as a file ───────────────────────────────────────────────────────
@@ -1113,3 +1114,168 @@ def test_the_six_hour_wait_is_said_as_a_wait_not_a_utc_clock(scanning, monkeypat
     assert "finished about 2 hours ago" in message
     assert "opens in about 4 hours" in message
     assert "UTC" not in message
+
+
+# ── CV Architect: building a kit ───────────────────────────────────────────
+
+KIT_PROFILE: dict[str, Any] = {
+    "name": "Ravi Kumar",
+    "location": "Delhi NCR",
+    "experience": "Controller General Of Defence Accounts (CGDA) | Senior Auditor. "
+    "Led the PFMS rollout.",
+    "skills": "SQL, Power BI, Python",
+    "certifications": "Google Data Analytics",
+    "cvTemplate": "classic",
+}
+
+
+def _cv_reply(**cv: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "tagline": "Audit-trained analyst",
+        "summary": "Years of reconciling government accounts, now applied to analytics.",
+        "coreSkills": ["SQL", "Power BI"],
+        "experience": [
+            {
+                "title": "Senior Auditor",
+                "company": "CGDA",
+                "duration": "2016 — now",
+                "bullets": ["Led the PFMS rollout"],
+                "keyImpact": "Made reconciliation a report.",
+            }
+        ],
+        "education": [],
+        "certifications": ["Google Data Analytics"],
+        "keyAchievements": ["Led the PFMS rollout"],
+    }
+    body.update(cv)
+    return {"cv": body, "gaps": ["Government ERP"], "outreach": {"bestChannel": "LinkedIn"}}
+
+
+class _KitProfiles:
+    profile: dict[str, Any] = KIT_PROFILE
+    fails = False
+
+    def __init__(self, _client: Any) -> None: ...
+
+    def load(self, _user_id: str) -> dict[str, Any]:
+        if _KitProfiles.fails:
+            raise RuntimeError("profiles is down")
+        return dict(_KitProfiles.profile)
+
+
+@pytest.fixture
+def tailoring(wired, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    client, db = wired
+    credits = _FakeCredits()
+    calls: list[str] = []
+    state: dict[str, Any] = {"reply": _cv_reply(), "dead": False}
+
+    def writer(_system: str, user: str, _max: int) -> Any:
+        calls.append(user)
+        if state["dead"]:
+            from carigma_api.services.ai import UpstreamError
+
+            raise UpstreamError("anthropic is down")
+        return state["reply"]
+
+    _KitProfiles.profile, _KitProfiles.fails = KIT_PROFILE, False
+    monkeypatch.setattr(routes, "SupabaseCreditStore", lambda client: credits)
+    monkeypatch.setattr(routes, "ProfileRepository", _KitProfiles)
+    monkeypatch.setattr(routes, "_cv_writer", lambda settings: writer)
+    return client, db, credits, calls, state
+
+
+def test_a_job_with_no_kit_gets_one_built_saved_and_charged_once(tailoring) -> None:  # type: ignore[no-untyped-def]
+    """Every job a V2 scan found ended at "Nothing in this build creates one"."""
+    client, db, credits, calls, _state = tailoring
+
+    res = client.post("/jobs/1/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["cv"]["name"] == "Ravi Kumar"
+    assert body["cv"]["phone"] == ""
+    assert body["gaps"] == ["Government ERP"]
+    assert body["template"] == "classic"
+    assert body["disclaimer"]
+    assert credits.charged == [("Tailored CV", -15)]
+    # Saved to the job, so opening it again is free.
+    stored = next(r for r in db.rows if r["id"] == 1)
+    assert stored["apply_kit"]["cv"]["summary"] == body["cv"]["summary"]
+    assert stored["kit_created_at"]
+    # Tailored to THIS posting's requirements.
+    assert "Government ERP" in calls[0]
+
+
+def test_a_job_that_already_has_a_kit_is_not_built_or_charged_again(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, _db, credits, calls, _state = tailoring
+
+    res = client.post("/jobs/2/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "kit_exists"
+    assert credits.charged == []
+    assert calls == []
+
+
+def test_a_cv_that_invents_is_not_kept_or_charged(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, db, credits, _calls, state = tailoring
+    state["reply"] = _cv_reply(summary="Grew revenue 300% at every employer.")
+
+    res = client.post("/jobs/1/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "nothing_usable"
+    assert "weren't charged" in res.json()["detail"]["message"]
+    assert credits.charged == []
+    assert next(r for r in db.rows if r["id"] == 1)["apply_kit"] is None
+
+
+def test_a_dead_model_charges_nothing_and_saves_nothing(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, db, credits, _calls, state = tailoring
+    state["dead"] = True
+
+    res = client.post("/jobs/1/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "upstream_unavailable"
+    assert credits.charged == []
+    assert next(r for r in db.rows if r["id"] == 1)["apply_kit"] is None
+
+
+def test_no_experience_is_refused_before_credits_or_the_model(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, _db, credits, calls, _state = tailoring
+    _KitProfiles.profile = {"name": "New User", "skills": "SQL"}
+
+    res = client.post("/jobs/1/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"] == "nothing_to_tailor_from"
+    assert credits.charged == []
+    assert calls == []
+
+
+def test_an_unreadable_profile_is_not_an_empty_one_for_a_cv_either(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, _db, credits, calls, _state = tailoring
+    _KitProfiles.fails = True
+
+    res = client.post("/jobs/1/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "profile_unavailable"
+    assert credits.charged == []
+    assert calls == []
+
+
+def test_another_users_job_cannot_be_tailored(tailoring) -> None:  # type: ignore[no-untyped-def]
+    client, _db, credits, calls, _state = tailoring
+
+    res = client.post("/jobs/999/apply-kit", headers=auth(make_token()))
+
+    assert res.status_code == 404
+    assert credits.charged == []
+    assert calls == []
+
+
+def test_building_a_kit_needs_a_verified_token(client: TestClient) -> None:
+    assert client.post("/jobs/1/apply-kit").status_code == 401

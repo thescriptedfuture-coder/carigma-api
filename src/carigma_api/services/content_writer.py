@@ -48,6 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from carigma_api.services import grounding as rules
 from carigma_api.services.posts import Slot, WeekPlan
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,7 @@ def brief_for(
         avoid_topics=_text(profile.get("contentAvoid")),
         used_hooks=tuple(dict.fromkeys(h for h in used if h)),
         feedback=tuple(feedback),
-        known_figures=frozenset(_figures(corpus)),
+        known_figures=frozenset(rules.figures(corpus)),
     )
 
 
@@ -238,35 +239,6 @@ def prompt(brief: Brief) -> tuple[str, str]:
 
 # ── Checking what came back ────────────────────────────────────────────────
 
-#: A blank someone would have to fill: `[Company]`, `<role>`, `{name}`, `XX%`.
-_BLANK = re.compile(r"\[[^\]\n]{1,40}\]|<[^>\n]{1,40}>|\{[^}\n]{1,40}\}|\bX{2,}\b", re.I)
-
-#: The figures that get invented: percentages, rupee and crore/lakh amounts,
-#: multipliers. Plain counts ("five years") are left alone — they are usually
-#: read straight off the experience, and flagging them would drop honest posts.
-_FIGURE = re.compile(
-    # A word boundary before rs/inr, or "five years 2019" reads as a rupee amount.
-    r"(?:₹|\brs\.?|\binr)\s?\d[\d,.]*\s*(?:crore|cr|lakh|lac|k|mn|million|bn|billion)?"
-    r"|\d[\d,.]*\s?%"
-    r"|\d[\d,.]*\s?(?:crore|cr|lakh|lac)\b"
-    r"|\b\d+(?:\.\d+)?x\b",
-    re.I,
-)
-
-
-def _figures(text: str) -> list[str]:
-    return [_normalise_figure(m.group(0)) for m in _FIGURE.finditer(text)]
-
-
-def _normalise_figure(raw: str) -> str:
-    """One spelling per figure, so "₹2 crore" in a profile matches "Rs 2 Cr"
-    in a draft. A check that a respelling defeats would drop honest posts."""
-    text = re.sub(r"[\s,]", "", raw.lower())
-    # The amount and its unit are the claim; "₹", "Rs" and none at all are one.
-    text = re.sub(r"^(?:₹|rs\.?|inr)", "", text)
-    text = re.sub(r"(?:crore|cr)$", "cr", text)
-    return re.sub(r"(?:lakh|lac)$", "lakh", text)
-
 
 @dataclass(frozen=True)
 class Checked:
@@ -308,12 +280,11 @@ def check(raw: Any, brief: Brief) -> tuple[list[Checked], list[str]]:
         if words > MAX_WORDS:
             dropped.append(f"too long ({words} words)")
             continue
-        if blank := _BLANK.search(body):
-            dropped.append(f"left a blank to fill: {blank.group(0)}")
+        if blank := rules.blank_in(body):
+            dropped.append(f"left a blank to fill: {blank}")
             continue
-        invented = [f for f in _figures(body) if f not in brief.known_figures]
-        if invented:
-            dropped.append(f"cites figures the profile does not contain: {', '.join(invented)}")
+        if made_up := rules.invented(body, brief.known_figures):
+            dropped.append(f"cites figures the profile does not contain: {', '.join(made_up)}")
             continue
         key = re.sub(r"\W+", " ", body.lower()).strip()
         if key in seen:

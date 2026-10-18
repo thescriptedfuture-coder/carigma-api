@@ -229,6 +229,8 @@ def test_the_row_carries_only_keys_the_presenter_reads() -> None:
         "source",
         "posted_at",
         "expires_at",
+        # Not rendered: read by the CV Architect, which tailors to it.
+        "description",
     }
     assert details["apply_options"] == [
         {"publisher": "LinkedIn", "url": "https://li/1", "is_direct": False}
