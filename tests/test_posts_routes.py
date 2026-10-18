@@ -76,6 +76,19 @@ class FakePlanStore:
     def save_slot(self, user_id: str, week_start: date, slot: Slot) -> None:
         self.slot_writes += 1
         row = slot_to_row(user_id, week_start, slot)
+        # `published_at` is `timestamptz`. Postgres refuses anything that is
+        # not a moment — and this fake accepted "13:05" for as long as the
+        # route sent it, which is how every "Mark published" in V2 failed in
+        # production with every test here green. A fake that cannot refuse
+        # what the database refuses tests a database that does not exist.
+        if row["published_at"] is not None:
+            try:
+                datetime.fromisoformat(str(row["published_at"]))
+            except ValueError as exc:
+                raise RuntimeError(
+                    "invalid input syntax for type timestamp with time zone: "
+                    f"{row['published_at']!r} (22007)"
+                ) from exc
         self.slot_rows[(user_id, week_start.isoformat(), slot.day)] = row
 
     def save_week(self, user_id: str, plan: WeekPlan) -> None:
@@ -279,23 +292,31 @@ def test_a_slot_with_no_draft_claims_no_checks(client: TestClient) -> None:
 def test_marking_published_is_free_and_advances_the_streak(client: TestClient) -> None:
     seed_with(
         Slot("MON", monday(), state=SlotState.DRAFT_READY),
-        Slot("THU", monday() + timedelta(days=3), state=SlotState.PUBLISHED, published_at="09:04"),
+        Slot(
+            "THU",
+            monday() + timedelta(days=3),
+            state=SlotState.PUBLISHED,
+            published_at="2026-08-06T09:04:00+05:30",
+        ),
         streak=6,
     )
     res = client.post(
-        "/posts/week/MON/mark-published", json={"at": "09:02"}, headers=auth(make_token())
+        "/posts/week/MON/mark-published",
+        json={"at": "2026-08-03T09:02:00+05:30"},
+        headers=auth(make_token()),
     )
 
     assert res.status_code == 200
     body = res.json()
     assert body["charged"] == 0, "telling us you did the work is not a purchase"
     assert body["slot"]["state"] == "published"
-    assert body["slot"]["published_at"] == "09:02"
+    # This asserted "09:02" — the bug, written down as the specification.
+    assert body["slot"]["published_at"] == "2026-08-03T09:02:00+05:30"
     assert body["streak"]["weeks"] == 7
 
 
 def test_marking_published_twice_conflicts(client: TestClient) -> None:
-    seed_with(mark_published(Slot("MON", monday()), at="09:02"))
+    seed_with(mark_published(Slot("MON", monday()), at="2026-08-03T09:02:00+05:30"))
     res = client.post("/posts/week/MON/mark-published", json={}, headers=auth(make_token()))
 
     assert res.status_code == 409
@@ -314,7 +335,10 @@ def test_the_change_persists_across_requests(client: TestClient) -> None:
 def test_one_users_week_is_invisible_to_another(client: TestClient) -> None:
     STORE.save_week(
         "other-user-id",
-        WeekPlan(week_start=monday(), slots=(mark_published(Slot("MON", monday()), at="09:02"),)),
+        WeekPlan(
+            week_start=monday(),
+            slots=(mark_published(Slot("MON", monday()), at="2026-08-03T09:02:00+05:30"),),
+        ),
     )
     body = client.get("/posts/week", headers=auth(make_token())).json()
     assert all(s["state"] != "published" for s in body["slots"])
@@ -604,7 +628,9 @@ def test_regenerating_a_published_slot_is_refused_before_any_work(
     drafting,  # type: ignore[no-untyped-def]
 ) -> None:
     credits, writer = drafting
-    seed_with(mark_published(Slot("THU", monday() + timedelta(days=3)), at="09:04"))
+    seed_with(
+        mark_published(Slot("THU", monday() + timedelta(days=3)), at="2026-08-06T09:04:00+05:30")
+    )
     res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
 
     assert res.status_code == 409
@@ -615,3 +641,64 @@ def test_regenerating_a_published_slot_is_refused_before_any_work(
 
 def test_regeneration_requires_a_verified_token(client: TestClient) -> None:
     assert client.post("/posts/week/THU/regenerate").status_code == 401
+
+
+# ── Marking published: the write Postgres refused ─────────────────────────
+
+
+def test_marking_published_stores_a_moment_the_column_can_hold(client: TestClient) -> None:
+    """Every "Mark published" in V2 failed: "13:05" into a timestamptz."""
+    seed_with(
+        Slot(
+            "THU",
+            monday() + timedelta(days=3),
+            state=SlotState.DRAFT_READY,
+            drafts=(Draft(index=1, body="A post."),),
+        )
+    )
+
+    res = client.post("/posts/week/THU/mark-published", json={}, headers=auth(make_token()))
+
+    assert res.status_code == 200
+    stamped = res.json()["slot"]["published_at"]
+    moment = datetime.fromisoformat(stamped)
+    assert moment.tzinfo is not None, "a moment without a zone is a guess about where"
+    assert abs((datetime.now(UTC) - moment).total_seconds()) < 60
+    stored = STORE.load(USER_ID, monday())
+    assert stored is not None
+    assert next(s for s in stored.slots if s.day == "THU").state is SlotState.PUBLISHED
+
+
+def test_a_time_the_user_gives_is_kept_and_one_we_cannot_read_is_refused(
+    client: TestClient,
+) -> None:
+    seed_week()
+    ok = client.post(
+        "/posts/week/THU/mark-published",
+        json={"at": "2026-10-18T09:30:00+05:30"},
+        headers=auth(make_token()),
+    )
+    assert ok.status_code == 200
+    assert ok.json()["slot"]["published_at"] == "2026-10-18T09:30:00+05:30"
+
+    seed_week()
+    bad = client.post(
+        "/posts/week/THU/mark-published", json={"at": "13:05"}, headers=auth(make_token())
+    )
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["error"] == "bad_time"
+
+
+def test_a_refused_write_is_said_not_reported_as_a_crash(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_week()
+
+    def refuse(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(STORE, "save_slot", refuse)
+    res = client.post("/posts/week/THU/mark-published", json={}, headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "not_saved"
