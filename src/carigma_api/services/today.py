@@ -49,6 +49,8 @@ from carigma_api.services.jobs.feed import DEFAULT_STATUSES, is_current
 from carigma_api.services.ladder import Signals
 from carigma_api.services.posts import SlotState
 from carigma_api.services.posts_store import SupabasePlanStore
+from carigma_api.services.schedule import schedule
+from carigma_api.services.weekly_store import SupabaseContractStore
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +194,15 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
     plan = None
     plan_read = True
     try:
-        plan = SupabasePlanStore(client).load(user_id, _monday_of(today))
+        # The week as SIGNED (S8), not the stored slots alone: Today's strip
+        # showed Monday and Thursday for a week whose contract carried only
+        # Thursday, because it read what Posts read, and Posts read a default.
+        week_start = _monday_of(today)
+        plan = schedule(
+            week_start,
+            contract=SupabaseContractStore(client).load(user_id, week_start),
+            stored=SupabasePlanStore(client).load(user_id, week_start),
+        )
     except Exception:
         logger.exception("could not read the week plan for %s", user_id)
         plan_read = False

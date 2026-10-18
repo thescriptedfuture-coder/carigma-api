@@ -45,7 +45,15 @@ def _wired(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _DB = FakeDB()
     store = SupabaseContractStore(_DB)
     monkeypatch.setattr(weekly_routes, "_deps", lambda request, settings: store)
+    # A proposal is seeded from the profile (S8). Five a week, LinkedIn only —
+    # the cadence Ravi chose at onboarding.
+    PROFILE.clear()
+    PROFILE.update({"cadence": 5, "platforms": ["linkedin"]})
+    monkeypatch.setattr(weekly_routes, "_profile", lambda request, settings, user_id: dict(PROFILE))
     yield
+
+
+PROFILE: dict[str, object] = {}
 
 
 def this_monday() -> date:
@@ -671,3 +679,107 @@ def test_reading_a_signed_week_carries_the_same_copy_the_signature_returned(
 
     assert body["confirmation"]["message"]
     assert body["confirmation"]["detail"]
+
+
+# ── S8: cadence seeds the proposal ─────────────────────────────────────────
+
+
+def _content_days(body: dict) -> list[str]:  # type: ignore[type-arg]
+    return [i["day"] for i in body["contract"]["items"] if i["kind"] == "content"]
+
+
+def _still_ahead(days: tuple[str, ...]) -> list[str]:
+    index = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+    today = datetime.now(UTC).date().weekday()
+    return [d for d in days if index[d] >= today]
+
+
+def test_planning_proposes_the_users_own_posting_days(client: TestClient) -> None:
+    """ "Plan this week" called re-entry — the lighter week for someone coming
+    back — so it proposed one post on Thursday whatever cadence they chose."""
+    body = client.post("/weekly/contract/plan", headers=auth(make_token())).json()
+
+    assert body["contract"]["state"] == "proposed"
+    assert body["contract"]["user_approved"] is False
+    assert _content_days(body) == _still_ahead(("MON", "TUE", "WED", "THU", "FRI"))
+
+
+@pytest.mark.parametrize(
+    ("cadence", "days"),
+    [(2, ("TUE", "THU")), (3, ("MON", "WED", "FRI")), (None, ("MON", "WED", "FRI"))],
+)
+def test_each_cadence_proposes_v1s_days(
+    client: TestClient, cadence: object, days: tuple[str, ...]
+) -> None:
+    PROFILE["cadence"] = cadence
+
+    body = client.post("/weekly/contract/plan", headers=auth(make_token())).json()
+
+    assert _content_days(body) == _still_ahead(days)
+
+
+def test_the_naukri_refresh_is_offered_only_to_someone_on_naukri(client: TestClient) -> None:
+    """It was offered to everyone, at 10 credits."""
+    from carigma_api.routes.weekly import _candidates
+
+    monday = date(2026, 10, 19)
+    linkedin_only = _candidates({"cadence": 3, "platforms": ["linkedin"]}, today=monday)
+    both = _candidates({"cadence": 3, "platforms": ["linkedin", "naukri"]}, today=monday)
+
+    assert "naukri" not in {i.kind for i in linkedin_only}
+    assert "naukri" in {i.kind for i in both}
+
+
+def test_a_plan_made_midweek_offers_no_day_that_has_passed() -> None:
+    from carigma_api.routes.weekly import _candidates
+
+    thursday = date(2026, 10, 22)
+    items = _candidates({"cadence": 5, "platforms": ["linkedin"]}, today=thursday)
+
+    assert [i.day for i in items if i.kind == "content"] == ["THU", "FRI"]
+    # The review is the ritual, and Sunday is still ahead.
+    assert items[-1].kind == "review"
+
+
+def test_a_plan_on_sunday_says_no_posting_days_are_left() -> None:
+    from carigma_api.routes.weekly import _candidates
+
+    sunday = date(2026, 10, 25)
+    items = _candidates({"cadence": 5, "platforms": ["linkedin"]}, today=sunday)
+
+    assert [i.kind for i in items] == ["review"]
+
+
+def test_planning_does_not_clobber_a_week_that_has_a_plan(client: TestClient) -> None:
+    seed_week()
+    res = client.post("/weekly/contract/plan", headers=auth(make_token()))
+
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "week_exists"
+
+
+def test_an_unreadable_profile_proposes_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proposal on a guessed cadence would offer days the user never chose."""
+
+    def down(*_a: object) -> dict[str, object]:
+        raise weekly_routes._unavailable("your profile")
+
+    monkeypatch.setattr(weekly_routes, "_profile", down)
+    res = client.post("/weekly/contract/plan", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert not _DB.tables.get("weekly_review"), "a proposal was saved from a guessed profile"
+
+
+def test_a_planned_week_can_then_be_signed(client: TestClient) -> None:
+    client.post("/weekly/contract/plan", headers=auth(make_token()))
+    res = client.post(
+        "/weekly/contract/approve",
+        json={"week_start": this_monday().isoformat()},
+        headers=auth(make_token()),
+    )
+
+    assert res.status_code == 200
+    assert res.json()["contract"]["user_approved"] is True

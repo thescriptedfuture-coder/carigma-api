@@ -182,6 +182,12 @@ class WeekPlan:
     streak_weeks: int = 0
     #: Set when the user has deliberately paused (cadence 0).
     paused_until: date | None = None
+    #: Whether this week is paused, when the builder KNOWS. `None` keeps the
+    #: stored-week reading — cadence 0 means paused. The contract schedule
+    #: (`services.schedule`) always says, because a week signed with no post
+    #: in it also has cadence 0 and is not a pause: it would have read
+    #: "Paused at 6 weeks · cadence set to 0" for a choice the user made.
+    paused: bool | None = None
 
     @property
     def shipped(self) -> int:
@@ -193,6 +199,8 @@ class WeekPlan:
 
     @property
     def is_paused(self) -> bool:
+        if self.paused is not None:
+            return self.paused or self.paused_until is not None
         return self.cadence_per_week == 0 or self.paused_until is not None
 
     def as_dict(self) -> dict[str, Any]:
@@ -201,7 +209,11 @@ class WeekPlan:
             "slots": [s.as_dict() for s in self.slots],
             "cadence_per_week": self.cadence_per_week,
             "cadence_days": list(self.cadence_days),
-            "cadence_label": _cadence_label(self.cadence_per_week, self.cadence_days),
+            "cadence_label": (
+                "Paused"
+                if self.is_paused
+                else _cadence_label(self.cadence_per_week, self.cadence_days)
+            ),
             "shipped": self.shipped,
             "committed": self.committed,
             "streak": streak_state(self).as_dict(),
@@ -211,7 +223,7 @@ class WeekPlan:
 
 def _cadence_label(per_week: int, days: tuple[str, ...]) -> str:
     if per_week == 0:
-        return "Paused"
+        return "No posts this week"
     return f"{per_week}/wk · {' + '.join(d.title() for d in days)}"
 
 

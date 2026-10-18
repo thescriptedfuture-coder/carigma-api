@@ -32,6 +32,7 @@ whatever time the review was actually assembled. It now comes from the row.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
@@ -41,7 +42,7 @@ from pydantic import BaseModel, Field
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.services.constants import CREDIT_COSTS
-from carigma_api.services.repository import user_client
+from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.review import (
     Direction,
     ReviewFact,
@@ -49,6 +50,7 @@ from carigma_api.services.review import (
     re_entry_contract,
     standing_by_card,
 )
+from carigma_api.services.schedule import DAY_INDEX, content_days
 from carigma_api.services.weekly import (
     Cadence,
     ContractItem,
@@ -453,20 +455,17 @@ def propose_re_entry(
     """ "Pick up the thread" — a lighter week, still needing a signature."""
     store = _deps(request, settings)
     cadence = body.cadence if body else Cadence.WEEKLY
-    week_start = _monday_of(datetime.now(UTC).date())
-    if store.load(user.id, week_start) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "week_exists",
-                "message": "This week already has a plan.",
-            },
-        )
+    today = datetime.now(UTC).date()
+    week_start = _monday_of(today)
+    _refuse_if_planned(store, user.id, week_start)
 
-    proposed = re_entry_contract(
-        week_start=week_start,
-        candidates=_default_candidates(),
-        cadence=cadence,
+    proposed = replace(
+        re_entry_contract(
+            week_start=week_start,
+            candidates=_candidates(_profile(request, settings, user.id), today=today),
+            cadence=cadence,
+        ),
+        proposed_at=datetime.now(UTC),
     )
     store.save(user.id, proposed)
     return {
@@ -475,26 +474,98 @@ def propose_re_entry(
     }
 
 
-def _default_candidates() -> tuple[ContractItem, ...]:
-    """The menu a re-entry week is trimmed from.
+@router.post("/contract/plan")
+def propose_plan(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Propose this week from the user's own cadence. Still needs a signature.
 
-    Static for now: the generator that builds a personalised week is Content
-    Intelligence's job and arrives with the Posts surface. These are real
-    activities the product can actually deliver — no placeholder rows.
+    S8: "cadence becomes the default proposal; the signed week is the
+    schedule." "Plan this week" used to call re-entry — the LIGHTER week for
+    someone coming back after a gap — so planning on purpose always proposed
+    one post on Thursday, whatever cadence the user chose at onboarding. This
+    proposes their days. Re-entry stays the smaller promise it was built to be.
     """
-    return (
-        # Priced from the ONE cost table, not a literal. It read 12 — the price
-        # of `run_content`, a whole week's generation — on a row that offers a
-        # single slot, while the Posts surface quoted 3 for the same thing. A
-        # signature is a promise about a number, so two numbers is the defect.
-        #
-        # A first draft and a regeneration are the same work on the same slot,
-        # so they are one action at one price. A second entry meaning "but the
-        # first one" would be a second number that could drift.
-        ContractItem("content", "THU", "One post slot", 10, CREDIT_COSTS["regenerate_slot"]),
-        ContractItem("naukri", "SAT", "Freshness refresh only", 3, 10),
-        ContractItem("review", "SUN", "Review, 18:00", 10, 0),
+    store = _deps(request, settings)
+    today = datetime.now(UTC).date()
+    week_start = _monday_of(today)
+    _refuse_if_planned(store, user.id, week_start)
+
+    profile = _profile(request, settings, user.id)
+    proposed = WeeklyContract(
+        week_start=week_start,
+        items=_candidates(profile, today=today),
+        cadence=Cadence.WEEKLY,
+        # When it was proposed is a fact, and nothing recorded it.
+        proposed_at=datetime.now(UTC),
     )
+    store.save(user.id, proposed)
+    posts = sum(1 for i in proposed.items if i.kind == "content")
+    return {
+        "contract": proposed.as_dict(),
+        "note": (
+            f"{posts} post{'s' if posts != 1 else ''} on the days you post, for what is left "
+            "of this week. Nothing is scheduled until you sign it."
+            if posts
+            else "No posting days are left this week. Nothing is scheduled until you sign it."
+        ),
+    }
+
+
+def _refuse_if_planned(store: ContractStore, user_id: str, week_start: date) -> None:
+    if store.load(user_id, week_start) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "week_exists",
+                "message": "This week already has a plan.",
+            },
+        )
+
+
+def _profile(request: Request, settings: Settings, user_id: str) -> dict[str, Any]:
+    """The profile a proposal is seeded from. Unreadable is refused, not
+    guessed: a proposal built on a default cadence would offer days the user
+    never chose, under their name."""
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    try:
+        return ProfileRepository(user_client(settings, token)).load(user_id)
+    except Exception as exc:
+        logger.exception("could not read the profile for %s", user_id)
+        raise _unavailable("your profile") from exc
+
+
+def _candidates(profile: dict[str, Any], *, today: date) -> tuple[ContractItem, ...]:
+    """The week a proposal offers, seeded from the user's own settings.
+
+    - **A post on each of their posting days** — `profile.cadence` as days,
+      V1's mapping (`schedule.content_days`). It was one post on Thursday for
+      everyone: a static menu written before Content Intelligence existed.
+    - **The Naukri refresh only for someone on Naukri.** It was offered to
+      everyone, at 10 credits, including people who never connected it.
+    - **The Sunday review**, always: it is the ritual.
+
+    Only days still ahead: a plan made on Thursday does not propose Monday's
+    post, because a promise about a day that has passed is not one anybody
+    can keep.
+    """
+    platforms = profile.get("platforms")
+    on_naukri = isinstance(platforms, list) and "naukri" in platforms
+    items = [
+        # Priced from the ONE cost table, not a literal. It once read 12 — the
+        # price of a whole week's generation — on a row that offers a single
+        # slot, while the Posts surface quoted 3 for the same thing. A first
+        # draft and a redraft are the same work on the same slot: one action,
+        # one price.
+        ContractItem("content", day, "One post slot", 10, CREDIT_COSTS["regenerate_slot"])
+        for day in content_days(profile.get("cadence"))
+    ]
+    if on_naukri:
+        items.append(ContractItem("naukri", "SAT", "Freshness refresh only", 3, 10))
+    items.append(ContractItem("review", "SUN", "Review, 18:00", 10, 0))
+    return tuple(i for i in items if DAY_INDEX[i.day] >= today.weekday())
 
 
 __all__ = ["router", "earned_review", "render_review", "Direction", "ReviewFact"]

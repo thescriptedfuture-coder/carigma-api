@@ -87,6 +87,7 @@
     "score"
   ],
   "GET /posts/week": [
+    "empty.action",
     "paused_until",
     "slots[].published_at",
     "slots[].skip_note",
@@ -188,6 +189,7 @@
     "slot.skip_reason"
   ],
   "POST /posts/week/{}/skip": [
+    "slot.drafts[].note",
     "slot.published_at",
     "slot.skip_note",
     "slot.skip_reason",
@@ -219,9 +221,11 @@
   "POST /weekly/contract/approve": [
     "contract.proposed_at"
   ],
+  "POST /weekly/contract/plan": [
+    "contract.decided_at"
+  ],
   "POST /weekly/contract/re-entry": [
-    "contract.decided_at",
-    "contract.proposed_at"
+    "contract.decided_at"
   ],
   "POST /weekly/contract/release": [
     "contract.decided_at"
