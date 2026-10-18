@@ -63,26 +63,30 @@ def test_only_a_confirmed_publish_counts() -> None:
 
     assert pending.counts_toward_streak is False
     assert drafted.counts_toward_streak is False
-    assert mark_published(drafted, at="09:02").counts_toward_streak is True
+    assert mark_published(drafted, at="2026-08-03T09:02:00+05:30").counts_toward_streak is True
 
 
 def test_marking_published_records_when_they_said_so() -> None:
-    slot = mark_published(Slot("MON", MONDAY, state=SlotState.DRAFT_READY), at="09:02")
+    slot = mark_published(
+        Slot("MON", MONDAY, state=SlotState.DRAFT_READY), at="2026-08-03T09:02:00+05:30"
+    )
 
     assert slot.state is SlotState.PUBLISHED
-    assert slot.published_at == "09:02"
+    # A moment, not a clock time: "09:02" pinned the bug as the specification,
+    # and Postgres refused it into a timestamptz on every real publish.
+    assert slot.published_at == "2026-08-03T09:02:00+05:30"
 
 
 def test_a_published_slot_cannot_be_published_twice() -> None:
-    slot = mark_published(Slot("MON", MONDAY), at="09:02")
+    slot = mark_published(Slot("MON", MONDAY), at="2026-08-03T09:02:00+05:30")
     with pytest.raises(SlotTransitionError, match="already marked published"):
-        mark_published(slot, at="10:00")
+        mark_published(slot, at="2026-08-03T10:00:00+05:30")
 
 
 def test_a_skipped_slot_cannot_then_be_marked_published() -> None:
     skipped = skip(Slot("MON", MONDAY), reason=SkipReason.NO_TIME)
     with pytest.raises(SlotTransitionError, match="was skipped"):
-        mark_published(skipped, at="09:02")
+        mark_published(skipped, at="2026-08-03T09:02:00+05:30")
 
 
 # ── Skipping ───────────────────────────────────────────────────────────────
@@ -120,7 +124,7 @@ def test_a_skip_note_is_the_users_own_words_and_is_kept_verbatim() -> None:
 
 
 def test_a_published_slot_cannot_be_skipped() -> None:
-    published = mark_published(Slot("MON", MONDAY), at="09:02")
+    published = mark_published(Slot("MON", MONDAY), at="2026-08-03T09:02:00+05:30")
     with pytest.raises(SlotTransitionError, match="already published"):
         skip(published, reason=SkipReason.NO_TIME)
 
@@ -131,8 +135,8 @@ def test_a_published_slot_cannot_be_skipped() -> None:
 def test_shipping_every_committed_slot_advances_the_streak() -> None:
     plan = with_slots(
         week(streak_weeks=6),
-        mark_published(Slot("MON", MONDAY), at="09:02"),
-        mark_published(Slot("THU", date(2026, 8, 6)), at="09:04"),
+        mark_published(Slot("MON", MONDAY), at="2026-08-03T09:02:00+05:30"),
+        mark_published(Slot("THU", date(2026, 8, 6)), at="2026-08-06T09:04:00+05:30"),
         Slot("SAT", date(2026, 8, 8), optional=True),
     )
     assert streak_state(plan).weeks == 7
@@ -143,8 +147,8 @@ def test_an_optional_slot_left_alone_does_not_hold_the_streak_back() -> None:
     """It was never promised, so not doing it cannot cost anything."""
     plan = with_slots(
         week(streak_weeks=6),
-        mark_published(Slot("MON", MONDAY), at="09:02"),
-        mark_published(Slot("THU", date(2026, 8, 6)), at="09:04"),
+        mark_published(Slot("MON", MONDAY), at="2026-08-03T09:02:00+05:30"),
+        mark_published(Slot("THU", date(2026, 8, 6)), at="2026-08-06T09:04:00+05:30"),
         skip(Slot("SAT", date(2026, 8, 8), optional=True)),
     )
     assert streak_state(plan).weeks == 7
@@ -188,7 +192,7 @@ def test_cadence_zero_pauses_rather_than_breaks() -> None:
 def test_a_partial_week_holds_the_streak_rather_than_advancing_it() -> None:
     plan = with_slots(
         week(streak_weeks=6),
-        mark_published(Slot("MON", MONDAY), at="09:02"),
+        mark_published(Slot("MON", MONDAY), at="2026-08-03T09:02:00+05:30"),
         Slot("THU", date(2026, 8, 6), state=SlotState.DRAFT_READY),
     )
     assert streak_state(plan).weeks == 6

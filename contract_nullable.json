@@ -177,6 +177,7 @@
     "balance_after"
   ],
   "POST /posts/week/{}/mark-published": [
+    "slot.drafts[].note",
     "slot.skip_note",
     "slot.skip_reason",
     "streak.paused_because"

@@ -63,9 +63,40 @@ class SkipRequest(BaseModel):
 
 
 class MarkPublishedRequest(BaseModel):
-    #: What the user says they did. Optional — if they don't say, we stamp now,
-    #: and either way it is THEIR claim, not our observation.
+    #: When the user says they posted it, as an ISO timestamp. Optional — if
+    #: they don't say, we stamp now, and either way it is THEIR claim, not our
+    #: observation.
     at: str | None = None
+
+
+def _published_moment(claimed: str | None) -> str:
+    """The moment to record, as a full ISO timestamp.
+
+    ## Every "Mark published" in V2 had failed
+
+    This stamped `strftime("%H:%M")` — "13:05" — into
+    `content_loop.published_at`, which is `timestamptz`. Postgres refused every
+    one ("invalid input syntax for type timestamp with time zone"), the route
+    answered 500, and the editor said "We couldn't log that just now". Measured
+    on 2026-10-18: zero published rows, ever. The streak — the thing this verb
+    exists to feed — could not move.
+
+    A clock time is not a moment: it has no day. The column wanted one, and a
+    time alone was only ever going to be a display string.
+    """
+    if claimed is None:
+        return datetime.now(UTC).isoformat()
+    try:
+        moment = datetime.fromisoformat(claimed.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "bad_time",
+                "message": "We couldn't read that time. Leave it out and we'll use now.",
+            },
+        ) from exc
+    return (moment if moment.tzinfo else moment.replace(tzinfo=UTC)).isoformat()
 
 
 # ── Storage ────────────────────────────────────────────────────────────────
@@ -224,18 +255,33 @@ def post_mark_published(
     slot = _find(plan, day)
 
     try:
-        updated = mark_published(slot, at=body.at or datetime.now(UTC).strftime("%H:%M"))
+        updated = mark_published(slot, at=_published_moment(body.at))
     except SlotTransitionError as exc:
         logger.info("slot transition refused: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"error": "already_settled", "message": "That slot is already settled."},
+            detail={
+                "error": "already_settled",
+                "message": "That one is already marked published or skipped.",
+            },
         ) from exc
 
     # One row. `_replace_slot` still rebuilds the in-memory plan for the
     # response, but only the edited day is written — see the module note.
     plan = _replace_slot(plan, slot.day, updated)
-    store.save_slot(user.id, week_start, updated)
+    try:
+        store.save_slot(user.id, week_start, updated)
+    except Exception as exc:
+        # A refused write is not a published post. Said as what it is, rather
+        # than a bare 500 the surface can only call "something went wrong".
+        logger.exception("could not record %s as published for %s", slot.day, user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "not_saved",
+                "message": "We couldn't record that just now. Nothing changed — try again.",
+            },
+        ) from exc
     return {"slot": updated.as_dict(), "streak": plan.as_dict()["streak"], "charged": 0}
 
 
