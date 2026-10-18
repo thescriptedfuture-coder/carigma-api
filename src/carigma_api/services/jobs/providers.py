@@ -111,6 +111,14 @@ class JSearchProvider:
             publisher=raw.get("job_publisher"),
             job_type=raw.get("job_employment_type"),
             posted_at=_parse_ts(raw.get("job_posted_at_timestamp")),
+            # Read when present. NOT yet seen in a live search-v2 response —
+            # no recorded payload in this repo carries it — so the share of
+            # postings that have one is unmeasured until the next real scan.
+            # Absent is the expected case and `feed.is_current` handles it.
+            expires_at=_parse_ts(
+                raw.get("job_offer_expiration_timestamp")
+                or raw.get("job_offer_expiration_datetime_utc")
+            ),
             description=raw.get("job_description"),
         )
 

@@ -115,6 +115,9 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     "thread_decisions": {"item_key": SALTED, "decision": "dismissed"},
     "agent_runs": {"id": NEW_UUID, "agent": "rls-probe"},
     "referral_codes": {"code": CODE},
+    # V2_018, the JSearch call log. Here from its first day. `adzuna`, not
+    # `jsearch`, so running the probe never adds to today's JSearch count.
+    "jobs_provider_calls": {"source": "adzuna", "query_key": "rls-probe"},
 }
 
 #: Every table the API writes through the USER client, and how — the live half
@@ -160,6 +163,9 @@ WRITES_AS_USER: dict[str, tuple[str, Any]] = {
     # a cross-user write is the Naukri class with someone's job search in it.
     "job_applications": ("insert", None),  # routes/tracker.py add/move/remove
     "application_events": ("insert", None),  # the timeline beside a stage move
+    # Every provider call, recorded as the caller BEFORE it is made — the row
+    # the JSearch cap counts. A refusal here stops the call, so this must work.
+    "jobs_provider_calls": ("insert", None),  # quota.RecordedProvider
 }
 
 #: Postgres's code for "new row violates row-level security policy".

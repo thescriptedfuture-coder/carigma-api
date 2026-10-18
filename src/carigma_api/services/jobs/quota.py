@@ -1,34 +1,49 @@
-"""The shared JSearch quota: a cache in front of it, and a hard daily cap.
+"""The shared JSearch quota: a hard daily cap, counted where the call happens.
 
-## Declared, and never built
+## Three versions, and the one lesson under all of them
 
-`config.py` says it plainly:
+`config.py` has said since the beginning that the JSearch quota is "handled by
+the jobs cache + daily cap". It was not, three times over:
 
-    # 3. The JSearch quota is a SHARED resource handled by the jobs cache +
-    #    daily cap, NOT by a per-user limiter. Do not duplicate it here.
+1. **S5** built the count and the cap. Nothing enforced them.
+2. **S6** enforced the cap and never recorded a call, so the count read zero.
+3. **0.063** recorded every call — through the USER's client, into
+   `jobs_cache`, which V2_007 had made service-role only. The database refused
+   every write (42501, swallowed by a writer that "never raises") and showed
+   the user zero rows on every read. Zero rows is not an error, so the count
+   read 0 through three real scans and the cap refused nothing.
 
-`jsearch_daily_cap` was read by exactly one caller — the admin overview, which
-*displays* it — and `jobs_cache_ttl_hours` by nothing at all. So the mechanism
-that was supposed to stop V2 exhausting the quota out from under live V1 users
-existed as two numbers and a comment.
+V1 wrote the lesson into `resumeiq/db.py` in August, and it was ported without
+being read: "An anonymous count under RLS succeeds and returns 0 — no error to
+catch." **A read the database is not letting you make does not fail. It
+returns nothing, and nothing counts as zero.**
 
-That is the orphan class applied to a safety limit, which is the worst place
-for it: a cap nobody enforces reads in every file as though it is enforced.
+## Where the count lives now
+
+`jobs_cache` stays closed. It holds payloads other users are served, and a
+table any signed-in user can write is one any signed-in user can fill with a
+fake posting and a phishing apply link.
+
+So V2 does not touch it. Instead (V2_018):
+
+- every V2 provider call leaves a row in `jobs_provider_calls`, written as the
+  caller, owner-scoped, carrying no payload — nothing in it to poison;
+- the count is `jsearch_calls_today()`, a SECURITY DEFINER function that adds
+  V1's fetches today to V2's calls today and returns one integer.
+
+## What V2 gave up
+
+The shared payload cache. A user's own repeat search is already stopped by the
+six-hour gate, and serving one user's results to another needs a writer the
+database can trust — the server holding the service key, which this project
+keeps out of user requests. At this scale two users rarely search the same
+role and city inside 48 hours. Revisit when they do; the decision is Ravi's,
+because it is a decision about where the service key may go.
 
 ## Cannot count is not counted zero
 
-`fetches_today` returns `int | None`, and `None` REFUSES.
-
-`0` grants permission to call a paid API. If the count cannot be read we do not
-know whether 0 or 25 calls have been made today, and the recoverable direction
-is to skip a scan — a user waits; the alternative spends a shared resource that
-belongs to people already paying for the product.
-
-## The cache is the first line, not an optimisation
-
-A query answered from cache costs no quota at all. That is why the TTL is 48
-hours rather than minutes: job postings are perishable over days, not seconds,
-and V1 chose the same number.
+`calls_today` returns `int | None`, and `None` REFUSES. `0` grants permission
+to call a paid API that belongs to somebody else.
 """
 
 from __future__ import annotations
@@ -38,256 +53,131 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from carigma_api.services.jobs.models import ApplyOption, NormalizedJob
+from carigma_api.services.jobs.adapter import ProviderUnavailable
+from carigma_api.services.jobs.models import NormalizedJob
 
 logger = logging.getLogger(__name__)
 
-CACHE = "jobs_cache"
+#: One row per V2 provider call. Owner-scoped; no payload.
+LEDGER = "jobs_provider_calls"
+
+#: SECURITY DEFINER: V1's fetches today plus V2's calls today, as one integer.
+COUNTER = "jsearch_calls_today"
 
 #: The provider whose quota is shared with live V1 users. Adzuna has its own
-#: free tier and is not what the cap exists to protect.
+#: free tier; its calls are recorded too, but they are not what the cap counts.
 CAPPED_SOURCE = "jsearch"
 
 
 def query_key(*, role: str, city: str, source: str) -> str:
-    """One stable key per (role, city, source).
+    """One stable, readable key per (role, city, source).
 
-    Hashed rather than concatenated because the column is unique and a role
-    title can carry anything — `Business Analyst — ERP & Public Finance / MoD`
-    is a real one. A readable prefix is kept so a human reading the table can
-    tell what it was.
+    Hashed in part because a role title can carry anything — `Business
+    Analyst — ERP & Public Finance / MoD` is a real one. A readable prefix is
+    kept so a person reading the ledger can tell what was searched.
     """
     normalised = f"{source}|{role.strip().lower()}|{city.strip().lower()}"
     digest = hashlib.sha256(normalised.encode()).hexdigest()[:16]
     return f"{source}:{role.strip().lower()[:40]}:{digest}"
 
 
-def fetches_today(
-    db: Any, *, source: str = CAPPED_SOURCE, now: datetime | None = None
-) -> int | None:
-    """How many provider calls today, or `None` when we cannot tell.
+def calls_today(db: Any) -> int | None:
+    """JSearch calls since midnight UTC, V1 and V2 together — or `None`.
 
-    **`None` is not zero.** Zero grants permission to spend a shared quota;
-    not knowing must not.
+    **`None` is not zero.** Anything that is not a plain integer is `None`: a
+    missing function, a refused call, a shape we did not expect. A `bool` is
+    refused explicitly, because in Python `True` is an `int` and would count
+    as one call.
     """
-    moment = now or datetime.now(UTC)
-    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
     try:
-        res = (
-            db.table(CACHE)
-            .select("id")
-            .eq("source", source)
-            .gte("fetched_at", midnight.isoformat())
-            .execute()
-        )
+        res = db.rpc(COUNTER, {}).execute()
     except Exception:
-        logger.exception("could not count today's %s fetches", source)
+        logger.exception("could not count today's %s calls", CAPPED_SOURCE)
         return None
-    rows = res.data if res and isinstance(res.data, list) else None
-    return len(rows) if rows is not None else None
+    data = res.data if res is not None else None
+    if isinstance(data, list) and len(data) == 1:
+        data = data[0]
+    if isinstance(data, bool) or not isinstance(data, int):
+        logger.error("the %s counter returned %r, which is not a count", COUNTER, data)
+        return None
+    return data
 
 
-def refusal(
-    db: Any, *, cap: int, source: str = CAPPED_SOURCE, now: datetime | None = None
-) -> str | None:
+def refusal(db: Any, *, cap: int, now: datetime | None = None) -> str | None:
     """Why this scan must not call the provider, or `None` to go ahead.
 
     A sentence rather than a bool, because the caller has to tell somebody.
     """
-    used = fetches_today(db, source=source, now=now)
+    used = calls_today(db)
     if used is None:
         return (
             "We couldn't check today's search quota, so we didn't spend any of it. "
             "Nothing was charged."
         )
     if used >= cap:
+        # When it resets, said relatively: "midnight UTC" is 05:30 for most of
+        # the people reading this, and the sentence should not need a sum.
+        moment = now or datetime.now(UTC)
+        midnight = (moment + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        hours = max(1, round((midnight - moment).total_seconds() / 3600))
         return (
             f"Today's search quota is used up ({used} of {cap}). "
-            "It resets at midnight UTC. Nothing was charged."
+            f"It resets in about {hours} hour{'s' if hours != 1 else ''}. Nothing was charged."
         )
     return None
 
 
-def cached(
-    db: Any, *, key: str, ttl_hours: int, now: datetime | None = None
-) -> list[dict[str, Any]] | None:
-    """A fresh cached payload, or `None`.
+class CallNotRecorded(ProviderUnavailable):
+    """The ledger refused the row, so the provider was not called.
 
-    `None` covers three different things on purpose — no row, a stale row, and
-    a read that failed — because every one of them means the same to the
-    caller: there is nothing here, go and fetch. The distinction that matters
-    is the one in `fetches_today`, where the two answers differ.
+    A `ProviderUnavailable`, so the gateway treats it like any provider that
+    could not be reached: noted, skipped, never a crash.
     """
-    moment = now or datetime.now(UTC)
-    try:
-        res = db.table(CACHE).select("payload,fetched_at").eq("query_key", key).execute()
-    except Exception:
-        logger.exception("could not read the jobs cache for %s", key)
-        return None
-
-    rows = res.data if res and isinstance(res.data, list) else []
-    if not rows:
-        return None
-
-    row = rows[0]
-    fetched = row.get("fetched_at")
-    try:
-        when = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        logger.error("unparseable fetched_at %r in the jobs cache", fetched)
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    if moment - when > timedelta(hours=ttl_hours):
-        return None
-
-    payload = row.get("payload")
-    return payload if isinstance(payload, list) else None
-
-
-def remember(db: Any, *, key: str, source: str, payload: list[dict[str, Any]]) -> None:
-    """Record what a provider returned, so the next identical query is free.
-
-    Upserts on `query_key`, which is the table's unique key — named explicitly,
-    because an upsert resolves on the PRIMARY key when no target is given and
-    this table's is `id`. That mistake cost a week on `profiles`.
-
-    Never raises: the jobs were fetched and are about to be shown. Failing the
-    scan because the cache write failed would throw away work already paid for.
-    """
-    try:
-        db.table(CACHE).upsert(
-            {
-                "query_key": key,
-                "source": source,
-                "payload": payload,
-                "fetched_at": datetime.now(UTC).isoformat(),
-            },
-            on_conflict="query_key",
-        ).execute()
-    except Exception:
-        logger.exception("could not write the jobs cache for %s", key)
-
-
-# ── Counting at the call, which is the only place that knows ───────────────
-
-
-def to_payload(job: NormalizedJob) -> dict[str, Any]:
-    """A job as the cache stores it. Everything the model carries, nothing more."""
-    return {
-        "source": job.source,
-        "source_id": job.source_id,
-        "title": job.title,
-        "company": job.company,
-        "location": job.location,
-        "apply_url": job.apply_url,
-        "apply_options": [
-            {"publisher": o.publisher, "url": o.url, "is_direct": o.is_direct}
-            for o in job.apply_options
-        ],
-        "salary": job.salary,
-        "posted_at": job.posted_at.isoformat() if job.posted_at else None,
-        "description": job.description,
-        "publisher": job.publisher,
-        "job_type": job.job_type,
-    }
-
-
-def from_payload(raw: dict[str, Any]) -> NormalizedJob | None:
-    """A cached job back as the model. `None` for a row we cannot rebuild —
-    a malformed cache entry is skipped rather than shown half-built."""
-    try:
-        posted = raw.get("posted_at")
-        return NormalizedJob(
-            source=str(raw["source"]),
-            source_id=str(raw["source_id"]),
-            title=str(raw["title"]),
-            company=str(raw["company"]),
-            location=str(raw.get("location") or ""),
-            apply_url=str(raw.get("apply_url") or ""),
-            apply_options=tuple(
-                ApplyOption(
-                    publisher=str(o.get("publisher") or ""),
-                    url=str(o["url"]),
-                    is_direct=bool(o.get("is_direct")),
-                )
-                for o in raw.get("apply_options") or []
-                if isinstance(o, dict) and o.get("url")
-            ),
-            salary=raw.get("salary"),
-            posted_at=datetime.fromisoformat(posted)
-            if isinstance(posted, str) and posted
-            else None,
-            description=raw.get("description"),
-            publisher=raw.get("publisher"),
-            job_type=raw.get("job_type"),
-        )
-    except (KeyError, TypeError, ValueError):
-        logger.warning("skipping a cached job we could not rebuild")
-        return None
 
 
 class RecordedProvider:
-    """A provider whose every real call leaves a row the cap can count.
+    """A provider that cannot reach the network without leaving a row.
 
-    ## The bug this exists for
-
-    S5 built `fetches_today`, `refusal` and `remember`. S6 wired `refusal` into
-    the scan and never called `remember` — so the count the cap reads was
-    permanently zero, and the first two real scans spent shared JSearch quota
-    without either being counted. The cap was still a number and a comment,
-    one release after it was reported fixed.
-
-    The repair is to count at the CALL rather than at the route. A route can
-    forget to record; a provider wrapped in this cannot reach the network
-    without passing through it.
-
-    ## And the cache is the same door
-
-    A fresh cached answer for this (role, city, source) is returned without
-    calling anything, which costs no quota at all. A cache row is written after
-    every successful call — empty answers included, because "JSearch has
-    nothing for this today" is worth not asking again for 48 hours.
-
-    A FAILED call is not recorded: an empty payload written on a failure would
-    serve "no jobs" for two days on the strength of a timeout.
+    **Recorded BEFORE the call, and no row means no call.** Counting after the
+    call would count only the calls that returned — a timeout may still have
+    spent quota — and a write that fails after the call spends quota the cap
+    never sees. Over-counting a call that then failed is the safe direction;
+    the quota belongs to somebody else.
     """
 
-    def __init__(self, inner: Any, db: Any, *, ttl_hours: int) -> None:
+    def __init__(self, inner: Any, db: Any, *, user_id: str) -> None:
         self._inner = inner
         self._db = db
-        self._ttl = ttl_hours
+        self._user_id = user_id
         self.name: str = inner.name
-        #: Whether the last `search` was answered from the cache. The scan
-        #: says so, because a result from an earlier search is a different
-        #: fact from a result from just now.
-        self.served_from_cache = False
 
     def available(self) -> bool:
         return bool(self._inner.available())
 
     def search(self, *, role: str, city: str, limit: int = 20) -> list[NormalizedJob]:
-        key = query_key(role=role, city=city, source=self.name)
-        hit = cached(self._db, key=key, ttl_hours=self._ttl)
-        if hit is not None:
-            self.served_from_cache = True
-            return [job for job in (from_payload(r) for r in hit) if job is not None]
-
-        self.served_from_cache = False
-        found = self._inner.search(role=role, city=city, limit=limit)
-        remember(self._db, key=key, source=self.name, payload=[to_payload(j) for j in found])
-        return list(found)
+        try:
+            self._db.table(LEDGER).insert(
+                {
+                    # Stamped from the same token RLS reads, like every other
+                    # write the API makes as the user.
+                    "user_id": self._user_id,
+                    "source": self.name,
+                    "query_key": query_key(role=role, city=city, source=self.name),
+                }
+            ).execute()
+        except Exception as exc:
+            logger.exception("could not record a %s call; not making it", self.name)
+            raise CallNotRecorded(f"{self.name}: the call could not be recorded") from exc
+        return list(self._inner.search(role=role, city=city, limit=limit))
 
 
 __all__ = [
-    "CACHE",
-    "RecordedProvider",
-    "from_payload",
-    "to_payload",
     "CAPPED_SOURCE",
-    "cached",
-    "fetches_today",
+    "COUNTER",
+    "LEDGER",
+    "CallNotRecorded",
+    "RecordedProvider",
+    "calls_today",
     "query_key",
     "refusal",
-    "remember",
 ]

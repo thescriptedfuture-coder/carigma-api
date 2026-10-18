@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from carigma_api.services.jobs.models import ApplyOption, NormalizedJob
-from carigma_api.services.jobs.store import persist
+from carigma_api.services.jobs.scoring import Annotation
+from carigma_api.services.jobs.store import annotate, persist
 
 NOW = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
 
@@ -65,9 +66,14 @@ class FakeTable:
         if self._db.failing_read and self._op == "select":
             raise RuntimeError("jobs_feed is down")
         if self._op == "insert":
-            self._db.inserted.extend(self._payload)
-            self._db.rows.extend(dict(r) for r in self._payload)
-            return type("Res", (), {"data": list(self._payload)})()
+            echoed = []
+            for row in self._payload:
+                self._db.next_id += 1
+                stored = {"id": self._db.next_id, **row}
+                self._db.inserted.append(dict(row))
+                self._db.rows.append(stored)
+                echoed.append(dict(stored))
+            return type("Res", (), {"data": echoed})()
         if self._op == "update":
             for row in self._db.rows:
                 if all(str(row.get(c)) == str(v) for c, v in self._filters.items()):
@@ -92,6 +98,7 @@ class FakeDB:
         self.inserted: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
         self.failing_read = False
+        self.next_id = 100
 
     def table(self, _name: str) -> FakeTable:
         return FakeTable(self)
@@ -99,9 +106,15 @@ class FakeDB:
 
 def test_a_first_scan_inserts_everything_as_new() -> None:
     db = FakeDB()
-    new, again = persist(db, user_id="u1", jobs=[job(), job("BI Analyst")], now=NOW)
+    result = persist(db, user_id="u1", jobs=[job(), job("BI Analyst")], now=NOW)
 
-    assert (new, again) == (2, 0)
+    assert (len(result.new), result.seen_again) == (2, 0)
+    # Named, with the id the database gave each row, so a surface can link to
+    # exactly the postings that are new.
+    assert [(r["id"], r["title"]) for r in result.new] == [
+        (101, "Data Analyst"),
+        (102, "BI Analyst"),
+    ]
     assert all(r["first_seen"] == NOW.isoformat() for r in db.inserted)
     assert all(r["status"] == "active" for r in db.inserted)
 
@@ -125,9 +138,9 @@ def test_a_rescan_moves_last_seen_and_leaves_first_seen_alone() -> None:
         ]
     )
 
-    new, again = persist(db, user_id="u1", jobs=[existing], now=NOW)
+    result = persist(db, user_id="u1", jobs=[existing], now=NOW)
 
-    assert (new, again) == (0, 1)
+    assert (len(result.new), result.seen_again) == (0, 1)
     assert db.inserted == []
     assert db.rows[0]["first_seen"] == "2026-09-01T09:00:00+00:00"
     assert db.rows[0]["last_seen"] == NOW.isoformat()
@@ -153,10 +166,9 @@ def test_a_dismissed_job_found_again_stays_dismissed() -> None:
 
     assert db.rows[0]["status"] == "dismissed"
     assert db.rows[0]["dismiss_reason"] == "Salary too low"
-    # Only the one column moved.
-    assert db.updated == [
-        {"user_id": "u1", "dedup_key": seen.dedupe_key, "last_seen": NOW.isoformat()}
-    ]
+    # `last_seen` and the source's facts. Never `status`, never `first_seen`.
+    assert len(db.updated) == 1
+    assert set(db.updated[0]) == {"user_id", "dedup_key", "last_seen", "details"}
 
 
 def test_a_paid_apply_kit_survives_a_rescan() -> None:
@@ -181,8 +193,8 @@ def test_another_users_identical_job_is_not_mistaken_for_this_ones() -> None:
     shared = job()
     db = FakeDB([{"user_id": "someone-else", "dedup_key": shared.dedupe_key, "status": "active"}])
 
-    new, again = persist(db, user_id="u1", jobs=[shared], now=NOW)
-    assert (new, again) == (1, 0)
+    result = persist(db, user_id="u1", jobs=[shared], now=NOW)
+    assert (len(result.new), result.seen_again) == (1, 0)
 
 
 def test_an_unreadable_feed_refuses_rather_than_inserting_blind() -> None:
@@ -198,7 +210,8 @@ def test_an_unreadable_feed_refuses_rather_than_inserting_blind() -> None:
 
 def test_an_empty_scan_writes_nothing_at_all() -> None:
     db = FakeDB()
-    assert persist(db, user_id="u1", jobs=[], now=NOW) == (0, 0)
+    result = persist(db, user_id="u1", jobs=[], now=NOW)
+    assert (result.new, result.seen_again) == ([], 0)
     assert db.inserted == []
 
 
@@ -209,26 +222,138 @@ def test_the_row_carries_only_keys_the_presenter_reads() -> None:
     persist(db, user_id="u1", jobs=[job()], now=NOW)
 
     details = db.inserted[0]["details"]
-    assert set(details) == {"apply_url", "apply_options", "publisher", "source", "posted_at"}
+    assert set(details) == {
+        "apply_url",
+        "apply_options",
+        "publisher",
+        "source",
+        "posted_at",
+        "expires_at",
+    }
     assert details["apply_options"] == [
         {"publisher": "LinkedIn", "url": "https://li/1", "is_direct": False}
     ]
 
 
-def test_the_annotate_literal_matches_the_store() -> None:
-    """`routes/jobs.py` writes `db.table("jobs_feed")` as a literal, because the
-    RLS sweep reads the argument to decide which table a write touches and a
-    variable is a write it cannot classify.
+# ── `details` is one value, and an update replaces it ──────────────────────
 
-    Two spellings of one table is exactly the duplication this project removes,
-    so the duplication is made safe here rather than left to notice.
-    """
-    import inspect
 
-    from carigma_api.routes import jobs as routes
-    from carigma_api.services.jobs.store import TABLE
-
-    source = inspect.getsource(routes._annotate)
-    assert f'db.table("{TABLE}")' in source, (
-        f"the annotate write no longer names {TABLE!r} as a literal"
+def _scored(match: int = 82) -> Annotation:
+    return Annotation(
+        match_score=match,
+        why_match="SQL and Power BI.",
+        matched_skills=["SQL"],
+        missing_skills=["dbt"],
+        key_requirements=["3+ years"],
     )
+
+
+def test_a_score_is_added_to_the_posting_not_written_over_it() -> None:
+    """THE bug. Thirteen real postings lost their apply link, publisher,
+    source and posting date to a scoring write that replaced the jsonb
+    instead of adding to it. Every one was un-appliable when Ravi opened it."""
+    db = FakeDB()
+    found = [job()]
+    result = persist(db, user_id="u1", jobs=found, now=NOW)
+
+    annotate(db, user_id="u1", jobs=found, annotations={0: _scored()}, stored=result.details)
+
+    details = db.rows[0]["details"]
+    assert details["apply_url"] == "https://example.com/j", "the apply link was written over"
+    assert details["source"] == "jsearch"
+    assert details["apply_options"], "the apply options were written over"
+    assert details["matched_skills"] == ["SQL"]
+    assert db.rows[0]["match_score"] == 82
+
+
+def test_a_rescan_keeps_what_v1_stored_and_what_was_scored() -> None:
+    """A seen-again row can carry V1's keys and an earlier score. The scan
+    owns only the source's facts; everything else stays."""
+    seen = job(posted_at=NOW)
+    db = FakeDB(
+        [
+            {
+                "user_id": "u1",
+                "dedup_key": seen.dedupe_key,
+                "status": "saved",
+                "details": {
+                    "cvTweaks": ["Lead with the PFMS rollout"],
+                    "matched_skills": ["Power BI"],
+                    "apply_url": "https://old.example.com/j",
+                },
+            }
+        ]
+    )
+
+    result = persist(db, user_id="u1", jobs=[seen], now=NOW)
+    annotate(db, user_id="u1", jobs=[seen], annotations={0: _scored(70)}, stored=result.details)
+
+    details = db.rows[0]["details"]
+    assert details["cvTweaks"] == ["Lead with the PFMS rollout"], "V1's analysis was lost"
+    assert details["apply_url"] == "https://example.com/j", "the source's current link is the truth"
+    assert details["posted_at"] == NOW.isoformat()
+    assert details["matched_skills"] == ["SQL"], "a fresh score replaces the old one"
+    assert db.rows[0]["status"] == "saved"
+
+
+def test_a_fact_the_source_left_out_today_does_not_erase_the_stored_one() -> None:
+    seen = job()  # no posted_at this time
+    db = FakeDB(
+        [
+            {
+                "user_id": "u1",
+                "dedup_key": seen.dedupe_key,
+                "status": "active",
+                "details": {"posted_at": "2026-10-01T00:00:00+00:00"},
+            }
+        ]
+    )
+
+    persist(db, user_id="u1", jobs=[seen], now=NOW)
+
+    assert db.rows[0]["details"]["posted_at"] == "2026-10-01T00:00:00+00:00"
+
+
+def test_annotate_refuses_a_row_whose_stored_details_it_was_not_given() -> None:
+    """An update from nothing is the bug. Better unscored than unappliable."""
+    db = FakeDB([{"user_id": "u1", "dedup_key": job().dedupe_key, "details": {"apply_url": "x"}}])
+
+    scores = annotate(db, user_id="u1", jobs=[job()], annotations={0: _scored()}, stored={})
+
+    assert scores == {}
+    assert db.updated == []
+    assert db.rows[0]["details"] == {"apply_url": "x"}
+
+
+# ── The key is V1's ────────────────────────────────────────────────────────
+
+
+def test_the_key_matches_what_v1_stored_for_the_same_posting() -> None:
+    """Measured from the live row: Ravi dismissed NuvoRetail's "Senior Analyst
+    E-Commerce" in July, and V1 stored it under `7e90d297588b9dd4`. V2's own
+    readable key could never match it, so the first real scan brought the
+    posting back as new."""
+    nuvo = job(title="Senior Analyst E-Commerce", company="NuvoRetail", location="New Delhi, IN")
+
+    assert nuvo.dedupe_key == "7e90d297588b9dd4"
+
+
+def test_a_dismissal_v1_recorded_survives_a_v2_scan() -> None:
+    nuvo = job(title="Senior Analyst E-Commerce", company="NuvoRetail")
+    db = FakeDB(
+        [{"user_id": "u1", "dedup_key": "7e90d297588b9dd4", "status": "dismissed", "details": {}}]
+    )
+
+    result = persist(db, user_id="u1", jobs=[nuvo], now=NOW)
+
+    assert result.new == []
+    assert db.rows[0]["status"] == "dismissed"
+
+
+def test_one_posting_reported_in_two_locations_is_one_row() -> None:
+    """JSearch called one ETS posting "New Delhi, IN" at 04:41 and "IN" at
+    04:47, and a location-bearing key filed it twice."""
+    a = job(title="Senior Analyst, Market Insights", company="ETS", location="New Delhi, IN")
+    b = job(title="Senior Analyst, Market Insights", company="ETS", location="IN")
+
+    assert a.dedupe_key == b.dedupe_key

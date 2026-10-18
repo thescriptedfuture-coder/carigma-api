@@ -375,30 +375,223 @@ def test_the_users_own_words_are_recorded_verbatim(client: TestClient) -> None:
     assert res.json()["slot"]["skip_note"] == note
 
 
-# ── Regenerating: the credit rule ──────────────────────────────────────────
+# ── Regenerating: Content Intelligence ─────────────────────────────────────
+
+GROUNDED: dict[str, Any] = {
+    "name": "Ravi Kumar",
+    "currentRole": "Senior Auditor / Functional Business Analyst",
+    "experience": "CGDA | Senior Auditor. Led the PFMS rollout across field offices.",
+    "skills": "SQL, Power BI, requirements analysis",
+    "keyAchievement": "Cut monthly reconciliation time by 40%.",
+}
 
 
-def test_a_failed_regeneration_charges_nothing(client: TestClient) -> None:
-    """Content Intelligence is not wired up yet, so this genuinely fails —
-    which makes it a real test of the rule rather than a simulated one."""
+def _post(lead: str, extra: str = "") -> str:
+    filler = " ".join(f"word{i}" for i in range(90))
+    return f"{lead}\n\nHere is what I mean. {filler} {extra}".strip()
+
+
+class _Credits:
+    def __init__(self) -> None:
+        self.charged: list[tuple[str, int]] = []
+        self.balance = 500
+
+    def read_balance(self, _user_id: str) -> int:
+        return self.balance
+
+    def apply_delta(
+        self, user_id: str, delta: int, reason: str, balance_after: int | None = None, **_kw: Any
+    ) -> int:
+        # The REAL signature. `charge_for_result` passes the new balance as a
+        # fourth positional argument, and a fake that cannot take it raises —
+        # which `charge_for_result` catches and logs as "delivering unbilled".
+        # The jobs fake had exactly that defect, so its "charges once" test
+        # passed while nothing was ever charged.
+        self.charged.append((reason, delta))
+        self.balance += delta
+        return self.balance
+
+
+class _Profiles:
+    profile: dict[str, Any] = GROUNDED
+    fails = False
+
+    def __init__(self, _client: Any) -> None: ...
+
+    def load(self, _user_id: str) -> dict[str, Any]:
+        if _Profiles.fails:
+            raise RuntimeError("profiles is down")
+        return dict(_Profiles.profile)
+
+
+class _Writer:
+    """What the model said, and what it was asked."""
+
+    def __init__(self) -> None:
+        self.reply: Any = {
+            "drafts": [
+                {"angle": "Story", "body": _post("The audit that taught me to read data")},
+                {"angle": "Practice", "body": _post("One SQL habit from audit work")},
+                {"angle": "View", "body": _post("Dashboards are not the deliverable")},
+            ]
+        }
+        self.prompts: list[str] = []
+        self.dead = False
+
+    def __call__(self, _system: str, user: str, _max: int) -> Any:
+        self.prompts.append(user)
+        if self.dead:
+            from carigma_api.services.ai import UpstreamError
+
+            raise UpstreamError("anthropic is down")
+        return self.reply
+
+
+@pytest.fixture
+def drafting(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[_Credits, _Writer]]:
+    credits, writer = _Credits(), _Writer()
+    _Profiles.profile, _Profiles.fails = GROUNDED, False
+    monkeypatch.setattr(posts_routes, "SupabaseCreditStore", lambda client: credits)
+    monkeypatch.setattr(posts_routes, "ProfileRepository", _Profiles)
+    monkeypatch.setattr(posts_routes, "_writer", lambda settings: writer)
+    yield credits, writer
+
+
+def test_a_slot_gets_three_drafts_and_is_charged_once(client: TestClient, drafting) -> None:  # type: ignore[no-untyped-def]
+    """The line that raised "not wired up yet", wired."""
+    credits, _writer = drafting
     seed_week()
+
     res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
 
-    assert res.status_code in (402, 503)
-    if res.status_code == 503:
-        assert "weren't charged" in res.json()["detail"]["message"]
+    assert res.status_code == 200
+    slot = res.json()["slot"]
+    assert slot["state"] == "draft_ready"
+    assert [d["note"] for d in slot["drafts"]] == ["Story", "Practice", "View"]
+    assert credits.charged == [("Regenerate one post", -3)]
+    # And it is stored, not only returned.
+    stored = STORE.load(USER_ID, monday())
+    assert stored is not None
+    assert len(next(s for s in stored.slots if s.day == "THU").drafts) == 3
+
+
+def test_drafts_that_invent_or_leave_blanks_are_not_kept_or_charged(
+    client: TestClient, drafting
+) -> None:  # type: ignore[no-untyped-def]
+    """The drafts go out under a real name. A figure the profile does not
+    contain, or a blank to fill, is the model's failure — not a purchase."""
+    credits, writer = drafting
+    writer.reply = {
+        "drafts": [
+            {"angle": "Story", "body": _post("How we grew revenue", "It rose 63%.")},
+            {"angle": "View", "body": _post("When I joined [Company]")},
+        ]
+    }
+    seed_week()
+
+    res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "nothing_usable"
+    assert "weren't charged" in res.json()["detail"]["message"]
+    assert credits.charged == []
+    stored = STORE.load(USER_ID, monday())
+    assert stored is not None
+    assert next(s for s in stored.slots if s.day == "THU").drafts == ()
+
+
+def test_one_honest_draft_is_kept_when_the_others_are_not(client: TestClient, drafting) -> None:  # type: ignore[no-untyped-def]
+    credits, writer = drafting
+    writer.reply = {
+        "drafts": [
+            {"angle": "Story", "body": _post("Reconciliation, and the 40% we got back", "By 40%.")},
+            {"angle": "View", "body": _post("Growth", "We grew 300%.")},
+        ]
+    }
+    seed_week()
+
+    res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert [d["note"] for d in res.json()["slot"]["drafts"]] == ["Story"]
+    assert credits.charged == [("Regenerate one post", -3)]
+
+
+def test_a_dead_model_charges_nothing_and_says_so(client: TestClient, drafting) -> None:  # type: ignore[no-untyped-def]
+    credits, writer = drafting
+    writer.dead = True
+    seed_week()
+
+    res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "upstream_unavailable"
+    assert "weren't charged" in res.json()["detail"]["message"]
+    assert credits.charged == []
     assert "Traceback" not in str(res.json())
+
+
+def test_nothing_to_write_from_is_refused_before_credits_or_the_model(
+    client: TestClient, drafting
+) -> None:  # type: ignore[no-untyped-def]
+    """A profile with only a job title would get a stranger's career."""
+    credits, writer = drafting
+    _Profiles.profile = {"name": "New User", "currentRole": "Analyst"}
+    seed_week()
+
+    res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"] == "nothing_to_write_from"
+    assert credits.charged == []
+    assert writer.prompts == []
+
+
+def test_an_unreadable_profile_is_not_an_empty_one(client: TestClient, drafting) -> None:  # type: ignore[no-untyped-def]
+    credits, writer = drafting
+    _Profiles.fails = True
+    seed_week()
+
+    res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "profile_unavailable"
+    assert credits.charged == []
+    assert writer.prompts == []
+
+
+def test_a_skip_that_retrains_reaches_the_next_draft(client: TestClient, drafting) -> None:  # type: ignore[no-untyped-def]
+    """Declining is free BECAUSE it teaches. If the reason never reached the
+    writer, the skip would be a form that goes nowhere."""
+    _credits, writer = drafting
+    from carigma_api.services.posts import SkipReason, skip
+
+    seed_with(
+        skip(
+            Slot("MON", monday()),
+            reason=SkipReason.DRAFTS_WEAK,
+            note="too corporate, nothing like me",
+        ),
+        Slot("THU", monday() + timedelta(days=3)),
+    )
+
+    client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
+
+    assert "too corporate, nothing like me" in writer.prompts[0]
 
 
 def test_regenerating_a_published_slot_is_refused_before_any_work(
     client: TestClient,
+    drafting,  # type: ignore[no-untyped-def]
 ) -> None:
+    credits, writer = drafting
     seed_with(mark_published(Slot("THU", monday() + timedelta(days=3)), at="09:04"))
     res = client.post("/posts/week/THU/regenerate", headers=auth(make_token()))
 
-    assert res.status_code in (402, 409)
-    if res.status_code == 409:
-        assert res.json()["detail"]["error"] == "already_published"
+    assert res.status_code == 409
+    assert res.json()["detail"]["error"] == "already_published"
+    assert credits.charged == []
+    assert writer.prompts == []
 
 
 def test_regeneration_requires_a_verified_token(client: TestClient) -> None:

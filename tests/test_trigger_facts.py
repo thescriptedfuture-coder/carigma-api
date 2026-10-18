@@ -106,7 +106,7 @@ def a_job(**kw: Any) -> dict[str, Any]:
         "company": "Zomato",
         "match_score": 92,
         "why_match": "SQL and Power BI",
-        "status": "new",
+        "status": "active",
         "first_seen": ago(0, 2),
         **kw,
     }
