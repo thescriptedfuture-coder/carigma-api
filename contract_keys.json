@@ -374,6 +374,7 @@
   "GET /posts/week/{}": [
     "disclaimer",
     "flow",
+    "flow[].detail",
     "flow[].label",
     "flow[].step",
     "review",
@@ -399,7 +400,8 @@
     "slot.skip_reason",
     "slot.state",
     "slot.time_label",
-    "slot.variant_count"
+    "slot.variant_count",
+    "why"
   ],
   "GET /pricing": [
     "enabled",
@@ -721,6 +723,39 @@
     "searched_for.role",
     "seen_again",
     "sources"
+  ],
+  "POST /jobs/{}/apply-kit": [
+    "created_at",
+    "credits",
+    "credits.balance_after",
+    "credits.charged",
+    "credits.reason",
+    "cv",
+    "cv.certifications",
+    "cv.coreSkills",
+    "cv.education",
+    "cv.email",
+    "cv.experience",
+    "cv.experience[].bullets",
+    "cv.experience[].company",
+    "cv.experience[].duration",
+    "cv.experience[].keyImpact",
+    "cv.experience[].location",
+    "cv.experience[].title",
+    "cv.keyAchievements",
+    "cv.linkedin",
+    "cv.location",
+    "cv.name",
+    "cv.phone",
+    "cv.summary",
+    "cv.tagline",
+    "disclaimer",
+    "gaps",
+    "outreach",
+    "outreach.bestChannel",
+    "outreach.followUpTip",
+    "outreach.messageTemplate",
+    "template"
   ],
   "POST /jobs/{}/not-for-me": [
     "dismiss_reason",

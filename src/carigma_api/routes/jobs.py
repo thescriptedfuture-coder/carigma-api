@@ -3,11 +3,12 @@
     GET  /jobs/feed                free — the main list, and the older postings
     GET  /jobs/{id}                free
     GET  /jobs/{id}/apply-kit      free — returns the STORED kit, or 404
+    POST /jobs/{id}/apply-kit      15 credits — CV Architect builds one
     GET  /jobs/{id}/cv.pdf         free — the kit was already paid for
     POST /jobs/{id}/not-for-me     free — records a decision
     POST /jobs/scan                15 credits, and nothing when it finds nothing
 
-`scan` is the only priced endpoint here, and
+`scan` and `build_apply_kit` are the priced endpoints here, and
 `test_only_the_scan_charges_anything` holds every other one to free.
 """
 
@@ -25,7 +26,7 @@ from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
 from carigma_api.services import credits as credits_service
-from carigma_api.services import cv_pdf
+from carigma_api.services import cv_pdf, cv_writer
 from carigma_api.services import runs as runs_service
 from carigma_api.services.ai import UpstreamError, call_claude_json
 from carigma_api.services.credits import InsufficientCredits
@@ -153,13 +154,178 @@ def get_apply_kit(
                 "message": "No apply kit has been built for this job yet.",
             },
         )
+    return _kit_payload(kit, row.get("kit_created_at"))
+
+
+def _kit_payload(kit: dict[str, Any], created_at: Any) -> dict[str, Any]:
+    """A kit as the client reads it — the stored one and a freshly built one
+    alike, so the read and the build cannot drift apart."""
     return {
         **kit,
-        "created_at": row.get("kit_created_at"),
+        "created_at": created_at,
         # Shipped in the payload rather than hard-coded in a component, so a
         # surface cannot render the kit without it.
         "disclaimer": "Review and adjust before sending — Carigma drafts, you verify.",
     }
+
+
+def _cv_writer(settings: Settings) -> cv_writer.Writer:
+    """The tailoring call, bound to the real client. A seam, so a test can put a
+    dead or a dishonest model behind the route."""
+
+    def call(system: str, user: str, max_tokens: int) -> object:
+        return call_claude_json(system, user, max_tokens, api_key=settings.anthropic_api_key)
+
+    return call
+
+
+@router.post("/jobs/{job_id}/apply-kit")
+async def build_apply_kit(
+    job_id: int,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """CV Architect: a CV tailored to this posting, its gaps, and an outreach
+    note. 15 credits (`cv_generate`), and nothing when nothing usable comes back.
+
+    Until this existed, every job a V2 scan found ended at "Nothing in this
+    build creates one." See `services/cv_writer.py` for what the output is
+    held to.
+
+    Order, as everywhere: replay, rate limit, the STRUCTURAL refusals (no such
+    job, a kit already built, nothing to tailor from), then credits.
+    """
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    client = user_client(settings, token)
+    credit_store = SupabaseCreditStore(client)
+    run_store = SupabaseRunStore(client)
+    action = "cv_generate"
+
+    if (replayed := replay_if_seen(run_store, user.id, request, agent="cv")) is not None:
+        return replayed
+
+    enforce_agent_rate_limit(user.id, "cv")
+
+    db = _db(request, settings)
+    row = _one(db, user.id, job_id)
+    stored = row.get("apply_kit")
+    if isinstance(stored, dict) and stored:
+        # Building a second one would charge again for what is already theirs.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "kit_exists",
+                "message": "This job already has a tailored CV. Opening it is free.",
+            },
+        )
+
+    try:
+        profile = ProfileRepository(client).load(user.id)
+    except Exception as exc:
+        logger.exception("could not read the profile for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "profile_unavailable",
+                "message": (
+                    "We couldn't read your profile just now, and the CV is built from it. "
+                    "You weren't charged and nothing ran."
+                ),
+            },
+        ) from exc
+    try:
+        candidate = cv_writer.candidate_for(profile, email=user.email)
+    except cv_writer.NothingToTailorFrom as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "nothing_to_tailor_from",
+                "message": (
+                    "Add your experience to your profile first. The CV is built from what "
+                    "you've told us, and we won't invent a career for it. Nothing was charged."
+                ),
+            },
+        ) from exc
+
+    try:
+        credits_service.check_affordable(
+            credit_store, user.id, action, enforced=settings.credits_enforced
+        )
+    except credits_service.CreditsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "credits_unavailable",
+                "message": (
+                    "We couldn't check your credits just now, so you weren't "
+                    "charged and nothing ran. Try again in a moment."
+                ),
+            },
+            headers={"X-Error-Code": "credits_unavailable"},
+        ) from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"A tailored CV costs {exc.required} credits. You have {exc.balance}.",
+            headers={"X-Error-Code": "insufficient_credits"},
+        ) from exc
+
+    run = runs_service.new_run(user.id, "cv")
+    if key := idempotency_key(request):
+        run_store.remember_idempotency(user.id, key, run.id)
+    built_at = datetime.now(UTC).isoformat()
+
+    def work(reporter: RunReporter) -> dict[str, Any]:
+        reporter.step("read", f"Reading the {row.get('title') or 'role'} posting and your profile")
+        kit = cv_writer.write(candidate, row, writer=_cv_writer(settings))
+        if kit is None:
+            # `{}` is the shape `runs.execute` will not charge for.
+            return {}
+        kit = {**kit, "template": cv_pdf.resolve(_text_or_none(profile.get("cvTemplate")))}
+        reporter.step("save", "Saving it to this job")
+        # Saved INSIDE the run: a kit that could not be saved is a failed run,
+        # and a failed run is not charged. V1 spent only after `save_job_kit`.
+        db.table("jobs_feed").update({"apply_kit": kit, "kit_created_at": built_at}).eq(
+            "user_id", user.id
+        ).eq("id", job_id).execute()
+        return {"kit": kit}
+
+    settled = await runs_service.execute(
+        run, work, credit_store=credit_store, action=action, run_store=run_store
+    )
+
+    if settled.status is runs_service.RunStatus.EMPTY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "nothing_usable",
+                "message": (
+                    "The CV came back with something we won't put on a document an employer "
+                    "reads — a figure or an employer your profile doesn't contain — so it "
+                    "wasn't kept. You weren't charged."
+                ),
+            },
+            headers={"X-Error-Code": "nothing_usable"},
+        )
+    if settled.status is not runs_service.RunStatus.SUCCEEDED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "upstream_unavailable",
+                "message": "We couldn't build your CV just now. You weren't charged.",
+            },
+            headers={"X-Error-Code": "upstream_unavailable"},
+        )
+
+    return {
+        **_kit_payload(settled.result["kit"], built_at),
+        "credits": settled.credits.as_dict() if settled.credits else None,
+    }
+
+
+def _text_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def build_gateway(settings: Settings, db: Any, user_id: str) -> JobsGateway:

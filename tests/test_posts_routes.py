@@ -207,8 +207,27 @@ def test_the_editor_states_that_we_never_post_for_you(client: TestClient) -> Non
     body = client.get("/posts/week/THU", headers=auth(make_token())).json()
 
     assert "never posts for you" in body["disclaimer"]
-    assert [s["step"] for s in body["flow"]] == [1, 2, 3, 4]
+    assert [s["step"] for s in body["flow"]] == [1, 2, 3]
     assert "you say so" in body["flow"][2]["label"]
+    # WHERE it goes, said in the step rather than left to guess.
+    assert "LinkedIn" in body["flow"][1]["label"]
+    assert "never posts for you" in body["flow"][1]["detail"]
+    assert body["why"]
+
+
+def test_the_guidance_counts_the_drafts_that_are_really_there(client: TestClient) -> None:
+    """The check drops drafts that invent, so "three drafts" is not a given."""
+    seed_with(
+        Slot(
+            "THU",
+            monday() + timedelta(days=3),
+            state=SlotState.DRAFT_READY,
+            drafts=(Draft(index=1, body="One survived.", note="Story"),),
+        )
+    )
+    body = client.get("/posts/week/THU", headers=auth(make_token())).json()
+
+    assert body["flow"][0]["detail"].startswith("Your draft is ready")
 
 
 def test_the_editor_says_which_skip_reasons_retrain_the_agent(
