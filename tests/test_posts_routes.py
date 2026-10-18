@@ -24,6 +24,7 @@ from carigma_api.services.posts import (
     mark_published,
 )
 from carigma_api.services.posts_store import slot_from_row, slot_to_row, week_to_row
+from carigma_api.services.weekly import ContractItem, ContractState, WeeklyContract
 from tests.conftest import USER_ID, auth, make_token
 
 
@@ -100,11 +101,45 @@ class FakePlanStore:
 STORE = FakePlanStore()
 
 
+class FakeContractStore:
+    """The weekly contracts, by week. Only `load` is read by the posts routes."""
+
+    def __init__(self) -> None:
+        self.contracts: dict[date, WeeklyContract] = {}
+        self.fails = False
+
+    def load(self, _user_id: str, week_start: date) -> WeeklyContract | None:
+        if self.fails:
+            raise RuntimeError("weekly_review is down")
+        return self.contracts.get(week_start)
+
+
+CONTRACTS = FakeContractStore()
+
+
+def sign_week(*days: str, state: ContractState = ContractState.APPROVED) -> None:
+    """A contract for this week with a content row on each of `days`."""
+    items = tuple(ContractItem("content", day, "One post slot", 10, 3) for day in days)
+    CONTRACTS.contracts[monday()] = WeeklyContract(
+        week_start=monday(),
+        state=state,
+        items=(*items, ContractItem("review", "SUN", "Review, 18:00", 10, 0)),
+        accepted_kinds=("content", "review") if state is ContractState.APPROVED else (),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    global STORE
+    global STORE, CONTRACTS
     STORE = FakePlanStore()
+    CONTRACTS = FakeContractStore()
     monkeypatch.setattr(posts_routes, "_store", lambda request, settings: STORE)
+    monkeypatch.setattr(posts_routes, "_contracts", lambda request, settings: CONTRACTS)
+    # The week most of these tests were written against — Monday and Thursday,
+    # which `default_week` handed everyone — now as what it should always have
+    # been: a week the user SIGNED with those two posts on it. Tests about the
+    # other standings clear or replace it.
+    sign_week("MON", "THU")
     yield
 
 
@@ -389,7 +424,17 @@ def test_a_committed_slot_cannot_be_skipped_without_a_reason(client: TestClient)
 
 
 def test_an_optional_slot_skips_with_no_reason(client: TestClient) -> None:
-    seed_week()
+    """Optional means outside the signed plan — a post the user drafted on a
+    day the contract does not carry. Declining one is free: they never
+    committed to it."""
+    seed_with(
+        Slot(
+            "SAT",
+            monday() + timedelta(days=5),
+            state=SlotState.DRAFT_READY,
+            drafts=(Draft(index=1, body="An extra."),),
+        )
+    )
     res = client.post("/posts/week/SAT/skip", json={}, headers=auth(make_token()))
 
     assert res.status_code == 200
@@ -702,3 +747,123 @@ def test_a_refused_write_is_said_not_reported_as_a_crash(
 
     assert res.status_code == 503
     assert res.json()["detail"]["error"] == "not_saved"
+
+
+# ── S8: the signed week is the schedule ────────────────────────────────────
+
+
+def _days(body: dict[str, Any]) -> list[tuple[str, bool]]:
+    return [(slot["day"], slot["optional"]) for slot in body["slots"]]
+
+
+def test_the_week_has_exactly_the_posts_the_user_signed(client: TestClient) -> None:
+    """Ravi signed "One post slot · THU" and Posts showed Monday AND Thursday:
+    `default_week` was the schedule and nothing read the contract."""
+    sign_week("THU")
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert _days(body) == [("THU", False)]
+    assert body["standing"] == "signed"
+    assert body["cadence_label"] == "1/wk · Thu"
+
+
+def test_work_done_outside_the_plan_stays_and_says_so(client: TestClient) -> None:
+    """He published on Monday, a day the signed plan did not carry. That post
+    is real; it stays, marked outside the plan — and an untouched default slot
+    does not."""
+    sign_week("THU")
+    seed_with(
+        mark_published(Slot("MON", monday()), at="2026-10-12T16:36:07+00:00"),
+        Slot("WED", monday() + timedelta(days=2)),
+    )
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert _days(body) == [("MON", True), ("THU", False)]
+    assert body["shipped"] == 1
+
+
+def test_no_contract_schedules_nothing_and_says_where_to_plan(client: TestClient) -> None:
+    CONTRACTS.contracts.clear()
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert body["slots"] == []
+    assert body["standing"] == "none"
+    assert body["empty"]["happened"] == "No week is signed yet."
+    assert body["empty"]["action"] == {"label": "Plan this week", "route": "/progress"}
+    # Not a pause: nobody set a cadence to zero.
+    assert body["streak"]["paused"] is False
+
+
+def test_a_proposed_week_is_not_a_schedule_until_it_is_signed(client: TestClient) -> None:
+    """The product never plans on someone's behalf and then acts."""
+    sign_week("MON", "WED", "FRI", state=ContractState.PROPOSED)
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert body["slots"] == []
+    assert body["standing"] == "proposed"
+    assert "waiting for your signature" in body["empty"]["happened"]
+
+
+def test_a_declined_week_schedules_nothing_and_offers_no_false_door(client: TestClient) -> None:
+    sign_week("THU", state=ContractState.DECLINED)
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert body["slots"] == []
+    assert body["empty"]["action"] is None
+
+
+def test_an_auto_adopted_week_schedules_its_posts(client: TestClient) -> None:
+    """In force without being agreed — it still schedules, and says adopted."""
+    items = (ContractItem("content", "TUE", "One post slot", 10, 3),)
+    CONTRACTS.contracts[monday()] = WeeklyContract(
+        week_start=monday(), state=ContractState.AUTO_ADOPTED, items=items
+    )
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert _days(body) == [("TUE", False)]
+    assert body["standing"] == "adopted"
+
+
+def test_a_signed_week_without_the_post_row_is_not_called_a_pause(client: TestClient) -> None:
+    """Accepting the scans and not the posts is a choice, not a pause."""
+    sign_week("THU")
+    signed = CONTRACTS.contracts[monday()]
+    CONTRACTS.contracts[monday()] = WeeklyContract(
+        week_start=signed.week_start,
+        state=signed.state,
+        items=signed.items,
+        accepted_kinds=("review",),
+    )
+
+    body = client.get("/posts/week", headers=auth(make_token())).json()
+
+    assert body["slots"] == []
+    assert body["cadence_label"] == "No posts this week"
+    assert body["streak"]["paused"] is False
+    assert body["empty"]["happened"] == "The week you signed has no post in it."
+
+
+def test_a_day_not_on_the_signed_week_has_no_slot(client: TestClient) -> None:
+    sign_week("THU")
+
+    res = client.get("/posts/week/MON", headers=auth(make_token()))
+
+    assert res.status_code == 404
+    assert "week you signed" in res.json()["detail"]["message"]
+
+
+def test_an_unreadable_contract_is_not_an_empty_week(client: TestClient) -> None:
+    """ "No week signed" on a failed read would send someone to plan a week
+    they already signed."""
+    CONTRACTS.fails = True
+
+    res = client.get("/posts/week", headers=auth(make_token()))
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "read_failed"

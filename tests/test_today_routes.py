@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from carigma_api.routes import today as routes
 from carigma_api.services.ladder import Signals
 from carigma_api.services.thread_store import SupabaseThreadStore
-from tests.conftest import auth, make_token
+from tests.conftest import USER_ID, auth, make_token
 
 NOW = datetime.now(UTC)
 
@@ -593,3 +593,39 @@ def test_the_interview_card_names_the_role_and_opens_that_application(wired) -> 
     assert "CRED" in card["body"]
     assert "prep" not in card["body"].lower()
     assert card["primary"] == {"label": "Open the application", "route": "/tracker/app-7"}
+
+
+def test_the_week_strip_follows_the_week_the_user_signed(wired) -> None:  # type: ignore[no-untyped-def]
+    """S8. The strip read the stored slots, and Posts seeded Monday and
+    Thursday for everyone — so a week signed for Thursday alone showed two
+    posting days on Today."""
+    from datetime import timedelta
+
+    from carigma_api.services.posts import Slot, mark_published
+    from carigma_api.services.posts_store import slot_to_row
+    from carigma_api.services.weekly import ContractItem, ContractState, WeeklyContract
+    from carigma_api.services.weekly_store import to_row
+
+    client, db, profiles = wired
+    profiles.profile = {"name": "Ravi"}
+    today = datetime.now(UTC).date()
+    monday = today - timedelta(days=today.weekday())
+    signed = WeeklyContract(
+        week_start=monday,
+        state=ContractState.APPROVED,
+        items=(ContractItem("content", "THU", "One post slot", 10, 3),),
+        accepted_kinds=("content",),
+    )
+    db.seed("weekly_review", (USER_ID, monday.isoformat()), to_row(USER_ID, signed))
+    shipped = mark_published(Slot("MON", monday), at=f"{monday.isoformat()}T16:36:00+00:00")
+    db.seed(
+        "content_loop", (USER_ID, monday.isoformat(), "MON"), slot_to_row(USER_ID, monday, shipped)
+    )
+
+    week = {cell["day"]: cell for cell in client.get("/today", headers=token()).json()["week"]}
+
+    assert week["THU"]["state"] == "pending"
+    assert week["THU"]["optional"] is False
+    # The post he shipped outside the plan is on the strip, marked as such.
+    assert (week["MON"]["state"], week["MON"]["optional"]) == ("published", True)
+    assert {day for day, cell in week.items() if cell["state"] != "none"} == {"MON", "THU"}

@@ -86,8 +86,8 @@
   },
   {
     "method": "POST",
-    "path": "/weekly/contract/re-entry",
-    "keys": [],
+    "path": "/weekly/contract/plan",
+    "keys": null,
     "where": "src/routes/ProgressPage.tsx"
   },
   {

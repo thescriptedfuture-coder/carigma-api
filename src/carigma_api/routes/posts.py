@@ -39,7 +39,6 @@ from carigma_api.services.posts import (
     SlotState,
     SlotTransitionError,
     WeekPlan,
-    default_week,
     mark_published,
     skip,
 )
@@ -51,6 +50,8 @@ from carigma_api.services.repository import (
 )
 from carigma_api.services.run_store import SupabaseRunStore
 from carigma_api.services.runs import RunReporter
+from carigma_api.services.schedule import EMPTY, EMPTY_ACTION, Standing, schedule, standing_of
+from carigma_api.services.weekly_store import ContractStore, SupabaseContractStore
 
 logger = logging.getLogger(__name__)
 
@@ -116,14 +117,34 @@ def _store(request: Request, settings: Settings) -> SupabasePlanStore:
     return SupabasePlanStore(user_client(settings, token))
 
 
-def _load_or_default(store: SupabasePlanStore, user_id: str, week_start: date) -> WeekPlan:
-    """The stored week, or a fresh default.
+def _contracts(request: Request, settings: Settings) -> ContractStore:
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    return SupabaseContractStore(user_client(settings, token))
 
-    The store returns None for a week never planned; seeding the default is the
-    CALLER's decision, made here, so "no week yet" stays distinguishable inside
-    the store itself.
+
+def _week(
+    request: Request, settings: Settings, user_id: str, week_start: date
+) -> tuple[WeekPlan, Standing]:
+    """The week as the user signed it (S8), and where its schedule came from.
+
+    This was `store.load(...) or default_week(...)`: Monday and Thursday for
+    everyone, whatever they signed. The contract is the schedule now, and the
+    stored slots are the work done on it.
+
+    Both reads must succeed. Without the contract there is no schedule to
+    show, and without the stored slots the drafts and publishes are missing —
+    either one silently absent would render a week that is not theirs.
     """
-    return store.load(user_id, week_start) or default_week(week_start)
+    try:
+        contract = _contracts(request, settings).load(user_id, week_start)
+        stored = _store(request, settings).load(user_id, week_start)
+    except Exception as exc:
+        logger.exception("could not read the week for %s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "We couldn't load your week just now."},
+        ) from exc
+    return schedule(week_start, contract=contract, stored=stored), standing_of(contract)
 
 
 def _monday_of(value: date) -> date:
@@ -142,7 +163,10 @@ def _find(plan: WeekPlan, day: str) -> Slot:
             return slot
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail={"error": "no_slot", "message": "There is no slot on that day this week."},
+        detail={
+            "error": "no_slot",
+            "message": "There is no post on that day in the week you signed.",
+        },
     )
 
 
@@ -167,10 +191,12 @@ def get_week(
 ) -> dict[str, Any]:
     """The week plan. Contract §8."""
     week_start = _monday_of(datetime.now(UTC).date())
-    store = _store(request, settings)
-    plan = _load_or_default(store, user.id, week_start)
+    plan, standing = _week(request, settings, user.id, week_start)
 
     payload = plan.as_dict()
+    # Where the schedule came from, so the surface can say "the week you
+    # signed" — or why there is no schedule — without re-deriving it.
+    payload["standing"] = str(standing)
     payload["provenance"] = {
         "agent_label": "Content Intelligence",
         # This said "drafts land 07:00 on slot days". **Nothing writes a draft
@@ -197,6 +223,10 @@ def get_week(
                 else "Cadence resumes when you set it above 0."
             ),
         }
+    elif not plan.slots:
+        # No slots because of the contract, not a pause: say which, and where
+        # to change it.
+        payload["empty"] = {**EMPTY[standing], "action": EMPTY_ACTION[standing]}
     return payload
 
 
@@ -209,8 +239,8 @@ def get_slot(
 ) -> dict[str, Any]:
     """One slot — the editor. Each artifact owns a real URL."""
     week_start = _monday_of(datetime.now(UTC).date())
-    store = _store(request, settings)
-    slot = _find(_load_or_default(store, user.id, week_start), day)
+    plan, _standing = _week(request, settings, user.id, week_start)
+    slot = _find(plan, day)
 
     return {
         "slot": slot.as_dict(),
@@ -251,7 +281,7 @@ def post_mark_published(
     """The honest verb. Free — this is our record-keeping, not their purchase."""
     week_start = _monday_of(datetime.now(UTC).date())
     store = _store(request, settings)
-    plan = _load_or_default(store, user.id, week_start)
+    plan, _standing = _week(request, settings, user.id, week_start)
     slot = _find(plan, day)
 
     try:
@@ -296,7 +326,7 @@ def post_skip(
     """Declining is free and it teaches. Never charged, never guilted."""
     week_start = _monday_of(datetime.now(UTC).date())
     store = _store(request, settings)
-    plan = _load_or_default(store, user.id, week_start)
+    plan, _standing = _week(request, settings, user.id, week_start)
     slot = _find(plan, day)
 
     try:
@@ -360,7 +390,7 @@ async def post_regenerate(
     # to afford something to be told it is impossible.**
     week_start = _monday_of(datetime.now(UTC).date())
     store = _store(request, settings)
-    plan = _load_or_default(store, user.id, week_start)
+    plan, _standing = _week(request, settings, user.id, week_start)
     slot = _find(plan, day)
     if slot.state is SlotState.PUBLISHED:
         raise HTTPException(
