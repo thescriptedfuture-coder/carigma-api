@@ -108,6 +108,20 @@
     "where": "src/routes/ProgressPage.tsx"
   },
   {
+    "method": "POST",
+    "path": "/weekly/contract/re-entry",
+    "keys": [
+      "cadence"
+    ],
+    "where": "src/routes/ProgressPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/weekly/contract/re-entry",
+    "keys": [],
+    "where": "src/routes/ProgressPage.tsx"
+  },
+  {
     "method": "PUT",
     "path": "/profile/platforms",
     "keys": [

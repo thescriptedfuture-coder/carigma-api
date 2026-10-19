@@ -19,7 +19,7 @@ Two rules are enforced structurally rather than trusted to reviewers:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -31,6 +31,7 @@ from carigma_api.services.weekly import (
     offers_fortnightly,
     presentation_for,
 )
+from carigma_api.services.weekly import weeks as _weeks
 
 
 class Direction(StrEnum):
@@ -86,10 +87,10 @@ class Streak:
         if self.broken:
             # Names the old streak as a fact and points forward, with no
             # instruction to feel anything about it.
-            return f"Last streak: {self.previous_best} weeks. A new one starts when you ship."
+            return f"Last streak: {_weeks(self.previous_best)}. A new one starts when you ship."
         if self.weeks == 0:
             return "No streak yet. It starts with the first post you ship."
-        return f"Streak: {self.weeks} weeks"
+        return f"Streak: {_weeks(self.weeks)}"
 
     def as_dict(self) -> dict[str, Any]:
         sentence = self.sentence()
@@ -100,6 +101,42 @@ class Streak:
             "broken": self.broken,
             "sentence": sentence,
         }
+
+
+def earned_review(
+    *,
+    facts: tuple[ReviewFact, ...],
+    streak: Streak,
+    milestone: dict[str, str] | None = None,
+    built_at: datetime | None = None,
+) -> dict[str, Any]:
+    """What a closed week is worth keeping — the part that had to be earned.
+
+    Facts without receipts cannot exist here; the type refuses them.
+
+    **There is deliberately no `wire` key.** The review used to build its own
+    market wire in parallel with the curated batch, which meant a second source
+    of market claims that never passed through P6-2's publish gate: it could
+    carry an item no human had checked. The path is deleted rather than left
+    unrendered, because an orphaned field is a trap — the next person finds a
+    plausible value and renders it.
+    """
+    return {
+        "facts": [f.as_dict() for f in facts],
+        "streak": streak.as_dict(),
+        "milestone": milestone,
+        # Stamped when the review is BUILT, and stored with it.
+        #
+        # The first version of this read the row's `created_at`, which is a
+        # different event: the row is created when the week's CONTRACT is
+        # proposed, on the Monday. The review is built the following Sunday.
+        # Same row, six days apart — it would have reported every review as
+        # built a week before it was.
+        #
+        # Before that it was the literal string "Sun 18:00", printed whatever
+        # time the review actually ran.
+        "built_at": (built_at or datetime.now(UTC)).isoformat(),
+    }
 
 
 # Day-of-month without a leading zero. `%-d` is POSIX-only and raises on

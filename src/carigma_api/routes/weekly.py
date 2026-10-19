@@ -41,19 +41,18 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
-from carigma_api.services.constants import CREDIT_COSTS
 from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.review import (
     Direction,
     ReviewFact,
     Streak,
+    earned_review,
     re_entry_contract,
     standing_by_card,
 )
-from carigma_api.services.schedule import DAY_INDEX, content_days
+from carigma_api.services.schedule import proposal_items
 from carigma_api.services.weekly import (
     Cadence,
-    ContractItem,
     ContractState,
     ContractTransitionError,
     WeeklyContract,
@@ -105,42 +104,6 @@ def _unavailable(what: str) -> HTTPException:
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail={"error": "read_failed", "message": f"We couldn't load {what} just now."},
     )
-
-
-def earned_review(
-    *,
-    facts: tuple[ReviewFact, ...],
-    streak: Streak,
-    milestone: dict[str, str] | None = None,
-    built_at: datetime | None = None,
-) -> dict[str, Any]:
-    """What a closed week is worth keeping — the part that had to be earned.
-
-    Facts without receipts cannot exist here; the type refuses them.
-
-    **There is deliberately no `wire` key.** The review used to build its own
-    market wire in parallel with the curated batch, which meant a second source
-    of market claims that never passed through P6-2's publish gate: it could
-    carry an item no human had checked. The path is deleted rather than left
-    unrendered, because an orphaned field is a trap — the next person finds a
-    plausible value and renders it.
-    """
-    return {
-        "facts": [f.as_dict() for f in facts],
-        "streak": streak.as_dict(),
-        "milestone": milestone,
-        # Stamped when the review is BUILT, and stored with it.
-        #
-        # The first version of this read the row's `created_at`, which is a
-        # different event: the row is created when the week's CONTRACT is
-        # proposed, on the Monday. The review is built the following Sunday.
-        # Same row, six days apart — it would have reported every review as
-        # built a week before it was.
-        #
-        # Before that it was the literal string "Sun 18:00", printed whatever
-        # time the review actually ran.
-        "built_at": (built_at or datetime.now(UTC)).isoformat(),
-    }
 
 
 def render_review(week_start: date, earned: dict[str, Any]) -> dict[str, Any]:
@@ -198,22 +161,33 @@ def get_contract(
 
     contract = next((c for c in history if c.week_start == week_start), None)
     lapses = consecutive_lapses(history, upto=week_start)
+    # Sunday evening's proposal is for the week that starts tomorrow. Without
+    # this, the plan the review email asks someone to sign was invisible until
+    # Monday — the one day it is no longer next week's.
+    upcoming = next((c for c in history if c.week_start == week_start + timedelta(weeks=1)), None)
 
     payload: dict[str, Any] = {
         "week_start": week_start.isoformat(),
         "lapsed_weeks": lapses,
         "presentation": presentation_for(lapses),
         "contract": contract.as_dict() if contract else None,
+        "next_week": upcoming.as_dict() if upcoming else None,
     }
 
-    if contract is None:
+    if not history:
         # Day one: a promise with a timestamp, never a blank surface.
+        #
+        # Keyed on HISTORY, not on this week's row. It was `contract is None`,
+        # so a user four weeks in who had not planned this week yet was told
+        # their FIRST review had not been built. And the promise is now the
+        # true one: Sunday's pass reviews the weeks people plan, so a review
+        # follows a plan — "your first review builds Sunday" was unconditional.
         payload["day_one"] = {
             "happened": "Your first review has not been built yet.",
-            "why": "Reviews are built Sunday evening from the week's real activity.",
-            "next": "Your first review builds Sunday, 18:00.",
+            "why": "Reviews are built Sunday evening from the weeks you plan.",
+            "next": "Plan this week, and its review builds Sunday at 18:00.",
         }
-    elif contract.state.is_decided:
+    if contract is not None and contract.state.is_decided:
         # The same copy the signature returned, on a reload. It used to exist
         # only in the POST response, so the page had to carry its own literal —
         # and that literal said "See you Monday" on a Thursday, forever.
@@ -390,23 +364,31 @@ def get_review(
       and rendering the day-one promise on a failed read would tell a
       long-standing user they have never had a review.
 
-    Reviews are built from the week's REAL activity by the Sunday cron. Until
-    that runs for a given week this returns null rather than a specimen: a
-    plausible-looking review the user never earned is exactly the fabrication
-    Bible §18.1 forbids.
+    Reviews are built from the week's REAL activity by the Sunday cron
+    (`services.sunday`). Until that runs for a given week this returns null
+    rather than a specimen: a plausible-looking review the user never earned is
+    exactly the fabrication Bible §18.1 forbids.
+
+    **On a Sunday, this week's review comes first.** The cron builds it at
+    18:00 IST, the evening the week closes, and reading only "last Monday's
+    row" would hide it until Monday — the review email arriving for a review
+    the page could not show. Before the cron runs, Sunday still shows last
+    week's.
     """
     store = _deps(request, settings)
-    last_week = _monday_of(datetime.now(UTC).date()) - timedelta(weeks=1)
+    today = datetime.now(UTC).date()
+    last_week = _monday_of(today) - timedelta(weeks=1)
+    weeks = (_monday_of(today), last_week) if today.weekday() == 6 else (last_week,)
 
     try:
-        earned = store.load_review(user.id, last_week)
+        for week in weeks:
+            earned = store.load_review(user.id, week)
+            if earned is not None:
+                return {"review": render_review(week, earned)}
     except Exception as exc:
         logger.exception("could not read the weekly review for %s", user.id)
         raise _unavailable("your review") from exc
-
-    if earned is None:
-        return {"review": None}
-    return {"review": render_review(last_week, earned)}
+    return {"review": None}
 
 
 @router.get("/standing-by")
@@ -462,7 +444,7 @@ def propose_re_entry(
     proposed = replace(
         re_entry_contract(
             week_start=week_start,
-            candidates=_candidates(_profile(request, settings, user.id), today=today),
+            candidates=proposal_items(_profile(request, settings, user.id), today=today),
             cadence=cadence,
         ),
         proposed_at=datetime.now(UTC),
@@ -496,7 +478,7 @@ def propose_plan(
     profile = _profile(request, settings, user.id)
     proposed = WeeklyContract(
         week_start=week_start,
-        items=_candidates(profile, today=today),
+        items=proposal_items(profile, today=today),
         cadence=Cadence.WEEKLY,
         # When it was proposed is a fact, and nothing recorded it.
         proposed_at=datetime.now(UTC),
@@ -535,37 +517,6 @@ def _profile(request: Request, settings: Settings, user_id: str) -> dict[str, An
     except Exception as exc:
         logger.exception("could not read the profile for %s", user_id)
         raise _unavailable("your profile") from exc
-
-
-def _candidates(profile: dict[str, Any], *, today: date) -> tuple[ContractItem, ...]:
-    """The week a proposal offers, seeded from the user's own settings.
-
-    - **A post on each of their posting days** — `profile.cadence` as days,
-      V1's mapping (`schedule.content_days`). It was one post on Thursday for
-      everyone: a static menu written before Content Intelligence existed.
-    - **The Naukri refresh only for someone on Naukri.** It was offered to
-      everyone, at 10 credits, including people who never connected it.
-    - **The Sunday review**, always: it is the ritual.
-
-    Only days still ahead: a plan made on Thursday does not propose Monday's
-    post, because a promise about a day that has passed is not one anybody
-    can keep.
-    """
-    platforms = profile.get("platforms")
-    on_naukri = isinstance(platforms, list) and "naukri" in platforms
-    items = [
-        # Priced from the ONE cost table, not a literal. It once read 12 — the
-        # price of a whole week's generation — on a row that offers a single
-        # slot, while the Posts surface quoted 3 for the same thing. A first
-        # draft and a redraft are the same work on the same slot: one action,
-        # one price.
-        ContractItem("content", day, "One post slot", 10, CREDIT_COSTS["regenerate_slot"])
-        for day in content_days(profile.get("cadence"))
-    ]
-    if on_naukri:
-        items.append(ContractItem("naukri", "SAT", "Freshness refresh only", 3, 10))
-    items.append(ContractItem("review", "SUN", "Review, 18:00", 10, 0))
-    return tuple(i for i in items if DAY_INDEX[i.day] >= today.weekday())
 
 
 __all__ = ["router", "earned_review", "render_review", "Direction", "ReviewFact"]

@@ -28,8 +28,9 @@ signature was decorative.
   where to change it. The product never plans on someone's behalf and then
   acts.
 - **Cadence seeds the proposal**, nothing else: `content_days` is how many
-  posts a week the user chose at onboarding, as days, for `routes/weekly` to
-  offer.
+  posts a week the user chose at onboarding, as days, and `proposal_items` is
+  the week built from them — offered by "Plan this week" and by Sunday's pass
+  alike, so the two cannot propose different weeks.
 """
 
 from __future__ import annotations
@@ -39,8 +40,9 @@ from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any
 
+from carigma_api.services.constants import CREDIT_COSTS
 from carigma_api.services.posts import Slot, SlotState, WeekPlan
-from carigma_api.services.weekly import ContractState, WeeklyContract
+from carigma_api.services.weekly import ContractItem, ContractState, WeeklyContract
 
 DAY_INDEX = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
 
@@ -78,6 +80,37 @@ def content_days(cadence: Any) -> tuple[str, ...]:
         return CADENCE_DAYS.get(int(cadence), CADENCE_DAYS[DEFAULT_CADENCE])
     except (TypeError, ValueError):
         return CADENCE_DAYS[DEFAULT_CADENCE]
+
+
+def proposal_items(profile: dict[str, Any], *, today: date) -> tuple[ContractItem, ...]:
+    """The week a proposal offers, seeded from the user's own settings.
+
+    - **A post on each of their posting days** — `profile.cadence` as days,
+      V1's mapping (`content_days`). It was one post on Thursday for everyone:
+      a static menu written before Content Intelligence existed.
+    - **The Naukri refresh only for someone on Naukri.** It was offered to
+      everyone, at 10 credits, including people who never connected it.
+    - **The Sunday review**, always: it is the ritual.
+
+    Only days still ahead of `today`: a plan made on Thursday does not propose
+    Monday's post, because a promise about a day that has passed is not one
+    anybody can keep. Sunday's pass passes next Monday, so it offers them all.
+    """
+    platforms = profile.get("platforms")
+    on_naukri = isinstance(platforms, list) and "naukri" in platforms
+    items = [
+        # Priced from the ONE cost table, not a literal. It once read 12 — the
+        # price of a whole week's generation — on a row that offers a single
+        # slot, while the Posts surface quoted 3 for the same thing. A first
+        # draft and a redraft are the same work on the same slot: one action,
+        # one price.
+        ContractItem("content", day, "One post slot", 10, CREDIT_COSTS["regenerate_slot"])
+        for day in content_days(profile.get("cadence"))
+    ]
+    if on_naukri:
+        items.append(ContractItem("naukri", "SAT", "Freshness refresh only", 3, 10))
+    items.append(ContractItem("review", "SUN", "Review, 18:00", 10, 0))
+    return tuple(i for i in items if DAY_INDEX[i.day] >= today.weekday())
 
 
 def standing_of(contract: WeeklyContract | None) -> Standing:
@@ -184,6 +217,7 @@ __all__ = [
     "EMPTY_ACTION",
     "Standing",
     "content_days",
+    "proposal_items",
     "schedule",
     "scheduled_days",
     "standing_of",

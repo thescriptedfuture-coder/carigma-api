@@ -26,6 +26,7 @@ from enum import StrEnum
 from typing import Any
 
 from carigma_api.services.weekly import assert_no_guilt
+from carigma_api.services.weekly import weeks as _weeks
 
 
 class SlotState(StrEnum):
@@ -241,10 +242,10 @@ class StreakState:
     def sentence(self) -> str:
         if self.paused:
             # "Held, not lost." Brief 3a is explicit that the number survives.
-            return f"Paused at {self.weeks} weeks"
+            return f"Paused at {_weeks(self.weeks)}"
         if self.weeks == 0:
             return "No streak yet. It starts with the first post you ship."
-        return f"Streak: {self.weeks} weeks"
+        return f"Streak: {_weeks(self.weeks)}"
 
     def as_dict(self) -> dict[str, Any]:
         sentence = self.sentence()

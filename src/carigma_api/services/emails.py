@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 
 FROM_ADDRESS = "Carigma <support@carigma.in>"
 
+#: Where links point when the caller names no app. `carigma.in` serves V1
+#: until cutover, so the cron passes `APP_URL` — every link in these emails
+#: was hardcoded to it, and "ready to approve" opened a Streamlit page that
+#: has no plan to approve.
+PUBLIC_URL = "https://carigma.in"
+
+
+def _link(app_url: str, path: str) -> str:
+    return f"{(app_url or PUBLIC_URL).rstrip('/')}{path}"
+
 
 class EmailType(StrEnum):
     WELCOME = "welcome"
@@ -133,7 +143,9 @@ class DailyFacts:
         )
 
 
-def build_daily_brief(email: str, facts: DailyFacts, *, greeting_name: str = "") -> Email | None:
+def build_daily_brief(
+    email: str, facts: DailyFacts, *, greeting_name: str = "", app_url: str = PUBLIC_URL
+) -> Email | None:
     """Return the brief, or **None when there is nothing real to say**.
 
     The `sources_unavailable` case is the subtle one. If Career Scout could not
@@ -172,7 +184,7 @@ def build_daily_brief(email: str, facts: DailyFacts, *, greeting_name: str = "")
     return Email(
         to=email,
         subject=_daily_subject(facts),
-        body=f"{hello}\n\n" + "\n".join(lines) + "\n\nOpen Carigma: https://carigma.in/today\n",
+        body=f"{hello}\n\n" + "\n".join(lines) + f"\n\nOpen Carigma: {_link(app_url, '/today')}\n",
         email_type=EmailType.DAILY_BRIEF,
     )
 
@@ -213,7 +225,9 @@ class WeeklyFacts:
         )
 
 
-def build_weekly_review(email: str, facts: WeeklyFacts) -> Email | None:
+def build_weekly_review(
+    email: str, facts: WeeklyFacts, *, app_url: str = PUBLIC_URL
+) -> Email | None:
     """Sunday's review. Screenshot-bait by design, and it carries the
     approve-next-week prompt.
 
@@ -236,7 +250,7 @@ def build_weekly_review(email: str, facts: WeeklyFacts) -> Email | None:
     if facts.recommendation:
         parts.append(f"\nOne thing for next week: {facts.recommendation}")
     if facts.contract_pending:
-        parts.append("\nNext week's plan is ready to approve:\nhttps://carigma.in/progress")
+        parts.append(f"\nNext week's plan is ready to approve:\n{_link(app_url, '/progress')}")
 
     return Email(
         to=email,
