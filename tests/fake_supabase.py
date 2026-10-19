@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tests.schema import live_primary_key, unique_keys_of
+from tests.schema import live_primary_key, unique_indexes_of, unique_keys_of
 
 
 class Result:
@@ -193,6 +193,14 @@ class FakeTable:
         """
         for key in _keys_for(self._name):
             if any(column not in incoming for column in key):
+                continue
+            ident = tuple(str(incoming[column]) for column in key)
+            if any(tuple(str(row.get(column)) for column in key) == ident for row in rows):
+                raise UniqueViolation(self._name, key)
+        # `create unique index`es, with Postgres's rule that NULLs never
+        # collide — so a run with no Idempotency-Key never meets another.
+        for key in unique_indexes_of(self._name):
+            if any(incoming.get(column) is None for column in key):
                 continue
             ident = tuple(str(incoming[column]) for column in key)
             if any(tuple(str(row.get(column)) for column in key) == ident for row in rows):

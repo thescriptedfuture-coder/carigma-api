@@ -87,20 +87,34 @@ class RecordingRunStore:
     def __init__(self) -> None:
         self.runs: dict[str, AgentRun] = {}
         self.rows: list[dict[str, object]] = []
+        #: The key each run was asked under.
+        self._asked: dict[str, tuple[str, str]] = {}
+        #: The run that HOLDS each key: the first one stored under it, as the
+        #: table's unique index on (user_id, idempotency_key) decides.
         self._idempotency: dict[tuple[str, str], str] = {}
 
     def save(self, run: AgentRun) -> None:
-        key = next((k for (u, k), r in self._idempotency.items() if r == run.id), None)
-        row = _to_row(run, key)
+        asked = self._asked.get(run.id)
+        row = _to_row(run, asked[1] if asked else None)
         check_row(row)
         self.rows.append(row)
         self.runs[run.id] = run
+        if asked and asked not in self._idempotency:
+            self._idempotency[asked] = run.id
+
+    def start(self, run: AgentRun) -> AgentRun | None:
+        asked = self._asked.get(run.id)
+        holder = self._idempotency.get(asked) if asked else None
+        if holder is not None and holder != run.id:
+            return self.runs[holder]
+        self.save(run)
+        return None
 
     def get(self, run_id: str) -> AgentRun | None:
         return self.runs.get(run_id)
 
     def remember_idempotency(self, user_id: str, key: str, run_id: str) -> None:
-        self._idempotency[(user_id, key)] = run_id
+        self._asked[run_id] = (user_id, key)
 
     def find_by_idempotency_key(self, user_id: str, key: str) -> AgentRun | None:
         run_id = self._idempotency.get((user_id, key))

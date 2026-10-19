@@ -155,7 +155,9 @@
   {
     "method": "POST",
     "path": "/score/compute",
-    "keys": [],
+    "keys": [
+      "background"
+    ],
     "where": "src/routes/SignalPage.tsx"
   },
   {

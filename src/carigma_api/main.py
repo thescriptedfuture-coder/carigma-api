@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from carigma_api.auth.jwt_verifier import JWTVerifier
 from carigma_api.config import get_settings
 from carigma_api.routes import admin as admin_routes
+from carigma_api.routes import agents as agents_routes
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import credits as credits_routes
 from carigma_api.routes import health as health_routes
@@ -129,12 +130,16 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        # `Idempotency-Key` is what lets a retried run start be answered by
+        # the run it already started. Not listed, the browser preflight
+        # refuses the header and the retry never leaves the page.
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
 
     app.include_router(health_routes.router)
     app.include_router(auth_routes.router)
     app.include_router(score_routes.router)
+    app.include_router(agents_routes.router)
     app.include_router(weekly_routes.router)
     app.include_router(posts_routes.router)
     app.include_router(profile_update_routes.router)

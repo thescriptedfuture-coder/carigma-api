@@ -30,6 +30,12 @@
   "GET /admin/users": [
     "items[].created_at"
   ],
+  "GET /agents/runs/{}": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result"
+  ],
   "GET /credits": [
     "balance"
   ],
@@ -206,6 +212,12 @@
   ],
   "POST /profile/updates/{}/decide": [
     "applied_at"
+  ],
+  "POST /score/compute": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result"
   ],
   "POST /thread/{}/decide": [
     "snooze_until"
