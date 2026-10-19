@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
+from carigma_api.services.clock import local
 from carigma_api.services.ladder import choose
 from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.thread_store import (
@@ -65,10 +66,14 @@ def _unavailable(what: str) -> HTTPException:
 
 
 def _greeting(now: datetime) -> str:
-    hour = now.hour
-    if hour < 12:
+    """Said on the reader's clock. It read the server's UTC hour, so 9 pm in
+    India — 15:30 UTC — was "Afternoon"."""
+    hour = local(now).hour
+    if 5 <= hour < 12:
         return "Morning"
-    return "Afternoon" if hour < 17 else "Evening"
+    if 12 <= hour < 17:
+        return "Afternoon"
+    return "Evening"
 
 
 @router.get("/today")

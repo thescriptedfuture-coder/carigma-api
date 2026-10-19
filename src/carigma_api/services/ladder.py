@@ -11,10 +11,21 @@ an accident in control flow.
 ## The order, and why each pair falls the way it does
 
     1  interview_soon   an interview inside 72 hours
-    2  post_day         a slot due today
-    3  score_fix        a fix waiting to be applied
-    4  new_matches      jobs surfaced since the last visit
-    5  standing         the fallback
+    2  sign_week        a plan waiting for the user's signature
+    3  post_day         a slot due today
+    4  score_fix        a fix waiting to be applied
+    5  week_review      the week's review, on Sunday and Monday
+    6  new_matches      jobs surfaced since the last visit
+    7  standing         the fallback
+
+**A plan waiting to be signed beats a post day** — and in practice they never
+meet: an unsigned week schedules no posts. It sits under an interview because
+an interview is somebody else's calendar. Until S9 Today had no rung for it,
+so a week waiting on the user's signature read "Nothing is due today".
+
+**The review sits under anything completable.** It is the record — worth
+reading, never urgent — and on Sunday evening it travels inside the signing
+card rather than beside it, because both open the same page.
 
 **Interview beats post day.** A missed post publishes tomorrow; an unprepared
 interview is gone. A dated external commitment outranks a self-imposed cadence
@@ -48,6 +59,16 @@ from typing import Any
 #: An interview this close is the most time-bound thing the product knows about.
 INTERVIEW_HORIZON = timedelta(hours=72)
 
+_DAY_NAMES = {
+    "MON": "Monday",
+    "TUE": "Tuesday",
+    "WED": "Wednesday",
+    "THU": "Thursday",
+    "FRI": "Friday",
+    "SAT": "Saturday",
+    "SUN": "Sunday",
+}
+
 
 @dataclass(frozen=True)
 class Signals:
@@ -80,6 +101,16 @@ class Signals:
     #: Everything currently active in the feed. Always knowable, and it is what
     #: the rung falls back to describing when novelty cannot be claimed.
     open_match_count: int = 0
+    #: A plan waiting for a signature: "next" on a Sunday evening once the
+    #: Sunday pass has proposed it, "this" when the running week is unsigned.
+    #: `None` when nothing waits — or when the weeks could not be read, which
+    #: must not become a card asking someone to sign a week they signed.
+    unsigned_week: str | None = None
+    unsigned_posts: int = 0
+    #: The closing week's review, once built — "12–18 Oct" — offered on
+    #: Sunday and Monday. Progress keeps it all week.
+    review_label: str | None = None
+    review_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -123,13 +154,63 @@ def _interview(s: Signals) -> dict[str, Any]:
     }
 
 
+def _lines(n: int) -> str:
+    return f"{n} line" if n == 1 else f"{n} lines"
+
+
+def _sign_applies(s: Signals) -> bool:
+    return s.unsigned_week is not None
+
+
+def _sign(s: Signals) -> dict[str, Any]:
+    posts = f"{s.unsigned_posts} post" + ("" if s.unsigned_posts == 1 else "s")
+    if s.review_label:
+        # Sunday evening: one card, record first. Brief 3a — "the record,
+        # then the contract".
+        body = (
+            f"Your review of {s.review_label} is in — {_lines(s.review_lines)}. "
+            f"Read it, then sign the week: {posts} on your days."
+        )
+    else:
+        body = f"{posts} on your days. Nothing is scheduled until you sign it."
+    return {
+        "title": (
+            "Next week's plan is ready to sign"
+            if s.unsigned_week == "next"
+            else "This week's plan is waiting for your signature"
+        ),
+        "body": body,
+        "primary": {"label": "Read and sign", "route": "/progress"},
+    }
+
+
+def _review_applies(s: Signals) -> bool:
+    # Not beside the signing card: both open Progress, and that card already
+    # carries the review.
+    return s.review_label is not None and s.unsigned_week is None
+
+
+def _review(s: Signals) -> dict[str, Any]:
+    return {
+        "title": "Your week in review",
+        "body": (
+            f"{s.review_label} · {_lines(s.review_lines)}, each with its evidence."
+            if s.review_lines
+            else f"{s.review_label} was a quiet week, and the review says so."
+        ),
+        "primary": {"label": "Read it", "route": "/progress"},
+    }
+
+
 def _post_applies(s: Signals) -> bool:
     return bool(s.post_due_today)
 
 
 def _post(s: Signals) -> dict[str, Any]:
+    # "Your MON post is ready" — the day code is a route key, not a word.
+    day = _DAY_NAMES.get(s.post_due_today or "", s.post_due_today)
     return {
-        "title": f"Your {s.post_due_today} post is ready",
+        "title": f"Your {day} post is ready",
         "body": "Review it and mark it published when you have posted.",
         "primary": {"label": "Open the draft", "route": f"/posts/week/{s.post_due_today}"},
     }
@@ -213,16 +294,18 @@ def _standing(s: Signals) -> dict[str, Any]:
 #: a reordering shows up as a changed number rather than as moved code.
 CONDITIONAL: tuple[Rung, ...] = (
     Rung("interview_soon", 1, True, _interview_applies, _interview),
-    Rung("post_day", 2, True, _post_applies, _post),
-    Rung("score_fix", 3, False, _fix_applies, _fix),
-    Rung("new_matches", 4, False, _matches_apply, _matches),
+    Rung("sign_week", 2, True, _sign_applies, _sign),
+    Rung("post_day", 3, True, _post_applies, _post),
+    Rung("score_fix", 4, False, _fix_applies, _fix),
+    Rung("week_review", 5, False, _review_applies, _review),
+    Rung("new_matches", 6, False, _matches_apply, _matches),
 )
 
 #: Separate, because it is not a condition — it is what is left when none of
 #: the others hold. Splitting it out makes two rules structural rather than
 #: enforced: `choose` cannot return nothing, and the fallback cannot appear in
 #: `deferred`, because it is not in the list that produces deferrals.
-FALLBACK = Rung("standing", 5, False, lambda _s: True, _standing)
+FALLBACK = Rung("standing", 7, False, lambda _s: True, _standing)
 
 PRIORITIES: tuple[Rung, ...] = (*CONDITIONAL, FALLBACK)
 
