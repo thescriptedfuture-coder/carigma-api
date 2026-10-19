@@ -70,6 +70,10 @@ ACCEPTED: dict[tuple[str, str], str] = {
     # treats "no usable date" as "cannot tell", which keeps it.
     ("feed.py", "_when"): "unusable timestamp; callers treat it as no evidence",
     ("sunday.py", "_moment"): "unusable timestamp; the receipt omits the time, never invents one",
+    (
+        "analysis_store.py",
+        "_stamps",
+    ): "V1's last_run that is not JSON has no per-agent stamps to keep; V1 reads it the same way",
     ("thread_store.py", "is_suppressed"): "errs toward showing the user their own item back",
     ("runs.py", "stream"): "ends the stream; there is no other terminal value",
     ("unsubscribe.py", "resolve"): "a corrupt token and an invalid token are both 'bad link'",

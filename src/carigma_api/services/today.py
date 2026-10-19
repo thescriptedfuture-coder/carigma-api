@@ -50,6 +50,8 @@ from carigma_api.services.ladder import Signals
 from carigma_api.services.posts import SlotState
 from carigma_api.services.posts_store import SupabasePlanStore
 from carigma_api.services.schedule import schedule
+from carigma_api.services.sunday import closing_week
+from carigma_api.services.weekly import ContractState
 from carigma_api.services.weekly_store import SupabaseContractStore
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,10 @@ class Sources:
     #: Distinguishes "no plan for this week" from "could not read the plan",
     #: which a `plan` of `None` cannot do on its own.
     plan_read: bool
+    #: The signals the two weekly rungs need (`week_signals`). Empty when the
+    #: weeks could not be read — absence, never a card about a week we did
+    #: not see.
+    weeks: dict[str, Any] | None = None
 
 
 def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
@@ -193,19 +199,27 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
 
     plan = None
     plan_read = True
+    week_start = _monday_of(today)
+    contracts = SupabaseContractStore(client)
     try:
         # The week as SIGNED (S8), not the stored slots alone: Today's strip
         # showed Monday and Thursday for a week whose contract carried only
         # Thursday, because it read what Posts read, and Posts read a default.
-        week_start = _monday_of(today)
         plan = schedule(
             week_start,
-            contract=SupabaseContractStore(client).load(user_id, week_start),
+            contract=contracts.load(user_id, week_start),
             stored=SupabasePlanStore(client).load(user_id, week_start),
         )
     except Exception:
         logger.exception("could not read the week plan for %s", user_id)
         plan_read = False
+
+    weeks: dict[str, Any] | None
+    try:
+        weeks = week_signals(contracts, user_id, today=today)
+    except Exception:
+        logger.exception("could not read the weekly contracts for %s", user_id)
+        weeks = None
 
     scores: list[dict[str, Any]] | None
     try:
@@ -229,7 +243,51 @@ def read_sources(client: Any, user_id: str, *, now: datetime) -> Sources:
         plan=plan,
         scores=scores,
         plan_read=plan_read,
+        weeks=weeks,
     )
+
+
+def week_signals(contracts: Any, user_id: str, *, today: date) -> dict[str, Any]:
+    """What the two weekly rungs need: a plan waiting to be signed, and the
+    closing week's review (S9).
+
+    On a Sunday, next week's proposal is the one waiting — the Sunday pass
+    made it that evening — and this week's, with hours left, is not asked
+    about. On Sunday and Monday, the review of the week the last Sunday closed.
+    """
+    this_monday = _monday_of(today)
+    sunday = today.weekday() == 6
+    waiting: list[tuple[str, date]] = [("this", this_monday)]
+    if sunday:
+        waiting = [("next", this_monday + timedelta(weeks=1))]
+
+    unsigned_week, unsigned_posts = None, 0
+    for which, monday in waiting:
+        contract = contracts.load(user_id, monday)
+        if contract is not None and contract.state is ContractState.PROPOSED:
+            unsigned_week = which
+            unsigned_posts = sum(1 for i in contract.items if i.kind == "content")
+
+    review_label, review_lines = None, 0
+    if sunday or today.weekday() == 0:
+        closing = closing_week(today)
+        earned = contracts.load_review(user_id, closing)
+        if earned is not None:
+            facts = earned.get("facts")
+            review_lines = len(facts) if isinstance(facts, list) else 0
+            end = closing + timedelta(days=6)
+            review_label = (
+                f"{closing.day}–{end.day} {end:%b}"
+                if closing.month == end.month
+                else f"{closing.day} {closing:%b} – {end.day} {end:%b}"
+            )
+
+    return {
+        "unsigned_week": unsigned_week,
+        "unsigned_posts": unsigned_posts,
+        "review_label": review_label,
+        "review_lines": review_lines,
+    }
 
 
 def load_signals(
@@ -266,6 +324,7 @@ def load_signals(
         pending_fix=pending_fix,
         new_match_count=fresh,
         open_match_count=open_count,
+        **(read.weeks or {}),
     )
 
 

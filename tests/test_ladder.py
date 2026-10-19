@@ -37,8 +37,10 @@ def test_the_sequence_is_exactly_this() -> None:
     """
     assert [r.key for r in sorted(PRIORITIES, key=lambda r: r.rank)] == [
         "interview_soon",
+        "sign_week",
         "post_day",
         "score_fix",
+        "week_review",
         "new_matches",
         "standing",
     ]
@@ -58,8 +60,12 @@ def test_only_the_time_bound_rungs_are_marked_time_bound() -> None:
 
     assert flags == {
         "interview_soon": True,
+        # A week left unsigned schedules nothing — a window, like a post day.
+        "sign_week": True,
         "post_day": True,
         "score_fix": False,
+        # The record. Worth reading, never urgent.
+        "week_review": False,
         "new_matches": False,
         "standing": False,
     }
@@ -110,7 +116,8 @@ def test_a_demoted_post_day_is_still_time_bound() -> None:
 
     demoted = next(d for d in decision.deferred if d["key"] == "post_day")
     assert demoted["time_bound"] is True
-    assert "WED" in demoted["title"]
+    # The day as a word: it read "Your WED post is ready".
+    assert demoted["title"] == "Your Wednesday post is ready"
 
 
 def test_a_demoted_queue_is_not_dressed_up_as_urgent() -> None:
@@ -217,8 +224,10 @@ def test_every_rung_produces_a_primary_action_with_somewhere_to_go() -> None:
     deleting."""
     cases = [
         signals(next_interview_at=NOW + timedelta(hours=2), interview_label="X"),
+        signals(unsigned_week="this", unsigned_posts=5),
         signals(post_due_today="MON"),
         signals(pending_fix="something"),
+        signals(review_label="12–18 Oct", review_lines=3),
         signals(new_match_count=1),
         signals(),
     ]
@@ -314,3 +323,47 @@ def test_one_match_is_singular_in_both_phrasings() -> None:
 
     assert known.primary["title"] == "1 new match"
     assert unknown.primary["title"] == "1 match waiting"
+
+
+# ── The Sunday rungs (S9) ──────────────────────────────────────────────────
+
+
+def test_an_unsigned_week_is_not_a_quiet_day() -> None:
+    """Until S9 Today had no rung for it: a week waiting on the user's
+    signature read "Nothing is due today", while Posts said nothing was
+    scheduled until they signed."""
+    decision = choose(signals(unsigned_week="this", unsigned_posts=5))
+
+    assert decision.primary["key"] == "sign_week"
+    assert decision.primary["title"] == "This week's plan is waiting for your signature"
+    assert (
+        decision.primary["body"] == "5 posts on your days. Nothing is scheduled until you sign it."
+    )
+    assert decision.primary["primary"]["route"] == "/progress"
+
+
+def test_on_sunday_evening_the_review_travels_inside_the_signing_card() -> None:
+    """The record, then the contract — one card, because both open Progress."""
+    decision = choose(
+        signals(unsigned_week="next", unsigned_posts=5, review_label="12–18 Oct", review_lines=8)
+    )
+
+    assert decision.primary["title"] == "Next week's plan is ready to sign"
+    assert decision.primary["body"].startswith("Your review of 12–18 Oct is in — 8 lines.")
+    assert "week_review" not in {d["key"] for d in decision.deferred}
+
+
+def test_on_monday_the_post_comes_first_and_the_review_waits_beside_it() -> None:
+    decision = choose(signals(post_due_today="MON", review_label="12–18 Oct", review_lines=8))
+
+    assert decision.primary["key"] == "post_day"
+    review = next(d for d in decision.deferred if d["key"] == "week_review")
+    assert review["title"] == "Your week in review"
+    assert review["body"] == "12–18 Oct · 8 lines, each with its evidence."
+    assert review["time_bound"] is False
+
+
+def test_a_quiet_week_is_said_as_one() -> None:
+    decision = choose(signals(review_label="12–18 Oct", review_lines=0))
+
+    assert decision.primary["body"] == "12–18 Oct was a quiet week, and the review says so."

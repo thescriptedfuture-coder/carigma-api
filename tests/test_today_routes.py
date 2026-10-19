@@ -396,6 +396,11 @@ def test_the_signals_type_carries_no_extra_state() -> None:
         "pending_fix",
         "new_match_count",
         "open_match_count",
+        # S9: the two weekly rungs.
+        "unsigned_week",
+        "unsigned_posts",
+        "review_label",
+        "review_lines",
     }
 
 
@@ -629,3 +634,123 @@ def test_the_week_strip_follows_the_week_the_user_signed(wired) -> None:  # type
     # The post he shipped outside the plan is on the strip, marked as such.
     assert (week["MON"]["state"], week["MON"]["optional"]) == ("published", True)
     assert {day for day, cell in week.items() if cell["state"] != "none"} == {"MON", "THU"}
+
+
+# ── The reader's clock, and the Sunday rungs (S9) ──────────────────────────
+
+
+def _at(monkeypatch: pytest.MonkeyPatch, moment: datetime) -> None:
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+            return moment
+
+    monkeypatch.setattr(routes, "datetime", _Clock)
+
+
+@pytest.mark.parametrize(
+    ("utc", "word"),
+    [
+        # 9:05 pm in India. It said "Afternoon": the server's UTC hour.
+        (datetime(2026, 10, 19, 15, 35, tzinfo=UTC), "Evening"),
+        (datetime(2026, 10, 19, 3, 0, tzinfo=UTC), "Morning"),  # 08:30 IST
+        (datetime(2026, 10, 19, 7, 0, tzinfo=UTC), "Afternoon"),  # 12:30 IST
+        (datetime(2026, 10, 19, 21, 0, tzinfo=UTC), "Evening"),  # 02:30 IST
+    ],
+)
+def test_the_greeting_is_said_on_the_readers_clock(
+    wired, monkeypatch: pytest.MonkeyPatch, utc: datetime, word: str
+) -> None:  # type: ignore[no-untyped-def]
+    client, _db, profiles = wired
+    profiles.profile = {"name": "Ravi Kumar"}
+    _at(monkeypatch, utc)
+
+    assert client.get("/today", headers=token()).json()["greeting"] == f"{word}, Ravi"
+
+
+def _seed_week(db, monday, state, *, days=("MON", "TUE", "WED", "THU", "FRI"), facts=None):  # type: ignore[no-untyped-def]
+    from carigma_api.services.weekly import ContractItem, ContractState, WeeklyContract
+    from carigma_api.services.weekly_store import to_row
+
+    contract = WeeklyContract(
+        week_start=monday,
+        state=ContractState(state),
+        items=tuple(ContractItem("content", d, "One post slot", 10, 3) for d in days),
+        accepted_kinds=("content",) if state == "approved" else (),
+    )
+    row = to_row(USER_ID, contract)
+    if facts is not None:
+        row["facts"] = {"facts": facts, "streak": {"weeks": 1}, "built_at": "x"}
+    db.seed("weekly_review", (USER_ID, monday.isoformat()), row)
+
+
+def _fact(text: str) -> dict[str, str]:
+    return {"direction": "done", "glyph": "✓", "text": text, "receipt": "EVIDENCE"}
+
+
+def test_on_sunday_evening_today_asks_for_next_weeks_signature(
+    wired, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from datetime import date
+
+    client, db, profiles = wired
+    profiles.profile = {"name": "Ravi"}
+    _at(monkeypatch, datetime(2026, 10, 25, 13, 0, tzinfo=UTC))  # Sunday, 18:30 IST
+    _seed_week(db, date(2026, 10, 19), "approved", facts=[_fact("a"), _fact("b")])
+    _seed_week(db, date(2026, 10, 26), "proposed")
+
+    primary = client.get("/today", headers=token()).json()["primary_action"]
+
+    assert primary["key"] == "sign_week"
+    assert primary["title"] == "Next week's plan is ready to sign"
+    assert primary["body"].startswith("Your review of 19–25 Oct is in — 2 lines.")
+    assert primary["primary"]["route"] == "/progress"
+
+
+def test_on_monday_the_review_is_on_today_beside_the_days_post(
+    wired, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Ravi looked for the review on Today and it was not there: it lived
+    only on Progress."""
+    from datetime import date
+
+    client, db, profiles = wired
+    profiles.profile = {"name": "Ravi"}
+    _at(monkeypatch, datetime(2026, 10, 19, 15, 35, tzinfo=UTC))
+    _seed_week(db, date(2026, 10, 12), "approved", days=("THU",), facts=[_fact("a")])
+    _seed_week(db, date(2026, 10, 19), "approved")
+
+    body = client.get("/today", headers=token()).json()
+    review = next(d for d in body["deferred"] if d["key"] == "week_review")
+
+    assert review["body"] == "12–18 Oct · 1 line, each with its evidence."
+    assert review["primary"] == {"label": "Read it", "route": "/progress"}
+
+
+def test_an_unsigned_week_is_never_reported_as_a_quiet_day(
+    wired, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from datetime import date
+
+    client, db, profiles = wired
+    profiles.profile = {"name": "Ravi"}
+    _at(monkeypatch, datetime(2026, 10, 21, 6, 0, tzinfo=UTC))  # Wednesday
+    _seed_week(db, date(2026, 10, 19), "proposed")
+
+    primary = client.get("/today", headers=token()).json()["primary_action"]
+
+    assert primary["title"] == "This week's plan is waiting for your signature"
+
+
+def test_unreadable_weeks_ask_for_no_signature(wired, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    """A card asking someone to sign a week they may have signed is the claim
+    we could not check. Absence, and the rest of Today still renders."""
+    client, db, profiles = wired
+    profiles.profile = {"name": "Ravi"}
+    db.failing.add("weekly_review")
+
+    res = client.get("/today", headers=token())
+
+    assert res.status_code == 200
+    keys = {res.json()["primary_action"]["key"], *(d["key"] for d in res.json()["deferred"])}
+    assert not keys & {"sign_week", "week_review"}

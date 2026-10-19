@@ -7,6 +7,7 @@ run protocol → credit rule → persisted result.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -18,6 +19,9 @@ from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
 from carigma_api.services.agents import profile_analyst
+from carigma_api.services.analysis_store import AnalysisStore
+from carigma_api.services.clock import local
+from carigma_api.services.constants import CREDIT_COSTS, VARIANCE_NOTE, score_band
 from carigma_api.services.credits import InsufficientCredits
 from carigma_api.services.repository import (
     ProfileRepository,
@@ -59,6 +63,98 @@ def _deps(request: Request, user: Any, settings: Settings) -> tuple[Any, Any, An
         SupabaseCreditStore(client),
         SupabaseRunStore(client),
     )
+
+
+def _analyses(request: Request, settings: Settings) -> AnalysisStore:
+    """The stored analysis, through the caller's own client (RLS)."""
+    token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    return AnalysisStore(user_client(settings, token))
+
+
+#: V1's re-sync nudge: a reading older than this is offered a re-run, beside
+#: the reading itself.
+RESYNC_AFTER_DAYS = 30
+
+
+@router.get("/score/latest")
+def latest_score(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """The last reading, with the day it was taken. Free.
+
+    Signal refused to show any score it had not measured in the session —
+    "We won't show a score we haven't just measured" — to a user with
+    twenty-two readings. A stored reading with its date is a record: the
+    surface labels it ("Measured 11 Aug · 69 days ago") and offers a re-run.
+    """
+    try:
+        stored = _analyses(request, settings).latest(user.id)
+    except Exception as exc:
+        logger.exception("could not read the stored analysis for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "read_failed",
+                "message": "We couldn't load your last score just now.",
+            },
+        ) from exc
+
+    run_cost = CREDIT_COSTS["run_profile"]
+    if stored is None:
+        return {
+            "analysis": None,
+            "measured_at": None,
+            "measured_on": None,
+            "age_days": None,
+            "stale": False,
+            "run_cost": run_cost,
+        }
+    age = (
+        (local(datetime.now(UTC)).date() - stored.measured_on).days if stored.measured_on else None
+    )
+    return {
+        "analysis": _shown(stored.analysis),
+        "measured_at": stored.measured_at.isoformat() if stored.measured_at else None,
+        "measured_on": stored.measured_on.isoformat() if stored.measured_on else None,
+        "age_days": age,
+        # Unknown age is not "fresh" and not "stale": nothing is claimed.
+        "stale": age is not None and age >= RESYNC_AFTER_DAYS,
+        "run_cost": run_cost,
+    }
+
+
+def _shown(analysis: dict[str, Any]) -> dict[str, Any]:
+    """The reading in the shape Signal renders — V1's rows carry more keys
+    (`weeklyGoal`, `topKeywordsToAdd` ...) and none of `band` or the variance
+    note, which V2 adds to every reading it takes. Both are derived here from
+    the number, so a V1 reading renders exactly as a V2 one does."""
+    score = int(analysis["profileScore"])
+    breakdown = analysis.get("scoreBreakdown")
+    wins = analysis.get("quickWins")
+    return {
+        "profileScore": score,
+        "band": score_band(score),
+        "scoreBreakdown": {
+            str(k): int(v)
+            for k, v in (breakdown.items() if isinstance(breakdown, dict) else ())
+            if isinstance(v, int | float)
+        },
+        "scoreSummary": str(analysis.get("scoreSummary") or ""),
+        "optimizedHeadline": str(analysis.get("optimizedHeadline") or ""),
+        "optimizedAbout": str(analysis.get("optimizedAbout") or ""),
+        "quickWins": [
+            {
+                "action": str(w.get("action") or ""),
+                "impact": str(w.get("impact") or ""),
+                "effort": str(w.get("effort") or ""),
+            }
+            for w in (wins if isinstance(wins, list) else [])
+            if isinstance(w, dict) and w.get("action")
+        ],
+        "variance_note": VARIANCE_NOTE,
+    }
 
 
 @router.post("/score/compute", status_code=status.HTTP_200_OK)
@@ -144,6 +240,13 @@ async def compute_score(
             scores.record(user.id, int(settled.result["profileScore"]))
         except Exception:
             logger.exception("Score history write failed for %s", user.id)
+        # The whole reading, so Signal can show it next time with its date.
+        # Not fatal: the user is looking at the result right now, and losing
+        # the copy costs a record, not this answer.
+        try:
+            _analyses(request, settings).save(user.id, settled.result, at=settled.started_at)
+        except Exception:
+            logger.exception("could not keep the analysis for %s", user.id)
 
     return {
         "result": settled.result,

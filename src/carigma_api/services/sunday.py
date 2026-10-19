@@ -47,12 +47,13 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from carigma_api.services import emails as mail
 from carigma_api.services.applications import EVENTS
 from carigma_api.services.applications import TABLE as APPLICATIONS
+from carigma_api.services.clock import IST
 from carigma_api.services.posts import SkipReason, Slot, SlotState, streak_state
 from carigma_api.services.posts_store import SupabasePlanStore
 from carigma_api.services.repository import ProfileRepository
@@ -69,9 +70,6 @@ from carigma_api.services.weekly_store import TABLE, SupabaseContractStore
 
 logger = logging.getLogger(__name__)
 
-#: India Standard Time. No daylight saving, so a fixed offset is exact — and
-#: `zoneinfo` needs the tzdata package on Windows, where this is developed.
-IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 #: Two unanswered weeks make Monday's Progress the standing-by card.
 #: `weekly.presentation_for` is the rule; this is the count it starts at.
