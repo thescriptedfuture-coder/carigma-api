@@ -124,6 +124,13 @@ class FakeTable:
         self._ranges.append((column, "<=", str(value)))
         return self
 
+    def lt(self, column: str, value: Any) -> FakeTable:
+        """`<`, as strings, for the same reason as `gte`. A week is a half-open
+        range — Monday 00:00 up to, NOT including, the next Monday 00:00 — and
+        `lte` there would put a midnight event in two weeks' reviews."""
+        self._ranges.append((column, "<", str(value)))
+        return self
+
     def order(self, column: str, **kw: Any) -> FakeTable:
         self._order = (column, bool(kw.get("desc", False)))
         return self
@@ -145,6 +152,8 @@ class FakeTable:
             if op == ">=" and not actual >= value:
                 return False
             if op == "<=" and not actual <= value:
+                return False
+            if op == "<" and not actual < value:
                 return False
         # `in_`, compared as STRINGS like `eq` above, so the two cannot
         # disagree about what "equal" means for the same column.

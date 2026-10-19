@@ -146,7 +146,10 @@
   "GET /weekly/contract": [
     "contract",
     "contract.decided_at",
-    "contract.proposed_at"
+    "contract.proposed_at",
+    "next_week",
+    "next_week.decided_at",
+    "next_week.proposed_at"
   ],
   "GET /weekly/review": [
     "review",

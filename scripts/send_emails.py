@@ -15,8 +15,10 @@ Scheduling (Render Cron Jobs, IST times, cron expressed in UTC):
     reengagement  10:00 IST  Wednesday `30 4 * * 3`
     sweep         09:00 IST  Monday    `30 3 * * 1`
 
-**Order matters on Sunday/Monday.** `weekly` proposes next week's contract on
-Sunday evening; `sweep` auto-adopts anything still undecided after its grace
+**Order matters on Sunday/Monday.** `weekly` runs the Sunday pass
+(`services.sunday`: the closing week's review, then next week's contract) and
+then the review email — before S9 this sentence was the only place either
+happened. `sweep` auto-adopts anything still undecided after its grace
 window. Running sweep BEFORE the proposal would adopt a week nobody had been
 shown. Monday morning is comfortably after Sunday evening, and the sweep's own
 `GRACE` makes it correct regardless — but the gap is deliberate, not luck.
@@ -45,6 +47,7 @@ from carigma_api.config import Settings  # noqa: E402
 from carigma_api.services import deploy, market, reengagement, triggers  # noqa: E402
 from carigma_api.services import emails as mail  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
+from carigma_api.services.sunday import closing_week  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("send_emails")
@@ -340,9 +343,32 @@ def _last_sign_in(db: Any) -> dict[str, Any]:
     return {u.id: getattr(u, "last_sign_in_at", None) for u in users}
 
 
-def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> mail.RunSummary:
-    settings = Settings()
+#: `date.weekday()` for Sunday and Monday.
+SUNDAY, MONDAY = 6, 0
+
+
+def lookback_hours(today: date, since_hours: int | None) -> int:
+    """The daily brief's window. Monday's covers Sunday, which has no brief."""
+    if since_hours is not None:
+        return since_hours
+    return 48 if today.weekday() == MONDAY else 24
+
+
+def run(
+    kind: str, *, dry_run: bool, since_hours: int | None = None, only: str = ""
+) -> mail.RunSummary:
     summary = mail.RunSummary()
+    today = datetime.now(UTC).date()
+    if kind == "daily" and today.weekday() == SUNDAY:
+        # Sunday's one email is the review. Both claim `DAILY_SLOT`, so the
+        # 08:30 brief won the day whenever anything was new and the 18:00
+        # review — the ritual, and the only email that asks for next week's
+        # signature — was refused as a duplicate. Monday's brief looks back
+        # to Saturday's, so nothing found on Sunday goes unsaid.
+        logger.info("daily: Sunday belongs to the weekly review — no brief today")
+        return summary
+
+    settings = Settings()
 
     # A dry run is FORCED when SMTP is not configured. Attempting real sends
     # against missing credentials would produce a wall of failures that look
@@ -357,7 +383,6 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
     audience = mail.Audience.from_settings(settings.email_audience, settings.email_allowlist)
     logger.info("audience: %s", audience.describe)
 
-    today = datetime.now(UTC).date()
     period = mail.daily_key(today) if kind == "daily" else mail.weekly_key(today)
     email_type = mail.EmailType.DAILY_BRIEF if kind == "daily" else mail.EmailType.WEEKLY_REVIEW
 
@@ -372,11 +397,13 @@ def run(kind: str, *, dry_run: bool, since_hours: int = 24, only: str = "") -> m
             logger.error("no recipient matches %s — nothing was sent", only)
 
     for row in recipients:
-        facts = _facts_for(db, row["user_id"], kind, since_hours=since_hours)
+        facts = _facts_for(db, row["user_id"], kind, since_hours=lookback_hours(today, since_hours))
         built = (
-            mail.build_daily_brief(row["email"], facts, greeting_name=row.get("name", ""))
+            mail.build_daily_brief(
+                row["email"], facts, greeting_name=row.get("name", ""), app_url=settings.app_url
+            )
             if kind == "daily"
-            else mail.build_weekly_review(row["email"], facts)
+            else mail.build_weekly_review(row["email"], facts, app_url=settings.app_url)
         )
         outcome = mail.send(
             built,
@@ -461,7 +488,9 @@ def _prefs_for(row: dict[str, Any]) -> mail.Preferences:
     )
 
 
-def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> Any:
+def _facts_for(
+    db: Any, user_id: str, kind: str, *, since_hours: int = 24, today: date | None = None
+) -> Any:
     """Gather what ACTUALLY happened.
 
     Returns empty facts on a read failure rather than inventing anything — and
@@ -516,7 +545,12 @@ def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> An
     # holds the movement. Every read degrades to leaving a line out, never to
     # inventing one.
     facts = mail.WeeklyFacts()
-    monday = _monday_of(datetime.now(UTC).date()) - timedelta(weeks=1)
+    # The week that CLOSES on the Sunday this runs. It was `monday_of(today) -
+    # 1 week`, which on its own Sunday is the week BEFORE the one ending: on
+    # 18 Oct it read 5–11 Oct, found nothing and skipped, with Ravi's first
+    # published post in the week it should have read. `closing_week` is the
+    # Sunday `weekly_key` names, so a Monday retry reads the same week.
+    monday = closing_week(today or datetime.now(UTC).date())
     sunday = monday + timedelta(days=6)
     facts.week_label = f"{monday.day:02d}–{sunday.day:02d} {sunday:%b}"
 
@@ -566,7 +600,8 @@ def _facts_for(db: Any, user_id: str, kind: str, *, since_hours: int = 24) -> An
             or []
         )
         # An unsigned plan is the one thing that makes a quiet week worth an
-        # email: it is waiting on THEM, not on us.
+        # email: it is waiting on THEM, not on us. NEXT week's row — the one
+        # the Sunday pass has just proposed, which this job runs after.
         facts.contract_pending = bool(contract) and str(contract[0].get("state")) == "proposed"
     except Exception:
         logger.exception("weekly_review read failed for %s", user_id)
@@ -589,9 +624,10 @@ def main() -> int:
     parser.add_argument(
         "--since-hours",
         type=int,
-        default=24,
-        help="Lookback for 'new' matches. 24 in normal operation; widen only "
-        "to backfill or to reproduce a specific day.",
+        default=None,
+        help="Lookback for 'new' matches. 24 in normal operation (48 on Monday, "
+        "which covers Sunday's absent brief); widen only to backfill or to "
+        "reproduce a specific day.",
     )
     parser.add_argument(
         "--only",
@@ -620,6 +656,28 @@ def main() -> int:
         print(json.dumps(report.as_dict(), indent=2))
         return 0
 
+    sunday_failed = 0
+    if args.kind == "weekly":
+        # The Sunday pass BEFORE the email: the review is written and next
+        # week proposed, so the email's "next week's plan is ready" line is
+        # about a plan that exists. Honours only the explicit `--dry-run` —
+        # not the one SMTP forces — because it writes rows, not email.
+        from carigma_api.services.sunday import sunday
+
+        db = service_client(Settings())
+        only_id = ""
+        if args.only:
+            only_id = next(
+                (u for u, e in emails_by_user_id(db).items() if e.lower() == args.only.lower()),
+                "",
+            )
+            if not only_id:
+                logger.error("no user matches %s — the Sunday pass touched nothing", args.only)
+        if not args.only or only_id:
+            sunday_report = sunday(db, dry_run=args.dry_run, only=only_id or None)
+            print(json.dumps(sunday_report.as_dict(), indent=2))
+            sunday_failed = sunday_report.failed
+
     if args.kind == "reengagement":
         # Its own runner: different recipient source, and one refusal the other
         # kinds do not have (no live market batch means nothing sends at all).
@@ -628,7 +686,7 @@ def main() -> int:
         summary = run(args.kind, dry_run=args.dry_run, since_hours=args.since_hours, only=args.only)
     # Non-zero only on a genuine failure. Skips are the system working, and a
     # cron that reports failure on a quiet day trains everyone to ignore it.
-    return 1 if summary.failures else 0
+    return 1 if summary.failures or sunday_failed else 0
 
 
 if __name__ == "__main__":

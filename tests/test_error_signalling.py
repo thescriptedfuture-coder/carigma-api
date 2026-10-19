@@ -69,6 +69,7 @@ ACCEPTED: dict[tuple[str, str], str] = {
     # novelty, and now cannot claim the posting is old either — `is_current`
     # treats "no usable date" as "cannot tell", which keeps it.
     ("feed.py", "_when"): "unusable timestamp; callers treat it as no evidence",
+    ("sunday.py", "_moment"): "unusable timestamp; the receipt omits the time, never invents one",
     ("thread_store.py", "is_suppressed"): "errs toward showing the user their own item back",
     ("runs.py", "stream"): "ends the stream; there is no other terminal value",
     ("unsubscribe.py", "resolve"): "a corrupt token and an invalid token are both 'bad link'",

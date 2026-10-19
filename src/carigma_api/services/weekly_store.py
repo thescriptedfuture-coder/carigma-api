@@ -47,7 +47,7 @@ class ContractStore(Protocol):
     def load(self, user_id: str, week_start: date) -> WeeklyContract | None: ...
     def save(self, user_id: str, contract: WeeklyContract) -> None: ...
     def load_review(self, user_id: str, week_start: date) -> dict[str, Any] | None: ...
-    def save_review(self, user_id: str, week_start: date, earned: dict[str, Any]) -> None: ...
+    def save_review(self, user_id: str, week_start: date, earned: dict[str, Any]) -> bool: ...
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -203,23 +203,32 @@ class SupabaseContractStore:
             return None
         return earned
 
-    def save_review(self, user_id: str, week_start: date, earned: dict[str, Any]) -> None:
-        """Store what the week EARNED, never the rendered payload.
+    def save_review(self, user_id: str, week_start: date, earned: dict[str, Any]) -> bool:
+        """Store what the week EARNED, never the rendered payload. True if a
+        week was there to hold it.
 
         Only the facts, the streak and any milestone go in. The week label and
         the reading estimate are derived at read time, because they are copy —
         freezing them in the database means a wording change needs a data
         migration, and rows written before the change keep saying the old thing
         forever.
+
+        **An UPDATE, never an upsert.** This was an upsert carrying only
+        `facts`, and on a week with no row Postgres fills in the rest from the
+        column defaults — `state = 'proposed'`, no items. That is a contract
+        nobody proposed, for a week already over, and the Monday sweep adopts
+        it: a lapse that never happened, counted against the user. The fake
+        store has no defaults, so no test could see it; nothing called this
+        until the Sunday pass did. A review attaches to a week that exists.
         """
-        self._client.table(TABLE).upsert(
-            {
-                "user_id": user_id,
-                "week_start": week_start.isoformat(),
-                "facts": earned,
-            },
-            on_conflict="user_id,week_start",
-        ).execute()
+        res = (
+            self._client.table(TABLE)
+            .update({"facts": earned})
+            .eq("user_id", user_id)
+            .eq("week_start", week_start.isoformat())
+            .execute()
+        )
+        return bool(res and isinstance(res.data, list) and res.data)
 
 
 __all__ = ["TABLE", "ContractStore", "SupabaseContractStore", "from_row", "to_row"]

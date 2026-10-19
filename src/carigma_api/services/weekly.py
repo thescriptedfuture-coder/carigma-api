@@ -97,6 +97,11 @@ class GuiltyCopy(ValueError):
     """Raised when re-entry copy breaks the tone law. Loud on purpose."""
 
 
+def weeks(n: int) -> str:
+    """`1 week`, `6 weeks`. Both streak sentences said "Streak: 1 weeks"."""
+    return f"{n} week" if n == 1 else f"{n} weeks"
+
+
 def assert_no_guilt(*fragments: str | None) -> None:
     """Fail fast rather than ship a shaming string.
 

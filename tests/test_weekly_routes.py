@@ -411,6 +411,12 @@ def store() -> SupabaseContractStore:
     return SupabaseContractStore(_DB)
 
 
+def planned(week: date) -> None:
+    """The week's row, as it exists before any review: a review attaches to a
+    week someone planned, and `save_review` refuses to invent one."""
+    store().save(USER_ID, WeeklyContract(week_start=week, items=items()))
+
+
 def a_fact(text: str = "3 posts shipped") -> ReviewFact:
     return ReviewFact(direction=Direction.UP, text=text, receipt="content_loop, 3 rows")
 
@@ -428,6 +434,7 @@ def test_a_user_with_no_review_gets_null_not_an_error(client: TestClient) -> Non
 
 
 def test_a_built_review_comes_back_with_its_facts(client: TestClient) -> None:
+    planned(last_monday())
     store().save_review(
         USER_ID,
         last_monday(),
@@ -452,6 +459,7 @@ def test_a_quiet_week_is_a_review_with_no_facts_not_a_missing_review(
     here four months that they are new — the same collapse the Posts port hit,
     where a paused week read as never-planned.
     """
+    planned(last_monday())
     store().save_review(
         USER_ID, last_monday(), weekly_routes.earned_review(facts=(), streak=Streak(weeks=0))
     )
@@ -471,6 +479,7 @@ def test_this_weeks_row_is_not_read_as_last_weeks_review(client: TestClient) -> 
     report a week that has not finished yet.
     """
     seed_week()  # this week's contract, with no facts on it
+    planned(last_monday())
     store().save_review(
         USER_ID,
         last_monday(),
@@ -522,6 +531,100 @@ def test_saving_a_review_does_not_blank_the_contract_on_that_row(
     assert after.state is ContractState.APPROVED
     assert after.accepted_kinds == ("content",)
     assert after.decided_at is not None
+
+
+def test_a_review_for_a_week_nobody_planned_creates_no_week() -> None:
+    """It was an upsert carrying only `facts`. On a missing row Postgres fills
+    the rest from the defaults — `state = 'proposed'` — and the Monday sweep
+    adopts it: a lapse the user never had, for a week that was already over."""
+    attached = store().save_review(
+        USER_ID, last_monday(), weekly_routes.earned_review(facts=(a_fact(),), streak=Streak(1))
+    )
+
+    assert attached is False
+    assert _DB.rows("weekly_review") == []
+
+
+def test_on_sunday_the_review_of_the_week_just_closing_comes_first(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cron builds it at 18:00 on the Sunday the week closes. Reading only
+    last Monday's row hid it until Monday — the email arriving for a review the
+    page could not show."""
+    sunday = this_monday() + timedelta(days=6)
+    _on(monkeypatch, sunday)
+    planned(this_monday())
+    planned(last_monday())
+    store().save_review(
+        USER_ID,
+        last_monday(),
+        weekly_routes.earned_review(facts=(a_fact("older"),), streak=Streak(1)),
+    )
+    store().save_review(
+        USER_ID,
+        this_monday(),
+        weekly_routes.earned_review(facts=(a_fact("closing"),), streak=Streak(2)),
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert [f["text"] for f in review["facts"]] == ["closing"]
+
+
+def test_on_sunday_before_the_cron_last_weeks_review_still_shows(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _on(monkeypatch, this_monday() + timedelta(days=6))
+    planned(this_monday())
+    planned(last_monday())
+    store().save_review(
+        USER_ID,
+        last_monday(),
+        weekly_routes.earned_review(facts=(a_fact("older"),), streak=Streak(1)),
+    )
+
+    review = client.get("/weekly/review", headers=auth(make_token())).json()["review"]
+
+    assert [f["text"] for f in review["facts"]] == ["older"]
+
+
+def test_next_weeks_plan_is_readable_the_evening_it_is_proposed(client: TestClient) -> None:
+    """Sunday's proposal starts tomorrow. Only "this week" was ever returned,
+    so the plan the email asked someone to sign could not be seen until it was
+    no longer next week's."""
+    store().save(
+        USER_ID, WeeklyContract(week_start=this_monday() + timedelta(weeks=1), items=items())
+    )
+
+    body = client.get("/weekly/contract", headers=auth(make_token())).json()
+
+    assert body["next_week"]["state"] == "proposed"
+    assert body["next_week"]["week_start"] == (this_monday() + timedelta(weeks=1)).isoformat()
+
+
+def test_a_user_with_history_is_not_told_their_first_review_is_coming(
+    client: TestClient,
+) -> None:
+    """Day one was keyed on THIS week's row, so anyone who had not planned
+    this week yet — four weeks in — read that their first review had not been
+    built."""
+    planned(last_monday())
+
+    body = client.get("/weekly/contract", headers=auth(make_token())).json()
+
+    assert body["contract"] is None
+    assert "day_one" not in body
+
+
+def _on(monkeypatch: pytest.MonkeyPatch, day: date) -> None:
+    """Pin the routes' clock to noon UTC on `day`."""
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+            return datetime.combine(day, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+
+    monkeypatch.setattr(weekly_routes, "datetime", _Clock)
 
 
 # ── The absence question, through the database ─────────────────────────────
@@ -720,21 +823,21 @@ def test_each_cadence_proposes_v1s_days(
 
 def test_the_naukri_refresh_is_offered_only_to_someone_on_naukri(client: TestClient) -> None:
     """It was offered to everyone, at 10 credits."""
-    from carigma_api.routes.weekly import _candidates
+    from carigma_api.services.schedule import proposal_items
 
     monday = date(2026, 10, 19)
-    linkedin_only = _candidates({"cadence": 3, "platforms": ["linkedin"]}, today=monday)
-    both = _candidates({"cadence": 3, "platforms": ["linkedin", "naukri"]}, today=monday)
+    linkedin_only = proposal_items({"cadence": 3, "platforms": ["linkedin"]}, today=monday)
+    both = proposal_items({"cadence": 3, "platforms": ["linkedin", "naukri"]}, today=monday)
 
     assert "naukri" not in {i.kind for i in linkedin_only}
     assert "naukri" in {i.kind for i in both}
 
 
 def test_a_plan_made_midweek_offers_no_day_that_has_passed() -> None:
-    from carigma_api.routes.weekly import _candidates
+    from carigma_api.services.schedule import proposal_items
 
     thursday = date(2026, 10, 22)
-    items = _candidates({"cadence": 5, "platforms": ["linkedin"]}, today=thursday)
+    items = proposal_items({"cadence": 5, "platforms": ["linkedin"]}, today=thursday)
 
     assert [i.day for i in items if i.kind == "content"] == ["THU", "FRI"]
     # The review is the ritual, and Sunday is still ahead.
@@ -742,10 +845,10 @@ def test_a_plan_made_midweek_offers_no_day_that_has_passed() -> None:
 
 
 def test_a_plan_on_sunday_says_no_posting_days_are_left() -> None:
-    from carigma_api.routes.weekly import _candidates
+    from carigma_api.services.schedule import proposal_items
 
     sunday = date(2026, 10, 25)
-    items = _candidates({"cadence": 5, "platforms": ["linkedin"]}, today=sunday)
+    items = proposal_items({"cadence": 5, "platforms": ["linkedin"]}, today=sunday)
 
     assert [i.kind for i in items] == ["review"]
 
