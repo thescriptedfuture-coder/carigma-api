@@ -164,6 +164,24 @@ def auth(token: str) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
+def _kept_analyses(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Every successful analyst run now keeps the whole reading (`results`).
+
+    In memory here, so a test that only cares about the run never reaches for
+    a real database — the save is not fatal, so a network attempt would pass
+    quietly and slowly rather than fail. A test about the stored reading takes
+    this store by name and seeds or reads it.
+    """
+    from carigma_api.routes import score as score_routes
+    from carigma_api.services.analysis_store import AnalysisStore
+    from tests.fake_supabase import FakeDB
+
+    db = FakeDB()
+    monkeypatch.setattr(score_routes, "_analyses", lambda request, settings: AnalysisStore(db))
+    return db
+
+
+@pytest.fixture(autouse=True)
 def _fresh_rate_limiter() -> None:
     """Each test starts with full buckets.
 

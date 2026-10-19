@@ -106,6 +106,12 @@
   "GET /referrals": [
     "pending_note"
   ],
+  "GET /score/latest": [
+    "age_days",
+    "analysis",
+    "measured_at",
+    "measured_on"
+  ],
   "GET /today": [
     "signal.matches",
     "signal.matches.new",

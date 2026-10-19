@@ -118,6 +118,9 @@ OWNER_SCOPED: dict[str, dict[str, Any]] = {
     # V2_018, the JSearch call log. Here from its first day. `adzuna`, not
     # `jsearch`, so running the probe never adds to today's JSearch count.
     "jobs_provider_calls": {"source": "adzuna", "query_key": "rls-probe"},
+    # V1's table, written by the API for the first time in S10: the whole
+    # analyst reading, kept so Signal can show it with its date.
+    "results": {"profile_data": {}},
 }
 
 #: Every table the API writes through the USER client, and how — the live half
@@ -166,6 +169,8 @@ WRITES_AS_USER: dict[str, tuple[str, Any]] = {
     # Every provider call, recorded as the caller BEFORE it is made — the row
     # the JSearch cap counts. A refusal here stops the call, so this must work.
     "jobs_provider_calls": ("insert", None),  # quota.RecordedProvider
+    # V1's results row, one per user. analysis_store.AnalysisStore.save.
+    "results": ("upsert", "user_id"),
 }
 
 #: Postgres's code for "new row violates row-level security policy".

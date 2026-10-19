@@ -74,6 +74,8 @@ READS: tuple[tuple[str, str | None], ...] = (
     ("/weekly/review", None),
     ("/weekly/standing-by", None),
     ("/score/history", None),
+    # S10: the kept reading Signal opens on. `run_cost` is always present.
+    ("/score/latest", "run_cost"),
     ("/jobs/feed", "items"),
     # Five columns, always, so an empty pipeline and an unreadable one differ.
     ("/tracker", "columns"),
