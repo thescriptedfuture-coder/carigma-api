@@ -45,7 +45,7 @@ def _store(request: Request, settings: Settings) -> SupabaseRunStore:
 ACTIVE_FOR = timedelta(minutes=10)
 
 #: The agents a page can pick back up — those started in the background.
-RESUMABLE = frozenset({"profile", "content"})
+RESUMABLE = frozenset({"profile", "content", "jobs", "cv"})
 
 
 # Declared BEFORE `/agents/runs/{run_id}`: routes match in order, and "active"

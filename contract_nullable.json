@@ -42,6 +42,7 @@
     "error",
     "finished_at",
     "result",
+    "result.new_jobs[].match_score",
     "result.slot.published_at",
     "result.slot.skip_note",
     "result.slot.skip_reason"
@@ -188,7 +189,17 @@
     "salary"
   ],
   "POST /jobs/scan": [
-    "new_jobs[].match_score"
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "new_jobs[].match_score",
+    "result"
+  ],
+  "POST /jobs/{}/apply-kit": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result"
   ],
   "POST /naukri/score": [
     "dimensions[].needs",

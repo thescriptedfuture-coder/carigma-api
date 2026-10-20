@@ -74,7 +74,9 @@
   {
     "method": "POST",
     "path": "/jobs/scan",
-    "keys": null,
+    "keys": [
+      "background"
+    ],
     "where": "src/routes/JobsPage.tsx"
   },
   {
