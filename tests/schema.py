@@ -221,6 +221,41 @@ def unique_keys_of(table: str) -> list[tuple[str, ...]]:
     return keys
 
 
+@cache
+def unique_indexes_of(table: str) -> list[tuple[str, ...]]:
+    """Column sets a `create unique index` makes unique, where the fake can
+    model the index exactly.
+
+    Kept apart from `unique_keys_of`, which answers "can this `on_conflict`
+    target resolve" — a partial index cannot serve as one without its
+    predicate, so mixing them would let a guard accept a target Postgres
+    refuses.
+
+    Only an index with NO predicate, or one made only of `col is not null`,
+    is returned. Those two are the same index for a fake that never lets a
+    NULL collide (Postgres's own rule); any other predicate (`where state =
+    'active'`) is a condition the fake would have to evaluate, and getting it
+    half-right is worse than leaving it out.
+
+    `agent_runs_idempotency_idx` is why this exists: it is the database's
+    half of "a retry is never charged twice", and a fake without it accepted
+    the second run under a key that production refuses.
+    """
+    index = re.compile(
+        rf"create\s+unique\s+index\s+(?:if\s+not\s+exists\s+)?\w+\s+on\s+"
+        rf"public\.{re.escape(table)}\s*\(([^)]*)\)\s*(?:where\s+([^;]*))?;",
+        re.S | re.I,
+    )
+    out: list[tuple[str, ...]] = []
+    for _name, sql in _sources():
+        for columns, predicate in index.findall(sql):
+            clauses = [c.strip() for c in re.split(r"\band\b", predicate or "", flags=re.I)]
+            if any(c and not re.fullmatch(r"\w+\s+is\s+not\s+null", c, re.I) for c in clauses):
+                continue
+            out.append(tuple(c.strip() for c in columns.split(",")))
+    return out
+
+
 def not_null_of(table: str) -> list[str]:
     """Columns declared `not null` AND without a default.
 

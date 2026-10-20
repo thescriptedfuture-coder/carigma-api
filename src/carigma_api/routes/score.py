@@ -7,10 +7,12 @@ run protocol → credit rule → persisted result.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
@@ -29,8 +31,8 @@ from carigma_api.services.repository import (
     SupabaseCreditStore,
     user_client,
 )
-from carigma_api.services.run_store import SupabaseRunStore
-from carigma_api.services.runs import RunReporter
+from carigma_api.services.run_store import SupabaseRunStore, replay_payload
+from carigma_api.services.runs import AgentRun, RunNotStored, RunReporter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,10 @@ class ComputeScoreRequest(BaseModel):
     # The FIRST score is free — it is the product's promise, and charging for it
     # would gate the one thing that proves the value (contract §2).
     onboarding: bool = False
+    #: Answer at once with the run's id, and do the work after the answer —
+    #: the client polls `GET /agents/runs/{id}`. Off by default so onboarding,
+    #: which still waits on the request, is unchanged until it is converted.
+    background: bool = False
 
 
 class ApplyFixRequest(BaseModel):
@@ -157,17 +163,50 @@ def _shown(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: A run in the background writes with the caller's own token after the
+#: response has gone — its steps, the charge, the reading, the finish. A token
+#: that expires mid-run turns every one of those writes into a 401: nothing is
+#: charged, and nothing is kept, including the row the page is polling. So a
+#: background run starts only on a token that outlives a long run. The web
+#: refreshes its session before starting one; this is the backstop.
+BACKGROUND_TOKEN_SECONDS = 300
+
+
+def _token_seconds_left(user: Any) -> float | None:
+    exp = (getattr(user, "claims", None) or {}).get("exp")
+    return float(exp) - time.time() if isinstance(exp, int | float) else None
+
+
 @router.post("/score/compute", status_code=status.HTTP_200_OK)
 async def compute_score(
     body: ComputeScoreRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, Any]:
+) -> Any:
     """Run the Profile Analyst.
 
-    Synchronous because the client waits on this one (it is the decode moment).
-    Longer agents use POST /agents/{agent}/run + SSE.
+    ## Two ways to wait
+
+    **`background: false`** (onboarding): the request is held open for the
+    whole run and answers with the reading.
+
+    **`background: true`** (Signal): answers `202` at once with the run —
+    its id, `status: running`, its steps — and does the work after the
+    answer has gone. The page polls `GET /agents/runs/{id}`.
+
+    Held open, a 30–60 s run is a request a network can drop on the way
+    back: on 19 Oct three runs SUCCEEDED, were charged and kept, and the page
+    received none of the answers. A run the page can ask about cannot be
+    lost that way.
+
+    ## The credit rule is unchanged
+
+    `runs_service.execute` is still the only path that can charge, after a
+    non-empty success. The background task is that same call, made later,
+    with the caller's own client — the user's token, so RLS sees `auth.uid()`
+    for every write, exactly as it did inside the request. No service key.
     """
     profiles, scores, credit_store, run_store = _deps(request, user, settings)
 
@@ -176,6 +215,19 @@ async def compute_score(
     # new request, and must be neither throttled nor charged again.
     if (replayed := replay_if_seen(run_store, user.id, request, agent="profile")) is not None:
         return replayed
+
+    if body.background:
+        left = _token_seconds_left(user)
+        if left is not None and left < BACKGROUND_TOKEN_SECONDS:
+            # Before the limiter, so a refusal costs the caller nothing.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "session_expiring",
+                    "message": "Your sign-in needs refreshing before a run. Try again.",
+                },
+                headers={"X-Error-Code": "session_expiring"},
+            )
 
     # Limiter 1 (§21 Q7). The credit gate below stops cost; this stops abuse.
     enforce_agent_rate_limit(user.id, "profile")
@@ -216,11 +268,48 @@ async def compute_score(
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
 
+    analyses = _analyses(request, settings)
+
     def work(reporter: RunReporter) -> dict[str, Any]:
         reporter.step("analyse", "Reading your profile")
         result = profile_analyst.run(profile, api_key=settings.anthropic_api_key)
         reporter.complete_step()
+        # Kept BEFORE the run is settled, not after: a page polling the run
+        # refetches the score the moment it reads `succeeded`, and a reading
+        # written after that moment is a reading the page misses.
+        reporter.step("keep", "Keeping the reading")
+        reporter.complete_step(failed=not _keep(user.id, result, run, scores, analyses))
         return result
+
+    # Recorded as started before any work, so a retry under the same key —
+    # or a duplicate racing this one — finds THIS run and is not charged.
+    try:
+        holder = runs_service.begin(run, run_store)
+    except RunNotStored as exc:
+        if body.background:
+            # The row is the answer a background run gives. Without it the
+            # first poll would be told there is no such run.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="We couldn't start the analyst just now. Try again in a moment.",
+                headers={"X-Error-Code": "run_not_started"},
+            ) from exc
+        # Held open, the answer rides on this response; the record is
+        # best-effort, as it always was.
+        holder = None
+    if holder is not None:
+        return replay_payload(holder)
+
+    if body.background:
+        background_tasks.add_task(
+            _settle_in_background,
+            run,
+            work,
+            credit_store=credit_store,
+            action=action,
+            run_store=run_store,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=run.as_dict())
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store
@@ -230,23 +319,9 @@ async def compute_score(
         # No credits were charged — see services/runs.execute.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=_friendly(settled.error),
+            detail=runs_service.friendly_error(settled.error),
             headers={"X-Error-Code": "upstream_unavailable"},
         )
-
-    # Record the score only on a real result — never persist a fabricated one.
-    if settled.status is runs_service.RunStatus.SUCCEEDED:
-        try:
-            scores.record(user.id, int(settled.result["profileScore"]))
-        except Exception:
-            logger.exception("Score history write failed for %s", user.id)
-        # The whole reading, so Signal can show it next time with its date.
-        # Not fatal: the user is looking at the result right now, and losing
-        # the copy costs a record, not this answer.
-        try:
-            _analyses(request, settings).save(user.id, settled.result, at=settled.started_at)
-        except Exception:
-            logger.exception("could not keep the analysis for %s", user.id)
 
     return {
         "result": settled.result,
@@ -256,6 +331,39 @@ async def compute_score(
             "ran_at": settled.started_at.isoformat(),
         },
     }
+
+
+def _keep(user_id: str, result: Any, run: AgentRun, scores: Any, analyses: AnalysisStore) -> bool:
+    """Record the score and keep the whole reading. True when both landed.
+
+    Only a real result — never persist a fabricated one. Not fatal either
+    way: the user is about to see this reading, and losing the copy costs a
+    record, not the answer. The step says which happened.
+    """
+    if credits_service.is_empty_result(result):
+        return True
+    kept = True
+    try:
+        scores.record(user_id, int(result["profileScore"]))
+    except Exception:
+        logger.exception("Score history write failed for %s", user_id)
+        kept = False
+    # The whole reading, so Signal can show it next time with its date.
+    try:
+        analyses.save(user_id, result, at=run.started_at)
+    except Exception:
+        logger.exception("could not keep the analysis for %s", user_id)
+        kept = False
+    return kept
+
+
+async def _settle_in_background(run: AgentRun, work: Any, **kwargs: Any) -> None:
+    """`execute`, after the answer has gone. It does not raise — but this is
+    the last frame anything could reach, so nothing escapes it unlogged."""
+    try:
+        await runs_service.execute(run, work, **kwargs)
+    except Exception:  # noqa: BLE001 — there is no caller left to tell
+        logger.exception("background run %s did not settle", run.id)
 
 
 @router.post("/score/fix")
@@ -304,23 +412,3 @@ async def score_history(
 ) -> dict[str, Any]:
     _profiles, scores, _credits, _runs = _deps(request, user, settings)
     return {"items": scores.history(user.id, min(max(limit, 1), 200))}
-
-
-def _friendly(error: str | None) -> str:
-    """Map a failure to plain language.
-
-    Ported from V1 `errors.friendly_message`. Users never see a raw exception,
-    and error copy carries no emoji.
-    """
-    low = (error or "").lower()
-
-    def has(*words: str) -> bool:
-        return any(w in low for w in words)
-
-    if has("overloaded", "rate limit", "rate_limit", "429", "too many requests"):
-        return "Things are busy right now. Please wait a few seconds and try again."
-    if has("timed out", "timeout", "connection", "network", "502", "503", "504"):
-        return "We couldn't reach the server. Check your connection and try again in a moment."
-    if has("api key", "authentication", "401"):
-        return "That feature isn't fully switched on yet — our team has been notified."
-    return "We couldn't complete that just now. Please try again in a moment."

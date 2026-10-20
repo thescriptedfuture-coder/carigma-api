@@ -279,6 +279,89 @@ async def test_ledger_write_failure_does_not_fail_a_completed_run() -> None:
     assert settled.credits.charged == 0
 
 
+class UnreadableStore(FakeStore):
+    """The balance read fails — after the work has already run."""
+
+    def read_balance(self, user_id: str) -> int | None:
+        raise credits_service.CreditsUnavailable("credits is down")
+
+
+async def test_a_balance_unreadable_at_charge_time_delivers_unbilled_and_settles() -> None:
+    """`charge_for_result` reads the balance first, and a read that fails
+    raises. Before, that escaped `execute` — and in the background there is
+    no caller to catch it: the row stays `running` for ever, charged nothing,
+    polled by a page that never learns the answer. Nothing was applied (the
+    read comes before `apply_delta`), so the run delivers unbilled."""
+    store = UnreadableStore(100)
+    saved: list[str] = []
+
+    class Store:
+        def save(self, run: Any) -> None:
+            saved.append(run.status.value)
+
+    run = runs_service.new_run(USER, "profile")
+    settled = await runs_service.execute(
+        run,
+        lambda r: {"profileScore": 71},
+        credit_store=store,
+        action="run_profile",
+        run_store=Store(),  # type: ignore[arg-type]
+    )
+
+    assert settled.status is RunStatus.SUCCEEDED
+    assert settled.credits.charged == 0
+    assert settled.credits.balance_after is None
+    assert store.ledger == []
+    assert saved[-1] == "succeeded", "the finish was never recorded"
+
+
+async def test_a_failure_whose_balance_is_also_unreadable_still_settles() -> None:
+    """The failure receipt read the balance bare, so a run that failed while
+    credits were also down raised instead of settling as FAILED."""
+    store = UnreadableStore(100)
+
+    def boom(reporter: RunReporter) -> Any:
+        raise UpstreamError("Claude is overloaded")
+
+    settled = await _run(boom, store)
+
+    assert settled.status is RunStatus.FAILED
+    assert settled.credits.charged == 0
+    assert settled.credits.balance_after is None
+
+
+async def test_the_run_is_recorded_at_its_start_and_at_every_step() -> None:
+    """Saved only at the finish, a run in flight was invisible: a retry under
+    its key found nothing and started a second, charged run, and a poll saw
+    no progress until the end."""
+    seen: list[tuple[str, list[str]]] = []
+
+    class Store:
+        def save(self, run: Any) -> None:
+            seen.append((run.status.value, [s.status for s in run.steps]))
+
+    def work(reporter: RunReporter) -> Any:
+        reporter.step("analyse", "Reading your profile")
+        reporter.complete_step()
+        return {"profileScore": 71}
+
+    run = runs_service.new_run(USER, "profile")
+    await runs_service.execute(
+        run,
+        work,
+        credit_store=FakeStore(100),
+        action="run_profile",
+        run_store=Store(),  # type: ignore[arg-type]
+    )
+
+    assert seen == [
+        ("running", []),
+        ("running", ["active"]),
+        ("running", ["done"]),
+        ("succeeded", ["done"]),
+    ]
+
+
 def test_balance_moving_between_check_and_charge_delivers_unbilled() -> None:
     """A concurrent spend must not produce a negative balance, and must not
     make the user pay in wasted time for our race."""

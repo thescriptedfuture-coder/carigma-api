@@ -374,8 +374,15 @@ def test_a_persistence_failure_never_aborts_the_run() -> None:
     store.save(finished_run())  # must not raise
 
 
-def test_a_failed_read_returns_none_rather_than_raising() -> None:
-    assert SupabaseRunStore(FakeTable(explode=True)).get(RUN_1) is None
+def test_a_failed_read_of_a_run_is_not_called_no_such_run() -> None:
+    """`get` returned `None` for a read that failed, which a poll hears as
+    "there is no such run" — and stops watching a run that is still going.
+    Could-not-look raises; only the idempotency lookup still answers `None`,
+    as documented on it, because its caller has no better move than to run."""
+    from carigma_api.services.runs import RunStoreUnavailable
+
+    with pytest.raises(RunStoreUnavailable):
+        SupabaseRunStore(FakeTable(explode=True)).get(RUN_1)
     assert SupabaseRunStore(FakeTable(explode=True)).find_by_idempotency_key(U1, "k") is None
 
 

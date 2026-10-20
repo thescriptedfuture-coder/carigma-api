@@ -36,7 +36,17 @@ ANALYST_PAYLOAD = {
     "optimizedAbout": "A much better about section.",
     "topKeywordsToAdd": ["dbt", "Python", "A/B testing", "SQL", "dashboards", "stakeholders"],
     "featuredSectionIdea": "Pin your dashboard case study.",
-    "quickWins": [],
+    # One, shaped as the prompt asks for them. `[]` here meant no endpoint's
+    # recorded contract had ever seen a quick win's fields — and Signal reads
+    # every one of them.
+    "quickWins": [
+        {
+            "action": "Put SQL and Power BI in your headline",
+            "impact": "high",
+            "effort": "low",
+            "timeToComplete": "10 mins",
+        }
+    ],
     "weeklyGoal": "Rewrite your headline.",
     "recruitersWouldSay": "Capable, but I can't tell what they want to do next.",
 }

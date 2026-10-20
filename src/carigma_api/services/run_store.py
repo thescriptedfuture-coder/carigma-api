@@ -23,11 +23,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 from carigma_api.services.credits import CreditReceipt
-from carigma_api.services.runs import AgentRun, RunStatus, RunStep
+from carigma_api.services.runs import (
+    AgentRun,
+    RunNotStored,
+    RunStatus,
+    RunStep,
+    RunStoreUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
 _TABLE = "agent_runs"
+#: Postgres `unique_violation` — how a lost race on the idempotency index reads.
+_UNIQUE_VIOLATION = "23505"
 
 
 class IdempotencyConflict(RuntimeError):
@@ -116,12 +124,43 @@ class SupabaseRunStore:
         except Exception:
             logger.exception("agent_runs write failed for run %s", run.id)
 
+    def start(self, run: AgentRun) -> AgentRun | None:
+        """INSERT the run as it begins — the one write here that may refuse.
+
+        `save` upserts and swallows, which is right for progress and for the
+        finish. It is wrong for the start: a second request under the same
+        Idempotency-Key collides with `agent_runs_idempotency_idx`, and a
+        swallowed collision is a second run that goes on to charge. So this
+        reads the 23505 as the answer — the run that holds the key — and
+        anything else as `RunNotStored`.
+        """
+        key = self._keys.get(run.id)
+        try:
+            self._client.table(_TABLE).insert(_to_row(run, key)).execute()
+            return None
+        except Exception as exc:
+            if key and getattr(exc, "code", None) == _UNIQUE_VIOLATION:
+                holder = self.find_by_idempotency_key(run.user_id, key)
+                if holder is not None:
+                    logger.info("run %s lost the key to run %s", run.id, holder.id)
+                    return holder
+            logger.exception("agent_runs start failed for run %s", run.id)
+            raise RunNotStored(f"run {run.id} could not be recorded") from exc
+
     def get(self, run_id: str) -> AgentRun | None:
+        """The run, or `None` when there is no such run FOR THIS CALLER.
+
+        Through the caller's own client, so another user's run is not a row
+        RLS lets through — it is `None`, exactly like an id never issued.
+        A read that fails raises `RunStoreUnavailable`: "could not look" is
+        not "it does not exist", and a poll told the second would stop
+        watching a run that is still going.
+        """
         try:
             res = self._client.table(_TABLE).select("*").eq("id", run_id).limit(1).execute()
-        except Exception:
+        except Exception as exc:
             logger.exception("agent_runs read failed for run %s", run_id)
-            return None
+            raise RunStoreUnavailable(f"run {run_id} could not be read") from exc
         rows = res.data or []
         return _from_row(rows[0]) if rows else None
 
@@ -187,5 +226,11 @@ def replay_payload(run: AgentRun) -> dict[str, Any]:
     payload = run.as_dict()
     payload["replayed"] = True
     payload["credits"] = {**payload.get("credits", {}), "charged": 0}
-    payload["note"] = "Already ran — this is the original result, and you were charged once."
+    # A run still going has charged nothing yet, and may never: saying
+    # "you were charged once" about it would be a claim nobody can back.
+    payload["note"] = (
+        "Already running — this is the same run, not a second one."
+        if not run.status.is_terminal
+        else "Already ran — this is the original result, and you were charged once."
+    )
     return payload
