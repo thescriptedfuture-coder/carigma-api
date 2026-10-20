@@ -19,12 +19,18 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
-from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
+from carigma_api.routes._guards import (
+    enforce_agent_rate_limit,
+    idempotency_key,
+    refuse_if_session_expiring,
+    replay_if_seen,
+)
 from carigma_api.services import credits as credits_service
 from carigma_api.services import cv_pdf, cv_writer
 from carigma_api.services import runs as runs_service
@@ -45,14 +51,22 @@ from carigma_api.services.repository import (
     _as_rows,
     user_client,
 )
-from carigma_api.services.run_store import SupabaseRunStore
-from carigma_api.services.runs import RunReporter
+from carigma_api.services.run_store import SupabaseRunStore, replay_payload
+from carigma_api.services.runs import RunNotStored, RunReporter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["jobs"])
 
 TABLE = "jobs_feed"
+
+
+class BackgroundRequest(BaseModel):
+    #: `true`: answer 202 with the run at once and do the work after the
+    #: answer has gone; the page polls `GET /agents/runs/{id}`. A scan takes
+    #: ~42 s and a CV ~26 s, measured in production — runs a network can drop
+    #: the answer to (0.072).
+    background: bool = False
 
 
 class NotForMe(BaseModel):
@@ -183,9 +197,11 @@ def _cv_writer(settings: Settings) -> cv_writer.Writer:
 async def build_apply_kit(
     job_id: int,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, Any]:
+    body: BackgroundRequest | None = None,
+) -> Any:
     """CV Architect: a CV tailored to this posting, its gaps, and an outreach
     note. 15 credits (`cv_generate`), and nothing when nothing usable comes back.
 
@@ -204,6 +220,10 @@ async def build_apply_kit(
 
     if (replayed := replay_if_seen(run_store, user.id, request, agent="cv")) is not None:
         return replayed
+
+    background = bool(body and body.background)
+    if background:
+        refuse_if_session_expiring(user)
 
     enforce_agent_rate_limit(user.id, "cv")
 
@@ -272,6 +292,8 @@ async def build_apply_kit(
         ) from exc
 
     run = runs_service.new_run(user.id, "cv")
+    # Which job, so this job's page — and only it — can find the run again.
+    run.subject = {"job_id": str(job_id)}
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
     built_at = datetime.now(UTC).isoformat()
@@ -286,10 +308,48 @@ async def build_apply_kit(
         reporter.step("save", "Saving it to this job")
         # Saved INSIDE the run: a kit that could not be saved is a failed run,
         # and a failed run is not charged. V1 spent only after `save_job_kit`.
-        db.table("jobs_feed").update({"apply_kit": kit, "kit_created_at": built_at}).eq(
-            "user_id", user.id
-        ).eq("id", job_id).execute()
-        return {"kit": kit}
+        saved = (
+            db.table("jobs_feed")
+            .update({"apply_kit": kit, "kit_created_at": built_at})
+            .eq("user_id", user.id)
+            .eq("id", job_id)
+            .execute()
+        )
+        if not (saved and saved.data):
+            # RLS refuses an UPDATE by touching nothing, without an error — so
+            # an unchecked update "succeeded", and 15 credits bought a CV that
+            # was never kept. Zero rows is a failed save, and a failed run is
+            # free (CONTRIBUTING: RLS answers with nothing).
+            raise RuntimeError(f"the kit for job {job_id} was not saved")
+        reporter.complete_step()
+        return {"kit": kit, **_kit_payload(kit, built_at)}
+
+    try:
+        holder = runs_service.begin(run, run_store)
+    except RunNotStored as exc:
+        if background:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "run_not_started",
+                    "message": "We couldn't start the CV just now. Nothing was charged.",
+                },
+                headers={"X-Error-Code": "run_not_started"},
+            ) from exc
+        holder = None
+    if holder is not None:
+        return replay_payload(holder)
+
+    if background:
+        background_tasks.add_task(
+            runs_service.settle_detached,
+            run,
+            work,
+            credit_store=credit_store,
+            action=action,
+            run_store=run_store,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=run.as_dict())
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store
@@ -425,9 +485,11 @@ def _scorer(settings: Settings) -> scoring.Scorer:
 @router.post("/jobs/scan")
 async def scan(
     request: Request,
+    background_tasks: BackgroundTasks,
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, Any]:
+    body: BackgroundRequest | None = None,
+) -> Any:
     """Career Scout. 15 credits (`run_jobs`), and nothing on a failure.
 
     The order below is the one the posts route learned the hard way: replay,
@@ -449,6 +511,10 @@ async def scan(
 
     if (replayed := replay_if_seen(run_store, user.id, request, agent="jobs")) is not None:
         return replayed
+
+    background = bool(body and body.background)
+    if background:
+        refuse_if_session_expiring(user)
 
     enforce_agent_rate_limit(user.id, "jobs")
 
@@ -520,6 +586,9 @@ async def scan(
         ) from exc
 
     run = runs_service.new_run(user.id, "jobs")
+    # What was searched for. A scan that matches nothing must return `{}` to
+    # be free, and the page still has to say what it looked for.
+    run.subject = {"role": role, "city": city}
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
 
@@ -573,6 +642,34 @@ async def scan(
                 for row in saved.new
             ],
         }
+
+    try:
+        holder = runs_service.begin(run, run_store)
+    except RunNotStored as exc:
+        if background:
+            # The row is the answer a background run gives.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "run_not_started",
+                    "message": "We couldn't start the scan just now. Nothing was charged.",
+                },
+                headers={"X-Error-Code": "run_not_started"},
+            ) from exc
+        holder = None
+    if holder is not None:
+        return replay_payload(holder)
+
+    if background:
+        background_tasks.add_task(
+            runs_service.settle_detached,
+            run,
+            work,
+            credit_store=credit_store,
+            action=action,
+            run_store=run_store,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=run.as_dict())
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store

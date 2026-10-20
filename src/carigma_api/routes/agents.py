@@ -44,9 +44,8 @@ def _store(request: Request, settings: Settings) -> SupabaseRunStore:
 #: mid-run), and a page shown it would watch it forever.
 ACTIVE_FOR = timedelta(minutes=10)
 
-#: The agents a page can pick back up. Only Signal's run is started in the
-#: background today; the rest still answer in one request.
-RESUMABLE = frozenset({"profile"})
+#: The agents a page can pick back up — those started in the background.
+RESUMABLE = frozenset({"profile", "content", "jobs", "cv"})
 
 
 # Declared BEFORE `/agents/runs/{run_id}`: routes match in order, and "active"
@@ -67,6 +66,9 @@ def get_active_run(
 
     A failed read is a 503, never null: "no run in flight" told for "could not
     look" would offer a second run beside the first.
+
+    **Every other query parameter is the run's subject** — `&day=MON&week_start=`
+    for a draft — so Monday's editor never picks up Thursday's run.
     """
     if agent not in RESUMABLE:
         raise HTTPException(
@@ -75,8 +77,9 @@ def get_active_run(
             detail={"error": "not_resumable", "message": f"'{agent}' runs are not resumable."},
         )
     try:
+        subject = {k: v for k, v in request.query_params.items() if k != "agent"}
         run = _store(request, settings).latest_active(
-            user.id, agent, since=datetime.now(UTC) - ACTIVE_FOR
+            user.id, agent, since=datetime.now(UTC) - ACTIVE_FOR, subject=subject or None
         )
     except RunStoreUnavailable as exc:
         raise HTTPException(

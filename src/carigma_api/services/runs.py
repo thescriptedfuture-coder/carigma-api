@@ -69,6 +69,10 @@ class AgentRun:
     credits: CreditReceipt | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
+    #: What the run is FOR — `{"day": "MON", "week_start": "..."}` for a draft,
+    #: `{"job_id": "..."}` for a CV. A page that lost its run finds it again
+    #: by agent AND subject: Monday's editor must not pick up Thursday's draft.
+    subject: dict[str, str] = field(default_factory=dict)
     _events: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue, repr=False)
     _cancelled: bool = False
 
@@ -125,6 +129,7 @@ class AgentRun:
             "credits": (self.credits or CreditReceipt(0, None, "")).as_dict(),
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "subject": dict(self.subject),
         }
 
 
@@ -264,6 +269,18 @@ class RunReporter:
 
 class RunCancelled(Exception):
     """Raised inside agent work when the user cancels."""
+
+
+async def settle_detached(run: AgentRun, work: AgentWork, **kwargs: Any) -> None:
+    """`execute`, after the answer has gone — a background task's body.
+
+    `execute` does not raise, but this is the last frame anything could reach,
+    so nothing escapes it unlogged.
+    """
+    try:
+        await execute(run, work, **kwargs)
+    except Exception:  # noqa: BLE001 — there is no caller left to tell
+        logger.exception("background run %s did not settle", run.id)
 
 
 def begin(run: AgentRun, run_store: RunStore) -> AgentRun | None:

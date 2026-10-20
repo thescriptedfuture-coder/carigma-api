@@ -41,7 +41,11 @@
     "credits.balance_after",
     "error",
     "finished_at",
-    "result"
+    "result",
+    "result.new_jobs[].match_score",
+    "result.slot.published_at",
+    "result.slot.skip_note",
+    "result.slot.skip_reason"
   ],
   "GET /credits": [
     "balance"
@@ -185,7 +189,17 @@
     "salary"
   ],
   "POST /jobs/scan": [
-    "new_jobs[].match_score"
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "new_jobs[].match_score",
+    "result"
+  ],
+  "POST /jobs/{}/apply-kit": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result"
   ],
   "POST /naukri/score": [
     "dimensions[].needs",
@@ -209,6 +223,10 @@
     "streak.paused_because"
   ],
   "POST /posts/week/{}/regenerate": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result",
     "slot.published_at",
     "slot.skip_note",
     "slot.skip_reason"

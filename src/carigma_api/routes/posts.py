@@ -20,12 +20,18 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
-from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
+from carigma_api.routes._guards import (
+    enforce_agent_rate_limit,
+    idempotency_key,
+    refuse_if_session_expiring,
+    replay_if_seen,
+)
 from carigma_api.services import content_writer
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
@@ -48,8 +54,8 @@ from carigma_api.services.repository import (
     SupabaseCreditStore,
     user_client,
 )
-from carigma_api.services.run_store import SupabaseRunStore
-from carigma_api.services.runs import RunReporter
+from carigma_api.services.run_store import SupabaseRunStore, replay_payload
+from carigma_api.services.runs import RunNotStored, RunReporter
 from carigma_api.services.schedule import EMPTY, EMPTY_ACTION, Standing, schedule, standing_of
 from carigma_api.services.weekly_store import ContractStore, SupabaseContractStore
 
@@ -61,6 +67,13 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 class SkipRequest(BaseModel):
     reason: SkipReason | None = None
     note: str | None = Field(default=None, max_length=280)
+
+
+class RegenerateRequest(BaseModel):
+    #: `true`: answer 202 with the run at once and draft after the answer has
+    #: gone; the page polls `GET /agents/runs/{id}`. Drafting takes 30–75 s —
+    #: longer than the analyst runs whose answers a network dropped (0.072).
+    background: bool = False
 
 
 class MarkPublishedRequest(BaseModel):
@@ -358,9 +371,11 @@ def post_skip(
 async def post_regenerate(
     day: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, Any]:
+    body: RegenerateRequest | None = None,
+) -> Any:
     """Drafts for one slot — the first ones, or fresh ones. 3 credits (§21 Q4).
 
     Goes through `runs.execute` so a failed or empty generation charges nothing.
@@ -378,6 +393,10 @@ async def post_regenerate(
     # throttled nor charged again.
     if (replayed := replay_if_seen(run_store, user.id, request, agent="content")) is not None:
         return replayed
+
+    background = bool(body and body.background)
+    if background:
+        refuse_if_session_expiring(user)
 
     enforce_agent_rate_limit(user.id, "content")
 
@@ -471,16 +490,67 @@ async def post_regenerate(
         ) from exc
 
     run = runs_service.new_run(user.id, "content")
+    # What the run is for, so the editor for THIS slot can find it again.
+    run.subject = {"day": slot.day, "week_start": week_start.isoformat()}
     if key := idempotency_key(request):
         run_store.remember_idempotency(user.id, key, run.id)
+
+    from dataclasses import replace as dc_replace
 
     def work(reporter: RunReporter) -> dict[str, Any]:
         reporter.step("draft", f"Writing {content_writer.VARIANTS} drafts for {slot.day}")
         drafts = content_writer.write(brief, writer=_writer(settings))
+        reporter.complete_step()
         reporter.step("check", "Checking each against what your profile says")
-        # `{}` is the one shape `runs.execute` will not charge for. Every draft
-        # dropped by the check is the model's failure, not the user's purchase.
-        return {"drafts": drafts} if drafts else {}
+        reporter.complete_step()
+        if not drafts:
+            # `{}` is the one shape `runs.execute` will not charge for. Every
+            # draft dropped by the check is the model's failure, not the
+            # user's purchase.
+            return {}
+        # Saved INSIDE the run, before it settles. It was saved after the
+        # charge, so a failed save took 3 credits and kept no drafts; now a
+        # failed save fails the run, and a failed run charges nothing. And a
+        # page polling the run reads the slot the moment it says `succeeded`.
+        reporter.step("keep", "Keeping the drafts on your slot")
+        updated = dc_replace(
+            slot,
+            drafts=tuple(
+                Draft(index=i + 1, body=d["body"], note=d.get("note")) for i, d in enumerate(drafts)
+            ),
+            state=SlotState.DRAFT_READY,
+        )
+        store.save_slot(user.id, week_start, updated)
+        reporter.complete_step()
+        return {"drafts": drafts, "slot": updated.as_dict()}
+
+    try:
+        holder = runs_service.begin(run, run_store)
+    except RunNotStored as exc:
+        if background:
+            # The row is the answer a background run gives.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "run_not_started",
+                    "message": "We couldn't start the drafts just now. Nothing was charged.",
+                },
+                headers={"X-Error-Code": "run_not_started"},
+            ) from exc
+        holder = None
+    if holder is not None:
+        return replay_payload(holder)
+
+    if background:
+        background_tasks.add_task(
+            runs_service.settle_detached,
+            run,
+            work,
+            credit_store=credit_store,
+            action=action,
+            run_store=run_store,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=run.as_dict())
 
     settled = await runs_service.execute(
         run, work, credit_store=credit_store, action=action, run_store=run_store
@@ -510,17 +580,8 @@ async def post_regenerate(
             headers={"X-Error-Code": "upstream_unavailable"},
         )
 
-    drafts = tuple(
-        Draft(index=i + 1, body=d["body"], note=d.get("note"))
-        for i, d in enumerate(settled.result.get("drafts", []))
-    )
-    from dataclasses import replace as dc_replace
-
-    updated = dc_replace(slot, drafts=drafts, state=SlotState.DRAFT_READY)
-    store.save_slot(user.id, week_start, updated)
-
     return {
-        "slot": updated.as_dict(),
+        "slot": settled.result["slot"],
         "credits": settled.credits.as_dict() if settled.credits else None,
     }
 
