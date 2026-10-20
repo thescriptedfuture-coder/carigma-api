@@ -7,7 +7,6 @@ run protocol → credit rule → persisted result.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -17,7 +16,12 @@ from pydantic import BaseModel, Field
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
-from carigma_api.routes._guards import enforce_agent_rate_limit, idempotency_key, replay_if_seen
+from carigma_api.routes._guards import (
+    enforce_agent_rate_limit,
+    idempotency_key,
+    refuse_if_session_expiring,
+    replay_if_seen,
+)
 from carigma_api.services import credits as credits_service
 from carigma_api.services import runs as runs_service
 from carigma_api.services.agents import profile_analyst
@@ -163,20 +167,6 @@ def _shown(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: A run in the background writes with the caller's own token after the
-#: response has gone — its steps, the charge, the reading, the finish. A token
-#: that expires mid-run turns every one of those writes into a 401: nothing is
-#: charged, and nothing is kept, including the row the page is polling. So a
-#: background run starts only on a token that outlives a long run. The web
-#: refreshes its session before starting one; this is the backstop.
-BACKGROUND_TOKEN_SECONDS = 300
-
-
-def _token_seconds_left(user: Any) -> float | None:
-    exp = (getattr(user, "claims", None) or {}).get("exp")
-    return float(exp) - time.time() if isinstance(exp, int | float) else None
-
-
 @router.post("/score/compute", status_code=status.HTTP_200_OK)
 async def compute_score(
     body: ComputeScoreRequest,
@@ -217,17 +207,8 @@ async def compute_score(
         return replayed
 
     if body.background:
-        left = _token_seconds_left(user)
-        if left is not None and left < BACKGROUND_TOKEN_SECONDS:
-            # Before the limiter, so a refusal costs the caller nothing.
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "session_expiring",
-                    "message": "Your sign-in needs refreshing before a run. Try again.",
-                },
-                headers={"X-Error-Code": "session_expiring"},
-            )
+        # Before the limiter, so a refusal costs the caller nothing.
+        refuse_if_session_expiring(user)
 
     # Limiter 1 (§21 Q7). The credit gate below stops cost; this stops abuse.
     enforce_agent_rate_limit(user.id, "profile")
@@ -302,7 +283,7 @@ async def compute_score(
 
     if body.background:
         background_tasks.add_task(
-            _settle_in_background,
+            runs_service.settle_detached,
             run,
             work,
             credit_store=credit_store,
@@ -355,15 +336,6 @@ def _keep(user_id: str, result: Any, run: AgentRun, scores: Any, analyses: Analy
         logger.exception("could not keep the analysis for %s", user_id)
         kept = False
     return kept
-
-
-async def _settle_in_background(run: AgentRun, work: Any, **kwargs: Any) -> None:
-    """`execute`, after the answer has gone. It does not raise — but this is
-    the last frame anything could reach, so nothing escapes it unlogged."""
-    try:
-        await runs_service.execute(run, work, **kwargs)
-    except Exception:  # noqa: BLE001 — there is no caller left to tell
-        logger.exception("background run %s did not settle", run.id)
 
 
 @router.post("/score/fix")

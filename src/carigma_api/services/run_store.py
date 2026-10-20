@@ -60,7 +60,15 @@ def _to_row(run: AgentRun, idempotency_key: str | None) -> dict[str, Any]:
         "idempotency_key": idempotency_key,
         "started_at": run.started_at.isoformat(),
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        # `provenance` has been on the table since V2_001 and nothing wrote it.
+        "provenance": {"subject": dict(run.subject)} if run.subject else {},
     }
+
+
+def _subject(row: dict[str, Any]) -> dict[str, str]:
+    provenance = row.get("provenance")
+    subject = provenance.get("subject") if isinstance(provenance, dict) else None
+    return {str(k): str(v) for k, v in subject.items()} if isinstance(subject, dict) else {}
 
 
 def _from_row(row: dict[str, Any]) -> AgentRun:
@@ -73,6 +81,7 @@ def _from_row(row: dict[str, Any]) -> AgentRun:
         error=row.get("error"),
         started_at=_parse(row.get("started_at")) or datetime.now(UTC),
         finished_at=_parse(row.get("finished_at")),
+        subject=_subject(row),
     )
     run.steps = [
         RunStep(
@@ -164,7 +173,14 @@ class SupabaseRunStore:
         rows = res.data or []
         return _from_row(rows[0]) if rows else None
 
-    def latest_active(self, user_id: str, agent: str, *, since: datetime) -> AgentRun | None:
+    def latest_active(
+        self,
+        user_id: str,
+        agent: str,
+        *,
+        since: datetime,
+        subject: dict[str, str] | None = None,
+    ) -> AgentRun | None:
         """The caller's newest run of `agent` still going, started after `since`.
 
         For a page that lost track of a run it started — a reload, or a visit
@@ -172,17 +188,18 @@ class SupabaseRunStore:
         lives here. A failed read raises `RunStoreUnavailable`, like `get`.
         """
         try:
-            res = (
+            query = (
                 self._client.table(_TABLE)
                 .select("*")
                 .eq("user_id", user_id)
                 .eq("agent", agent)
                 .in_("status", [RunStatus.QUEUED.value, RunStatus.RUNNING.value])
                 .gte("started_at", since.isoformat())
-                .order("started_at", desc=True)
-                .limit(1)
-                .execute()
             )
+            if subject:
+                # jsonb containment: this subject, whatever else the run carries.
+                query = query.contains("provenance", {"subject": subject})
+            res = query.order("started_at", desc=True).limit(1).execute()
         except Exception as exc:
             logger.exception("agent_runs read failed for %s's active %s run", user_id, agent)
             raise RunStoreUnavailable(f"active {agent} run could not be read") from exc

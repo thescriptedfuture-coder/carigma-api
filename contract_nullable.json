@@ -41,7 +41,10 @@
     "credits.balance_after",
     "error",
     "finished_at",
-    "result"
+    "result",
+    "result.slot.published_at",
+    "result.slot.skip_note",
+    "result.slot.skip_reason"
   ],
   "GET /credits": [
     "balance"
@@ -209,6 +212,10 @@
     "streak.paused_because"
   ],
   "POST /posts/week/{}/regenerate": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result",
     "slot.published_at",
     "slot.skip_note",
     "slot.skip_reason"

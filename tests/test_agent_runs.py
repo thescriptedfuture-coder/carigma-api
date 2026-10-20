@@ -503,7 +503,8 @@ def test_only_the_agent_asked_about(wired: Wired) -> None:
     _seed_run(wired, agent="content")
 
     assert _active(wired).json() == {"run": None}
-    assert _active(wired, agent="content").status_code == 422
+    # An agent that never runs in the background has nothing to pick up.
+    assert _active(wired, agent="naukri").status_code == 422
 
 
 def test_could_not_look_is_not_no_run(wired: Wired) -> None:

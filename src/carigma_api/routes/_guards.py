@@ -8,6 +8,7 @@ gets the same 429 shape, the same replay semantics, and the same error copy.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import HTTPException, Request, status
@@ -55,6 +56,31 @@ def enforce_public_rate_limit(request: Request) -> None:
 def idempotency_key(request: Request) -> str | None:
     key = (request.headers.get("Idempotency-Key") or "").strip()
     return key or None
+
+
+#: A run in the background writes with the caller's own token after the
+#: response has gone — its steps, the charge, the result, the finish. A token
+#: that expires mid-run turns every one of those writes into a 401: nothing is
+#: charged, and nothing is kept, including the row the page is polling. So a
+#: background run starts only on a token that outlives a long run. The web
+#: refreshes its session before starting one; this is the backstop.
+BACKGROUND_TOKEN_SECONDS = 300
+
+
+def refuse_if_session_expiring(user: Any) -> None:
+    """409 `session_expiring` when the token will not outlive a background
+    run. Called before the rate limiter, so a refusal costs nothing."""
+    exp = (getattr(user, "claims", None) or {}).get("exp")
+    left = float(exp) - time.time() if isinstance(exp, int | float) else None
+    if left is not None and left < BACKGROUND_TOKEN_SECONDS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "session_expiring",
+                "message": "Your sign-in needs refreshing before a run. Try again.",
+            },
+            headers={"X-Error-Code": "session_expiring"},
+        )
 
 
 def replay_if_seen(

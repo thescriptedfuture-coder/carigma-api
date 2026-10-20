@@ -62,6 +62,16 @@ def _keys_for(table: str) -> list[tuple[str, ...]]:
     return unique_keys_of(table)
 
 
+def _holds(stored: Any, wanted: Any) -> bool:
+    """jsonb `@>` for dicts and scalars: every key in `wanted` is in `stored`
+    with a value `stored` also holds."""
+    if isinstance(wanted, dict):
+        return isinstance(stored, dict) and all(
+            k in stored and _holds(stored[k], v) for k, v in wanted.items()
+        )
+    return stored == wanted
+
+
 class FakeTable:
     def __init__(self, db: FakeDB, name: str) -> None:
         self._db = db
@@ -74,6 +84,7 @@ class FakeTable:
         self._single = False
         self._order: tuple[str, bool] | None = None
         self._ranges: list[tuple[str, str, str]] = []
+        self._contains: list[tuple[str, Any]] = []
 
     # ── builders ───────────────────────────────────────────────────────────
 
@@ -124,6 +135,12 @@ class FakeTable:
         self._ranges.append((column, "<=", str(value)))
         return self
 
+    def contains(self, column: str, value: Any) -> FakeTable:
+        """jsonb `@>`: the stored value holds every key and value given,
+        recursively. Production calls it for a run's subject."""
+        self._contains.append((column, value))
+        return self
+
     def lt(self, column: str, value: Any) -> FakeTable:
         """`<`, as strings, for the same reason as `gte`. A week is a half-open
         range — Monday 00:00 up to, NOT including, the next Monday 00:00 — and
@@ -154,6 +171,9 @@ class FakeTable:
             if op == "<=" and not actual <= value:
                 return False
             if op == "<" and not actual < value:
+                return False
+        for column, wanted in self._contains:
+            if not _holds(row.get(column), wanted):
                 return False
         # `in_`, compared as STRINGS like `eq` above, so the two cannot
         # disagree about what "equal" means for the same column.

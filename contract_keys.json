@@ -151,7 +151,10 @@
     "run.run_id",
     "run.started_at",
     "run.status",
-    "run.steps"
+    "run.steps",
+    "run.subject",
+    "run.subject.day",
+    "run.subject.week_start"
   ],
   "GET /agents/runs/{}": [
     "agent",
@@ -164,6 +167,9 @@
     "finished_at",
     "result",
     "result.band",
+    "result.drafts",
+    "result.drafts[].body",
+    "result.drafts[].note",
     "result.featuredSectionIdea",
     "result.optimizedAbout",
     "result.optimizedHeadline",
@@ -181,6 +187,22 @@
     "result.scoreBreakdown.headline",
     "result.scoreBreakdown.skills",
     "result.scoreSummary",
+    "result.slot",
+    "result.slot.date",
+    "result.slot.day",
+    "result.slot.drafts",
+    "result.slot.drafts[].body",
+    "result.slot.drafts[].index",
+    "result.slot.drafts[].note",
+    "result.slot.drafts[].reading_seconds",
+    "result.slot.drafts[].word_count",
+    "result.slot.optional",
+    "result.slot.published_at",
+    "result.slot.skip_note",
+    "result.slot.skip_reason",
+    "result.slot.state",
+    "result.slot.time_label",
+    "result.slot.variant_count",
     "result.topKeywordsToAdd",
     "result.variance_note",
     "result.weeklyGoal",
@@ -190,7 +212,10 @@
     "steps",
     "steps[].label",
     "steps[].status",
-    "steps[].step"
+    "steps[].step",
+    "subject",
+    "subject.day",
+    "subject.week_start"
   ],
   "GET /auth/admin-probe": [
     "status",
@@ -955,10 +980,16 @@
     "streak.weeks"
   ],
   "POST /posts/week/{}/regenerate": [
+    "agent",
+    "agent_label",
     "credits",
     "credits.balance_after",
     "credits.charged",
     "credits.reason",
+    "error",
+    "finished_at",
+    "result",
+    "run_id",
     "slot",
     "slot.date",
     "slot.day",
@@ -974,7 +1005,13 @@
     "slot.skip_reason",
     "slot.state",
     "slot.time_label",
-    "slot.variant_count"
+    "slot.variant_count",
+    "started_at",
+    "status",
+    "steps",
+    "subject",
+    "subject.day",
+    "subject.week_start"
   ],
   "POST /posts/week/{}/skip": [
     "charged",
@@ -1088,7 +1125,8 @@
     "steps",
     "steps[].label",
     "steps[].status",
-    "steps[].step"
+    "steps[].step",
+    "subject"
   ],
   "POST /score/fix": [
     "applied",
