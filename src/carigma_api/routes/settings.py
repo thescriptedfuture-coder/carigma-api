@@ -12,13 +12,15 @@ import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from supabase import create_client
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.routes._guards import enforce_public_rate_limit
+from carigma_api.services.onboarding import CADENCES, DEFAULT_CADENCE
 from carigma_api.services.repository import ProfileRepository, user_client
+from carigma_api.services.schedule import CADENCE_DAYS
 from carigma_api.services.settings_service import (
     EMAIL_PREFS_KEY,
     EmailPreferences,
@@ -38,6 +40,27 @@ router = APIRouter(tags=["settings"])
 
 class PlatformsRequest(BaseModel):
     platforms: list[Platform] = Field(min_length=0)
+
+
+class TargetsRequest(BaseModel):
+    target_roles: str = Field(min_length=1, max_length=200)
+    cadence: int
+
+    @field_validator("target_roles")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        # Every agent aims at something; a blank target searches for nothing.
+        if not value.strip():
+            raise ValueError("Pick a target role so the agents know what to aim at.")
+        return value.strip()
+
+    @field_validator("cadence")
+    @classmethod
+    def _offered(cls, value: int) -> int:
+        # The list onboarding offers, not a second copy of it.
+        if value not in CADENCES:
+            raise ValueError(f"Cadence is one of {', '.join(map(str, CADENCES))} posts a week.")
+        return value
 
 
 class RetentionRequest(BaseModel):
@@ -140,6 +163,102 @@ def put_platforms(
         ) from exc
 
     return change.as_dict()
+
+
+def _targets(profile: dict[str, Any]) -> dict[str, Any]:
+    raw = profile.get("cadence")
+    cadence = raw if isinstance(raw, int) and raw in CADENCES else None
+    return {
+        "target_roles": str(profile.get("targetRoles") or ""),
+        # `null` when the row carries no cadence we offer: the proposal then
+        # falls back to V1's three, and the page says it is a default rather
+        # than presenting it as the user's choice.
+        "cadence": cadence,
+        "default_cadence": DEFAULT_CADENCE,
+        "options": [{"cadence": n, "days": list(CADENCE_DAYS[n])} for n in CADENCES],
+    }
+
+
+@router.get("/profile/targets")
+def get_targets(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """What the agents aim at, and how many posts a week. Free.
+
+    Set once at onboarding and unchangeable after it — while the cadence
+    became the days every weekly plan proposes (S8, S9). A user who chose
+    five a week and wants three had no way to say so.
+    """
+    profiles, _ = _profiles(request, settings)
+    try:
+        profile = profiles.load(user.id) or {}
+    except Exception as exc:
+        logger.exception("could not read the targets for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "We couldn't load your targets just now."},
+        ) from exc
+    return _targets(profile)
+
+
+@router.put("/profile/targets")
+def put_targets(
+    body: TargetsRequest,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Change the target roles and the cadence. Free.
+
+    **A week already signed is not touched.** The cadence seeds the NEXT plan
+    offered — Sunday's, or "Plan this week" on an unplanned week. Rewriting a
+    signed contract under the user's signature would be the product acting on
+    their behalf; the note says so instead.
+    """
+    profiles, _ = _profiles(request, settings)
+    try:
+        profiles.save(
+            user.id,
+            {
+                "targetRoles": body.target_roles,
+                # V1 reads the singular too (see `onboarding.completion`).
+                "targetRole": body.target_roles.split(",")[0].strip(),
+                "cadence": body.cadence,
+            },
+        )
+        # Read BACK: the answer is what the row now says, not what was asked.
+        saved = profiles.load(user.id) or {}
+    except Exception as exc:
+        logger.exception("targets save failed for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "save_failed",
+                "message": "We couldn't save that just now. Your settings are unchanged.",
+            },
+        ) from exc
+
+    shown = _targets(saved)
+    if shown["cadence"] != body.cadence or shown["target_roles"] != body.target_roles:
+        # A write that "succeeded" and did not stick is a failed save. Saying
+        # "the next plan proposes None posts" would be reporting a decision
+        # the row does not hold.
+        logger.error("targets save for %s did not read back", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "save_failed",
+                "message": "We couldn't save that just now. Your settings are unchanged.",
+            },
+        )
+    days = ", ".join(d.title() for d in CADENCE_DAYS.get(shown["cadence"] or DEFAULT_CADENCE, ()))
+    shown["note"] = (
+        f"The next plan you are offered proposes {shown['cadence']} posts a week — {days}. "
+        "A week you have already signed stays as you signed it."
+    )
+    return shown
 
 
 @router.put("/profile/resume-retention")

@@ -65,7 +65,9 @@ def test_it_reads_the_surfaces_the_client_reads() -> None:
         for path in recorded
         if path.startswith(("/admin", "/auth/")) or path.startswith("/unsubscribe/") or "{}" in path
     }
-    covered = {path for path, _key in smoke.READS}
+    # A read that needs a parameter carries it (`/agents/runs/active?agent=`);
+    # the contract records the route, so they are matched without the query.
+    covered = {path.split("?", 1)[0] for path, _key in smoke.READS}
 
     missed = sorted(recorded - not_a_users - covered)
     assert missed == [], f"a signed-in user can reach these and the smoke test does not: {missed}"
@@ -76,7 +78,7 @@ def test_every_surface_it_names_is_one_the_api_serves() -> None:
         key.split(" ", 1)[1]
         for key in json.loads((ROOT / "contract_keys.json").read_text(encoding="utf-8"))
     }
-    unknown = sorted({path for path, _key in smoke.READS} - recorded)
+    unknown = sorted({path.split("?", 1)[0] for path, _key in smoke.READS} - recorded)
 
     assert unknown == [], f"the smoke test reads paths the API does not serve: {unknown}"
 

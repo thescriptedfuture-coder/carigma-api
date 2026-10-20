@@ -137,6 +137,22 @@
     "items[].user_id",
     "total"
   ],
+  "GET /agents/runs/active": [
+    "run",
+    "run.agent",
+    "run.agent_label",
+    "run.credits",
+    "run.credits.balance_after",
+    "run.credits.charged",
+    "run.credits.reason",
+    "run.error",
+    "run.finished_at",
+    "run.result",
+    "run.run_id",
+    "run.started_at",
+    "run.status",
+    "run.steps"
+  ],
   "GET /agents/runs/{}": [
     "agent",
     "agent_label",
@@ -488,6 +504,14 @@
     "still_sent",
     "unsubscribed_all",
     "weekly_review"
+  ],
+  "GET /profile/targets": [
+    "cadence",
+    "default_cadence",
+    "options",
+    "options[].cadence",
+    "options[].days",
+    "target_roles"
   ],
   "GET /profile/updates/open": [
     "change"
@@ -1227,5 +1251,14 @@
     "deletion.requested",
     "explainer",
     "resumeRetentionOptIn"
+  ],
+  "PUT /profile/targets": [
+    "cadence",
+    "default_cadence",
+    "note",
+    "options",
+    "options[].cadence",
+    "options[].days",
+    "target_roles"
   ]
 }
