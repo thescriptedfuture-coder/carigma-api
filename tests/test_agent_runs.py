@@ -435,3 +435,89 @@ def test_the_browser_may_send_an_idempotency_key(client: TestClient) -> None:
 
     assert r.status_code == 200
     assert "idempotency-key" in r.headers["access-control-allow-headers"].lower()
+
+
+# ── Picking a run back up (UAT, 20 Oct) ────────────────────────────────────
+
+
+def _seed_run(
+    w: Wired,
+    *,
+    status: str = "running",
+    minutes_ago: float = 1,
+    user: str = USER_ID,
+    agent: str = "profile",
+) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    from carigma_api.services.runs import RunStatus, new_run
+
+    run = new_run(user, agent)
+    run.status = RunStatus(status)
+    run.started_at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    SupabaseRunStore(w.db).save(run)
+    return run.id
+
+
+def _active(w: Wired, *, agent: str = "profile", sub: str = USER_ID) -> Any:
+    return w.client.get(
+        "/agents/runs/active", params={"agent": agent}, headers=auth(make_token(sub=sub))
+    )
+
+
+def test_a_page_that_lost_its_run_finds_it_again(wired: Wired) -> None:
+    """The run id lived only in the page. A reload mid-run, or a visit to
+    Today and back, and the page showed the old reading while the run
+    finished and charged out of sight."""
+    older = _seed_run(wired, minutes_ago=3)
+    newest = _seed_run(wired, minutes_ago=0.5)
+
+    res = _active(wired)
+
+    assert res.status_code == 200
+    assert res.json()["run"]["run_id"] == newest != older
+    assert res.json()["run"]["status"] == "running"
+
+
+def test_a_finished_run_is_not_in_flight(wired: Wired) -> None:
+    _seed_run(wired, status="succeeded", minutes_ago=0.5)
+
+    assert _active(wired).json() == {"run": None}
+
+
+def test_a_run_stuck_running_past_ten_minutes_is_not_watched_forever(wired: Wired) -> None:
+    """A restart mid-run leaves its row `running`. Offered to the page, it
+    would be watched forever."""
+    _seed_run(wired, minutes_ago=11)
+
+    assert _active(wired).json() == {"run": None}
+
+
+def test_another_users_run_in_flight_is_not_offered(wired: Wired) -> None:
+    _seed_run(wired, user=OTHER_USER)
+
+    assert _active(wired).json() == {"run": None}
+
+
+def test_only_the_agent_asked_about(wired: Wired) -> None:
+    _seed_run(wired, agent="content")
+
+    assert _active(wired).json() == {"run": None}
+    assert _active(wired, agent="content").status_code == 422
+
+
+def test_could_not_look_is_not_no_run(wired: Wired) -> None:
+    """ "No run in flight" for a failed read would offer a second run beside
+    the first."""
+    wired.db.failing.add("agent_runs")
+
+    res = _active(wired)
+
+    assert res.status_code == 503
+    assert res.json()["detail"]["error"] == "read_failed"
+
+
+def test_active_is_not_read_as_a_run_id(wired: Wired) -> None:
+    """Routes match in order: declared after `/agents/runs/{run_id}`, the
+    word "active" was a run id — and a 404."""
+    assert _active(wired).status_code == 200

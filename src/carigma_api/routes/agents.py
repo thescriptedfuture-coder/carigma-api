@@ -11,6 +11,7 @@ no page.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -36,6 +37,56 @@ def _store(request: Request, settings: Settings) -> SupabaseRunStore:
     """`agent_runs` through the caller's own client, so RLS answers first."""
     token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
     return SupabaseRunStore(user_client(settings, token))
+
+
+#: How far back a run still counts as in flight. Analyst runs take 30–60 s;
+#: a row still `running` after this is a run the server lost (a restart
+#: mid-run), and a page shown it would watch it forever.
+ACTIVE_FOR = timedelta(minutes=10)
+
+#: The agents a page can pick back up. Only Signal's run is started in the
+#: background today; the rest still answer in one request.
+RESUMABLE = frozenset({"profile"})
+
+
+# Declared BEFORE `/agents/runs/{run_id}`: routes match in order, and "active"
+# would otherwise be read as a run id — answered 404, "no such run".
+@router.get("/agents/runs/active")
+def get_active_run(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+    agent: str,
+) -> dict[str, Any]:
+    """The caller's run of `agent` still going, or `{"run": null}`. Free.
+
+    The run id lived only in the page that started it, so a reload — or a
+    visit to Today and back — mid-run lost it: the page fell back to the old
+    reading while the run finished and charged out of sight (UAT, 20 Oct).
+    The run lives in `agent_runs`; this is how a page finds it again.
+
+    A failed read is a 503, never null: "no run in flight" told for "could not
+    look" would offer a second run beside the first.
+    """
+    if agent not in RESUMABLE:
+        raise HTTPException(
+            # Literal: Starlette renamed the constant; either spelling pins a version.
+            status_code=422,
+            detail={"error": "not_resumable", "message": f"'{agent}' runs are not resumable."},
+        )
+    try:
+        run = _store(request, settings).latest_active(
+            user.id, agent, since=datetime.now(UTC) - ACTIVE_FOR
+        )
+    except RunStoreUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "We couldn't check for a run just now."},
+        ) from exc
+    # The second lock, as on `get_run`: RLS returns only the caller's rows.
+    if run is None or run.user_id != user.id:
+        return {"run": None}
+    return {"run": run.as_dict()}
 
 
 @router.get("/agents/runs/{run_id}")

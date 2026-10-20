@@ -76,6 +76,8 @@ READS: tuple[tuple[str, str | None], ...] = (
     ("/score/history", None),
     # S10: the kept reading Signal opens on. `run_cost` is always present.
     ("/score/latest", "run_cost"),
+    # A page that lost its run finds it here. `run` is always present (null or a run).
+    ("/agents/runs/active?agent=profile", "run"),
     ("/jobs/feed", "items"),
     # Five columns, always, so an empty pipeline and an unreadable one differ.
     ("/tracker", "columns"),

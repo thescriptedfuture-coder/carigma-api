@@ -30,6 +30,13 @@
   "GET /admin/users": [
     "items[].created_at"
   ],
+  "GET /agents/runs/active": [
+    "run",
+    "run.credits.balance_after",
+    "run.error",
+    "run.finished_at",
+    "run.result"
+  ],
   "GET /agents/runs/{}": [
     "credits.balance_after",
     "error",

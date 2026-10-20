@@ -164,6 +164,31 @@ class SupabaseRunStore:
         rows = res.data or []
         return _from_row(rows[0]) if rows else None
 
+    def latest_active(self, user_id: str, agent: str, *, since: datetime) -> AgentRun | None:
+        """The caller's newest run of `agent` still going, started after `since`.
+
+        For a page that lost track of a run it started — a reload, or a visit
+        to another surface and back. The run id lived in the page; the run
+        lives here. A failed read raises `RunStoreUnavailable`, like `get`.
+        """
+        try:
+            res = (
+                self._client.table(_TABLE)
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("agent", agent)
+                .in_("status", [RunStatus.QUEUED.value, RunStatus.RUNNING.value])
+                .gte("started_at", since.isoformat())
+                .order("started_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            logger.exception("agent_runs read failed for %s's active %s run", user_id, agent)
+            raise RunStoreUnavailable(f"active {agent} run could not be read") from exc
+        rows = res.data or []
+        return _from_row(rows[0]) if rows else None
+
     def remember_idempotency(self, user_id: str, key: str, run_id: str) -> None:
         self._keys[run_id] = key
 
