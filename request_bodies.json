@@ -28,6 +28,15 @@
     "where": "src/components/carigma/ProfileChange.tsx"
   },
   {
+    "method": "PUT",
+    "path": "/profile/targets",
+    "keys": [
+      "target_roles",
+      "cadence"
+    ],
+    "where": "src/components/carigma/TargetsSettings.tsx"
+  },
+  {
     "method": "POST",
     "path": "/onboarding/complete",
     "keys": [

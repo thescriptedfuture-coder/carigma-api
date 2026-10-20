@@ -505,6 +505,14 @@
     "unsubscribed_all",
     "weekly_review"
   ],
+  "GET /profile/targets": [
+    "cadence",
+    "default_cadence",
+    "options",
+    "options[].cadence",
+    "options[].days",
+    "target_roles"
+  ],
   "GET /profile/updates/open": [
     "change"
   ],
@@ -1243,5 +1251,14 @@
     "deletion.requested",
     "explainer",
     "resumeRetentionOptIn"
+  ],
+  "PUT /profile/targets": [
+    "cadence",
+    "default_cadence",
+    "note",
+    "options",
+    "options[].cadence",
+    "options[].days",
+    "target_roles"
   ]
 }

@@ -113,6 +113,9 @@
     "slot.skip_note",
     "slot.skip_reason"
   ],
+  "GET /profile/targets": [
+    "cadence"
+  ],
   "GET /profile/updates/open": [
     "change"
   ],
