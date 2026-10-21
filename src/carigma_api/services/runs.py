@@ -343,6 +343,10 @@ async def execute(
         # NO CHARGE. The user got nothing; billing them for our upstream's bad
         # day is exactly what the rule forbids.
         logger.warning("Run %s failed upstream: %s", run.id, exc)
+        if provider_account_problem(str(exc)):
+            # Every run fails this way until someone acts: said loudly, once
+            # per run, so it is the first thing in the logs and not the tenth.
+            logger.critical("AI provider account problem — every agent run will fail: %s", exc)
         run.status = RunStatus.FAILED
         run.error = str(exc)
         _close_open_steps(run)
@@ -352,6 +356,10 @@ async def execute(
         return run
     except Exception as exc:  # noqa: BLE001 — a run must never take the API down
         logger.exception("Run %s failed unexpectedly", run.id)
+        if provider_account_problem(str(exc)):
+            # Every run fails this way until someone acts: said loudly, once
+            # per run, so it is the first thing in the logs and not the tenth.
+            logger.critical("AI provider account problem — every agent run will fail: %s", exc)
         run.status = RunStatus.FAILED
         run.error = str(exc)
         _close_open_steps(run)
@@ -441,11 +449,39 @@ def friendly_error(error: str | None) -> str:
 
     if has("overloaded", "rate limit", "rate_limit", "429", "too many requests"):
         return "Things are busy right now. Please wait a few seconds and try again."
+    if provider_account_problem(error):
+        # Our AI provider account — out of credit, a revoked key. On 21 Oct
+        # every run read "try again in a moment" while the Anthropic balance
+        # was empty: an invitation to keep retrying something no retry could
+        # fix. And this branch used to say "our team has been notified",
+        # which nothing did.
+        return (
+            "This isn't available right now — the problem is on our side, not with your "
+            "account. Trying again won't help until we've fixed it."
+        )
     if has("timed out", "timeout", "connection", "network", "502", "503", "504"):
         return "We couldn't reach the server. Check your connection and try again in a moment."
-    if has("api key", "authentication", "401"):
-        return "That feature isn't fully switched on yet — our team has been notified."
     return "We couldn't complete that just now. Please try again in a moment."
+
+
+#: What the provider says when the problem is OUR account, not the request.
+_ACCOUNT_PROBLEMS = (
+    "credit balance is too low",
+    "plans & billing",
+    "purchase credits",
+    "billing",
+    "api key",
+    "authentication",
+    "permission_error",
+    "401",
+)
+
+
+def provider_account_problem(error: str | None) -> bool:
+    """The AI provider refused because of our account — every run will fail
+    the same way until someone fixes it, so it is logged as critical."""
+    low = (error or "").lower()
+    return any(marker in low for marker in _ACCOUNT_PROBLEMS)
 
 
 def new_run(user_id: str, agent: str) -> AgentRun:
