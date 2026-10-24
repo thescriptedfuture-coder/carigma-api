@@ -522,3 +522,33 @@ def test_active_is_not_read_as_a_run_id(wired: Wired) -> None:
     """Routes match in order: declared after `/agents/runs/{run_id}`, the
     word "active" was a run id — and a 404."""
     assert _active(wired).status_code == 200
+
+
+# ── When the provider account is the problem (21 Oct) ──────────────────────
+
+
+def test_an_empty_provider_balance_is_not_called_a_blip() -> None:
+    """Every run read "try again in a moment" while the Anthropic balance was
+    empty — an invitation to retry something no retry could fix."""
+    from carigma_api.services.runs import friendly_error
+
+    said = friendly_error(
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': 'Your credit balance is too low to access the Anthropic API. Please go "
+        "to Plans & Billing to upgrade or purchase credits.'}}"
+    )
+
+    assert "on our side" in said
+    assert "try again in a moment" not in said.lower()
+
+
+def test_no_failure_claims_a_notification_that_nothing_sends() -> None:
+    from carigma_api.services.runs import friendly_error
+
+    assert "notified" not in friendly_error("AuthenticationError: invalid x-api-key (401)")
+
+
+def test_a_passing_blip_still_says_try_again() -> None:
+    from carigma_api.services.runs import friendly_error
+
+    assert "try again" in friendly_error("Overloaded (529)").lower()
