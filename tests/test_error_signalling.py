@@ -111,6 +111,11 @@ ACCEPTED: dict[tuple[str, str], str] = {
         "same, so a referral that silently failed to grant is indistinguishable from a "
         "user who was never referred, and there is no retry path."
     ),
+    # A body that is not JSON and JSON with no commit are one answer to the
+    # only question asked: "does this address report a build?" The judgments
+    # then read what the body IS (V1's page, the HTTP status) to say what
+    # came back instead.
+    ("cutover_check.py", "_commit"): "no build reported; the caller reads the body itself",
 }
 
 

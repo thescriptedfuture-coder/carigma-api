@@ -4,6 +4,7 @@ rem
 rem     run deployed
 rem     run smoke
 rem     run landed
+rem     run cutover-check
 rem     run gates
 rem     run emails daily --dry-run
 rem
@@ -46,6 +47,7 @@ if /i "%CMD%"=="emails"   goto emails
 if /i "%CMD%"=="deployed" goto deployed
 if /i "%CMD%"=="smoke"    goto smoke
 if /i "%CMD%"=="landed"   goto landed
+if /i "%CMD%"=="cutover-check" goto cutovercheck
 if /i "%CMD%"=="test"     goto test
 if /i "%CMD%"=="gates"    goto gates
 if /i "%CMD%"=="python"   goto python
@@ -69,6 +71,10 @@ exit /b %errorlevel%
 
 :landed
 "%PY%" scripts\landed.py%ARGS%
+exit /b %errorlevel%
+
+:cutovercheck
+"%PY%" scripts\cutover_check.py%ARGS%
 exit /b %errorlevel%
 
 :test
@@ -97,11 +103,12 @@ echo Ready.
 goto ready
 
 :usage
-echo Usage: run {emails^|deployed^|smoke^|landed^|test^|gates^|python^|pip} ...
+echo Usage: run {emails^|deployed^|smoke^|landed^|cutover-check^|test^|gates^|python^|pip} ...
 echo.
 echo   run deployed                   is production running origin/main? run it first
 echo   run smoke                      sign in to production and read every surface
 echo   run landed [commit ...]        is the work committed, pushed, on main? run it last
+echo   run cutover-check [--after]    is V2 ready to take app.carigma.in? (read-only)
 echo   run gates                      everything that must pass
 echo   run emails daily --dry-run     what today's brief would say
 exit /b 2
