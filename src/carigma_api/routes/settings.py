@@ -93,7 +93,24 @@ DETAIL_FIELDS: dict[str, tuple[str, int]] = {
     "cv_template": ("cvTemplate", 40),
 }
 
-_LINKEDIN_URL = re.compile(r"^https?://([a-z]{2,3}\.)?linkedin\.com/\S+$", re.IGNORECASE)
+#: A LinkedIn PROFILE address, as people actually paste it: with or without
+#: `https://`, with `www.` or a country prefix (`in.`), a trailing slash, a
+#: tracking query. It required `https://` — and Ravi pasted
+#: `www.linkedin.com/in/ravi-kumar-analytics` from his browser and was told it
+#: was not a LinkedIn address (UAT, 24 Oct). Company and job pages are not
+#: profiles, so they are still refused.
+_LINKEDIN_PROFILE = re.compile(
+    r"^(?:https?://)?(?:[a-z]{2,3}\.)?linkedin\.com/(in|pub)/([^/?#\s]+)/?(?:[?#]\S*)?$",
+    re.IGNORECASE,
+)
+
+
+def linkedin_profile_url(value: str) -> str | None:
+    """The one form a profile address is stored in, or None if it is not one."""
+    match = _LINKEDIN_PROFILE.match(value.strip())
+    if not match:
+        return None
+    return f"https://www.linkedin.com/{match.group(1).lower()}/{match.group(2)}"
 
 
 class DetailsRequest(BaseModel):
@@ -137,9 +154,16 @@ class DetailsRequest(BaseModel):
     @field_validator("linkedin_url")
     @classmethod
     def _linkedin(cls, value: str | None) -> str | None:
-        if value and not _LINKEDIN_URL.match(value):
-            raise ValueError("That is not a LinkedIn profile address (linkedin.com/in/...).")
-        return value
+        if not value:
+            return value
+        # Stored in one form, so the CV, the read-back and the next visit all
+        # see the same address whatever was pasted.
+        normalised = linkedin_profile_url(value)
+        if normalised is None:
+            raise ValueError(
+                "That is not a LinkedIn profile address. It looks like linkedin.com/in/your-name."
+            )
+        return normalised
 
     @field_validator("tone")
     @classmethod
@@ -590,6 +614,12 @@ def post_reset_password(
     # Site URL is V1 — so a V2 reset link without this lands the user in a
     # different application. `APP_URL` must be on the Supabase redirect
     # allow-list or the same substitution happens anyway.
+    #
+    # And even then the TEMPLATE has the last word. The shared project's reset
+    # template is V1's `<site>?token_hash=…&type=recovery`, which ignores
+    # `redirect_to` — a V2 reset arrived at app.carigma.in, V1 (UAT, 24 Oct).
+    # Until cutover that is where V2 resets land; after it, app.carigma.in is
+    # V2 and the web's `EmailLinkGate` takes the link. `CUTOVER.md`.
     try:
         client = create_client(settings.supabase_url, settings.supabase_anon_key)
         client.auth.reset_password_for_email(

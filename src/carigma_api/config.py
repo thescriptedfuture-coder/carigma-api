@@ -108,6 +108,16 @@ class Settings(BaseSettings):
     email_audience: str = Field(default="allowlist")
     email_allowlist: str = Field(default="")
 
+    # ── Whom the Sunday pass plans for ─────────────────────────────────────
+    #
+    # `planners` (the default): users who have planned a week in V2. A plan
+    # written for someone still on V1 is adopted unanswered by the sweep, and
+    # their first V2 visit opens on a standing-by card about weeks they never
+    # saw. `everyone` adds every onboarded profile — the cutover-day switch
+    # (`CUTOVER_PARITY.md`), when every user is a V2 user. Same rule as
+    # EMAIL_AUDIENCE: anything but the exact word stays narrow.
+    sunday_audience: str = Field(default="planners")
+
     # ── Credits ────────────────────────────────────────────────────────────
     # `check_affordable` used to run FREE whenever the balance came back None —
     # which covered a failed read as well as "no credits table here". So a

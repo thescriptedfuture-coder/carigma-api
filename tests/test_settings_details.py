@@ -122,15 +122,41 @@ def test_the_name_cannot_be_cleared(client: TestClient, row: RoundTrip) -> None:
 
 @pytest.mark.parametrize(
     "url",
-    ["https://example.com/ravi", "linkedin.com/in/ravi", "javascript:alert(1)"],
+    [
+        "https://example.com/ravi",
+        "https://www.linkedin.com/company/carigma",
+        "https://www.linkedin.com/jobs/view/4412",
+        "javascript:alert(1)",
+        "ravi-kumar-analytics",
+    ],
 )
-def test_a_linkedin_url_must_be_one(client: TestClient, row: RoundTrip, url: str) -> None:
+def test_what_is_not_a_profile_address_is_refused(
+    client: TestClient, row: RoundTrip, url: str
+) -> None:
     assert _put(client, linkedin_url=url).status_code == 422
 
 
-def test_a_real_linkedin_url_is_kept(client: TestClient, row: RoundTrip) -> None:
-    assert _put(client, linkedin_url="https://www.linkedin.com/in/ravi-kumar").status_code == 200
-    assert row.load("u")["linkedinUrl"] == "https://www.linkedin.com/in/ravi-kumar"
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        # What Ravi pasted from his browser (UAT, 24 Oct) — refused, because
+        # the check required `https://`. The test beside it ASSERTED that
+        # `linkedin.com/in/ravi` must be refused: it pinned the bug.
+        "www.linkedin.com/in/ravi-kumar-analytics",
+        "linkedin.com/in/ravi-kumar-analytics",
+        "https://www.linkedin.com/in/ravi-kumar-analytics/",
+        "http://in.linkedin.com/in/ravi-kumar-analytics?utm_source=share",
+        "  HTTPS://WWW.LINKEDIN.COM/in/ravi-kumar-analytics  ",
+    ],
+)
+def test_a_profile_address_is_kept_in_one_form_however_it_was_pasted(
+    client: TestClient, row: RoundTrip, pasted: str
+) -> None:
+    res = _put(client, linkedin_url=pasted)
+
+    assert res.status_code == 200, res.text
+    assert row.load("u")["linkedinUrl"] == "https://www.linkedin.com/in/ravi-kumar-analytics"
+    assert res.json()["about"]["linkedin_url"] == "https://www.linkedin.com/in/ravi-kumar-analytics"
 
 
 def test_a_tone_or_template_we_do_not_offer_is_refused(client: TestClient, row: RoundTrip) -> None:

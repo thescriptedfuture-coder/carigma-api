@@ -23,7 +23,8 @@ V1 and V2 share one database and nothing in `profiles` tells their users
 apart, so "every profile" would write plans for twelve people using V1. The
 sweep would then adopt each one unanswered, and on their first V2 visit they
 would meet a standing-by card about weeks they were never shown. At cutover
-this widens to every onboarded profile (`CUTOVER_PARITY.md`).
+this widens to every onboarded profile: `SUNDAY_AUDIENCE=everyone`
+(`audience`, `CUTOVER_PARITY.md`).
 
 ## What it will not do
 
@@ -356,14 +357,31 @@ def planners(db: Any) -> list[str]:
     return sorted({str(r["user_id"]) for r in rows if isinstance(r, dict) and r.get("user_id")})
 
 
+def audience(db: Any, setting: str) -> list[str]:
+    """Whom this Sunday plans for: `planners`, or at cutover, `everyone`.
+
+    `everyone` is the planners AND every onboarded profile — a planner whose
+    profile row lost its flag is still a planner. Anything but the exact word
+    is `planners`, like EMAIL_AUDIENCE: a typo must not write plans for
+    people still using V1.
+    """
+    planned = planners(db)
+    if setting.strip().lower() != "everyone":
+        return planned
+    rows = db.table("profiles").select("user_id").eq("onboarded", True).execute().data or []
+    onboarded = {str(r["user_id"]) for r in rows if isinstance(r, dict) and r.get("user_id")}
+    return sorted(set(planned) | onboarded)
+
+
 def sunday(
     db: Any,
     *,
     now: datetime | None = None,
     dry_run: bool = False,
     only: str | None = None,
+    who: str = "planners",
 ) -> SundayReport:
-    """Review the closing week and propose the next, for every planner.
+    """Review the closing week and propose the next, for `audience(db, who)`.
 
     `only` restricts the pass to one user id — the cron's `--only`.
     """
@@ -373,7 +391,7 @@ def sunday(
     store = SupabaseContractStore(db)
     report = SundayReport()
 
-    for user_id in planners(db):
+    for user_id in audience(db, who):
         if only and user_id != only:
             continue
         try:
@@ -447,4 +465,4 @@ def sunday(
     return report
 
 
-__all__ = ["IST", "SundayReport", "build_review", "closing_week", "planners", "sunday"]
+__all__ = ["IST", "SundayReport", "audience", "build_review", "closing_week", "planners", "sunday"]

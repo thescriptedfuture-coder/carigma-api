@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from carigma_api.services.sunday import closing_week, sunday
+from carigma_api.services.sunday import audience, closing_week, sunday
 from carigma_api.services.weekly import (
     Cadence,
     ContractItem,
@@ -58,9 +58,9 @@ def db() -> FakeDB:
     fake = FakeDB()
     fake.seed(
         "profiles",
-        {"user_id": USER, "cadence": 5, "platforms": ["linkedin", "naukri"]},
+        {"user_id": USER, "cadence": 5, "platforms": ["linkedin", "naukri"], "onboarded": True},
         # On V1 only: a profile, and no week ever planned in V2.
-        {"user_id": OTHER, "cadence": 3, "platforms": ["linkedin"]},
+        {"user_id": OTHER, "cadence": 3, "platforms": ["linkedin"], "onboarded": True},
     )
     return fake
 
@@ -349,6 +349,48 @@ def test_nobody_who_has_never_planned_a_week_is_touched(db: FakeDB) -> None:
     sunday(db, now=NOW)
 
     assert [r for r in db.rows("weekly_review") if r["user_id"] == OTHER] == []
+
+
+# ── Cutover: SUNDAY_AUDIENCE ───────────────────────────────────────────────
+
+
+def test_at_cutover_everyone_onboarded_gets_sundays_plan(db: FakeDB) -> None:
+    """After cutover every user is a V2 user, and a new one who has never
+    pressed Plan this week should still open Monday on a plan."""
+    _save(db, _contract(WEEK))
+
+    report = sunday(db, now=NOW, who="everyone")
+
+    other = _row(db, NEXT, user=OTHER)
+    assert other is not None
+    # Their own cadence (3), not the planner's.
+    assert [i.day for i in from_row(other).items if i.kind == "content"] == ["MON", "WED", "FRI"]
+    assert report.proposed == 2
+
+
+def test_someone_who_never_finished_setup_is_not_planned_for(db: FakeDB) -> None:
+    db.seed("profiles", {"user_id": "user-half-way", "cadence": 3, "onboarded": False})
+
+    assert "user-half-way" not in audience(db, "everyone")
+
+
+def test_a_planner_stays_in_whatever_their_profile_says(db: FakeDB) -> None:
+    _save(db, _contract(WEEK), user="user-no-flag")
+
+    assert "user-no-flag" in audience(db, "everyone")
+
+
+@pytest.mark.parametrize("setting", ["planners", "", "all", "true", "everyone,", "every one"])
+def test_anything_but_the_exact_word_stays_with_the_planners(db: FakeDB, setting: str) -> None:
+    """Same rule as EMAIL_AUDIENCE: a typo must not write plans for people
+    still using V1."""
+    _save(db, _contract(WEEK))
+
+    assert audience(db, setting) == [USER]
+
+
+def test_the_exact_word_is_read_forgivingly_for_case_and_spaces(db: FakeDB) -> None:
+    assert audience(db, "  Everyone ") == sorted([USER, OTHER])
 
 
 def test_one_unanswered_week_still_gets_next_weeks_plan(db: FakeDB) -> None:
