@@ -674,7 +674,12 @@ def main() -> int:
             if not only_id:
                 logger.error("no user matches %s — the Sunday pass touched nothing", args.only)
         if not args.only or only_id:
-            sunday_report = sunday(db, dry_run=args.dry_run, only=only_id or None)
+            sunday_report = sunday(
+                db,
+                dry_run=args.dry_run,
+                only=only_id or None,
+                who=Settings().sunday_audience,
+            )
             print(json.dumps(sunday_report.as_dict(), indent=2))
             sunday_failed = sunday_report.failed
 
