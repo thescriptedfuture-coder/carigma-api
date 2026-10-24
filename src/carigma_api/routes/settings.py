@@ -614,6 +614,12 @@ def post_reset_password(
     # Site URL is V1 — so a V2 reset link without this lands the user in a
     # different application. `APP_URL` must be on the Supabase redirect
     # allow-list or the same substitution happens anyway.
+    #
+    # And even then the TEMPLATE has the last word. The shared project's reset
+    # template is V1's `<site>?token_hash=…&type=recovery`, which ignores
+    # `redirect_to` — a V2 reset arrived at app.carigma.in, V1 (UAT, 24 Oct).
+    # Until cutover that is where V2 resets land; after it, app.carigma.in is
+    # V2 and the web's `EmailLinkGate` takes the link. `CUTOVER.md`.
     try:
         client = create_client(settings.supabase_url, settings.supabase_anon_key)
         client.auth.reset_password_for_email(

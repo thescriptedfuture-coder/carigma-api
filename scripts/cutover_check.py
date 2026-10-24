@@ -59,7 +59,7 @@ BY_HAND = (
     "Supabase > Auth > URL configuration: Site URL and redirect allow-list",
     "Supabase > Auth > Emails: reset and confirm templates (?token_hash= form)",
     "Supabase > Auth > SMTP: custom SMTP (support@carigma.in), not the built-in mailer",
-    "Google Cloud > OAuth client: https://app.carigma.in as an origin",
+    "Google sign-in once on https://app.carigma.in (it returns via the allow-list)",
     "Render > carigma-api and the 4 crons: APP_URL, SUNDAY_AUDIENCE, EMAIL_AUDIENCE",
 )
 
