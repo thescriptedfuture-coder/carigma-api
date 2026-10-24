@@ -78,6 +78,8 @@ READS: tuple[tuple[str, str | None], ...] = (
     ("/score/latest", "run_cost"),
     # S11: what the agents aim at, and the cadence options with their days.
     ("/profile/targets", "options"),
+    # S13: the fields the agents read, for Settings.
+    ("/profile/details", "options"),
     # A page that lost its run finds it here. `run` is always present (null or a run).
     ("/agents/runs/active?agent=profile", "run"),
     ("/jobs/feed", "items"),

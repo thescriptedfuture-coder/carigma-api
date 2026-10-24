@@ -9,15 +9,17 @@ takes a platform parameter and none should ever be added.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from supabase import create_client
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.routes._guards import enforce_public_rate_limit
+from carigma_api.services.cv_pdf import DEFAULT_TEMPLATE, TEMPLATE_KEYS, TEMPLATES
 from carigma_api.services.onboarding import CADENCES, DEFAULT_CADENCE
 from carigma_api.services.repository import ProfileRepository, user_client
 from carigma_api.services.schedule import CADENCE_DAYS
@@ -60,6 +62,97 @@ class TargetsRequest(BaseModel):
         # The list onboarding offers, not a second copy of it.
         if value not in CADENCES:
             raise ValueError(f"Cadence is one of {', '.join(map(str, CADENCES))} posts a week.")
+        return value
+
+
+#: V1's four voices (`app.py` _TONES), in its order. The post writer defaults
+#: to the first when none is set (`content_writer.brief_for`).
+TONES: tuple[str, ...] = (
+    "Professional yet warm",
+    "Bold & opinionated",
+    "Storytelling & personal",
+    "Educational & formal",
+)
+
+#: Request field -> profile key, and the longest value each may hold. One
+#: table, so the GET, the PUT and the read-back cannot disagree about a name.
+DETAIL_FIELDS: dict[str, tuple[str, int]] = {
+    "name": ("name", 120),
+    "current_role": ("currentRole", 160),
+    "location": ("location", 120),
+    "industry": ("industry", 120),
+    "linkedin_url": ("linkedinUrl", 300),
+    "education": ("education", 400),
+    "tone": ("tone", 60),
+    "niche": ("niche", 160),
+    "personal_brand": ("personalBrand", 300),
+    "content_avoid": ("contentAvoid", 300),
+    "primary_goal": ("primaryGoal", 300),
+    "target_sectors": ("targetSectors", 300),
+    "key_achievement": ("keyAchievement", 400),
+    "cv_template": ("cvTemplate", 40),
+}
+
+_LINKEDIN_URL = re.compile(r"^https?://([a-z]{2,3}\.)?linkedin\.com/\S+$", re.IGNORECASE)
+
+
+class DetailsRequest(BaseModel):
+    """Any subset: each Settings section saves only its own fields. A field
+    left out is untouched; an empty string clears it (except the name)."""
+
+    name: str | None = None
+    current_role: str | None = None
+    location: str | None = None
+    industry: str | None = None
+    linkedin_url: str | None = None
+    education: str | None = None
+    tone: str | None = None
+    niche: str | None = None
+    personal_brand: str | None = None
+    content_avoid: str | None = None
+    primary_goal: str | None = None
+    target_sectors: str | None = None
+    key_achievement: str | None = None
+    cv_template: str | None = None
+
+    @field_validator("*")
+    @classmethod
+    def _trimmed_and_bounded(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        limit = DETAIL_FIELDS[str(info.field_name)][1]
+        if len(value) > limit:
+            raise ValueError(f"Keep this under {limit} characters.")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _named(cls, value: str | None) -> str | None:
+        # The name heads every CV. Cleared, a CV would be headed by nothing.
+        if value is not None and not value:
+            raise ValueError("Your name goes on every CV, so it cannot be blank.")
+        return value
+
+    @field_validator("linkedin_url")
+    @classmethod
+    def _linkedin(cls, value: str | None) -> str | None:
+        if value and not _LINKEDIN_URL.match(value):
+            raise ValueError("That is not a LinkedIn profile address (linkedin.com/in/...).")
+        return value
+
+    @field_validator("tone")
+    @classmethod
+    def _voice(cls, value: str | None) -> str | None:
+        if value and value not in TONES:
+            raise ValueError(f"Tone is one of: {', '.join(TONES)}.")
+        return value
+
+    @field_validator("cv_template")
+    @classmethod
+    def _template(cls, value: str | None) -> str | None:
+        if value is not None and value not in TEMPLATE_KEYS:
+            raise ValueError("That is not one of the six CV layouts.")
         return value
 
 
@@ -259,6 +352,107 @@ def put_targets(
         "A week you have already signed stays as you signed it."
     )
     return shown
+
+
+def _details(profile: dict[str, Any]) -> dict[str, Any]:
+    def text(key: str) -> str:
+        value = profile.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    return {
+        "about": {
+            "name": text("name"),
+            "current_role": text("currentRole"),
+            "location": text("location"),
+            "industry": text("industry"),
+            "linkedin_url": text("linkedinUrl"),
+            "education": text("education"),
+        },
+        "voice": {
+            # Empty when never set: the writer then uses the first tone, and
+            # the page says it is a default rather than presenting a choice.
+            "tone": text("tone"),
+            "niche": text("niche"),
+            "personal_brand": text("personalBrand"),
+            "content_avoid": text("contentAvoid"),
+        },
+        "brief": {
+            "primary_goal": text("primaryGoal"),
+            "target_sectors": text("targetSectors"),
+            "key_achievement": text("keyAchievement"),
+        },
+        "cv_template": text("cvTemplate") if text("cvTemplate") in TEMPLATE_KEYS else None,
+        "default_tone": TONES[0],
+        "default_cv_template": DEFAULT_TEMPLATE,
+        "options": {"tones": list(TONES), "cv_templates": [dict(t) for t in TEMPLATES]},
+    }
+
+
+@router.get("/profile/details")
+def get_details(
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """The profile fields the agents read, for Settings. Free.
+
+    Tailored CVs read the name, role, location, LinkedIn and education; every
+    draft reads the voice; the analyst and CVs read the brief; the download
+    reads the template. V1 let a user edit all of it in Settings; V2 let them
+    edit none of it after onboarding (V1_V2_COMPARISON 3.9, S13).
+    """
+    profiles, _ = _profiles(request, settings)
+    try:
+        profile = profiles.load(user.id) or {}
+    except Exception as exc:
+        logger.exception("could not read the details for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "read_failed", "message": "We couldn't load your details just now."},
+        ) from exc
+    return _details(profile)
+
+
+@router.put("/profile/details")
+def put_details(
+    body: DetailsRequest,
+    request: Request,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Save the fields sent, and only those. Free. Read back."""
+    given = body.model_dump(exclude_none=True)
+    if not given:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "nothing_to_save", "message": "There was nothing to save."},
+        )
+    patch = {DETAIL_FIELDS[field][0]: value for field, value in given.items()}
+    profiles, _ = _profiles(request, settings)
+    try:
+        profiles.save(user.id, patch)
+        saved = profiles.load(user.id) or {}
+    except Exception as exc:
+        logger.exception("details save failed for %s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "save_failed",
+                "message": "We couldn't save that just now. Your details are unchanged.",
+            },
+        ) from exc
+    if any(str(saved.get(key) or "").strip() != value for key, value in patch.items()):
+        # "Saved" for a write that did not stick would be the product
+        # reporting a decision the row does not hold.
+        logger.error("details save for %s did not read back", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "save_failed",
+                "message": "We couldn't save that just now. Your details are unchanged.",
+            },
+        )
+    return {**_details(saved), "note": "Saved. The next draft, CV or score uses it."}
 
 
 @router.put("/profile/resume-retention")
