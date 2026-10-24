@@ -29,6 +29,48 @@
   },
   {
     "method": "PUT",
+    "path": "/profile/details",
+    "keys": [
+      "name",
+      "current_role",
+      "location",
+      "industry",
+      "linkedin_url",
+      "education"
+    ],
+    "where": "src/components/carigma/ProfileDetailsSettings.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/details",
+    "keys": [
+      "tone",
+      "niche",
+      "personal_brand",
+      "content_avoid"
+    ],
+    "where": "src/components/carigma/ProfileDetailsSettings.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/details",
+    "keys": [
+      "primary_goal",
+      "target_sectors",
+      "key_achievement"
+    ],
+    "where": "src/components/carigma/ProfileDetailsSettings.tsx"
+  },
+  {
+    "method": "PUT",
+    "path": "/profile/details",
+    "keys": [
+      "cv_template"
+    ],
+    "where": "src/components/carigma/ProfileDetailsSettings.tsx"
+  },
+  {
+    "method": "PUT",
     "path": "/profile/targets",
     "keys": [
       "target_roles",
@@ -131,6 +173,14 @@
     "path": "/weekly/contract/re-entry",
     "keys": [],
     "where": "src/routes/ProgressPage.tsx"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/reset-password",
+    "keys": [
+      "email"
+    ],
+    "where": "src/routes/SettingsPage.tsx"
   },
   {
     "method": "PUT",
