@@ -47,7 +47,7 @@ from carigma_api.config import Settings  # noqa: E402
 from carigma_api.services import deploy, market, reengagement, triggers  # noqa: E402
 from carigma_api.services import emails as mail  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
-from carigma_api.services.sunday import closing_week  # noqa: E402
+from carigma_api.services.sunday import closing_week, week_posts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("send_emails")
@@ -555,19 +555,10 @@ def _facts_for(
     facts.week_label = f"{monday.day:02d}–{sunday.day:02d} {sunday:%b}"
 
     try:
-        slots = (
-            db.table("content_loop")
-            .select("state")
-            .eq("user_id", user_id)
-            .eq("week_start", monday.isoformat())
-            .execute()
-            .data
-            or []
-        )
-        facts.committed = len(slots)
-        facts.shipped = sum(1 for s_ in slots if str(s_.get("state")) == "published")
+        # The review's count, from the review's code: see `week_posts`.
+        facts.shipped, facts.committed = week_posts(db, user_id, monday)
     except Exception:
-        logger.exception("content_loop read failed for %s", user_id)
+        logger.exception("the posts of %s could not be read for %s", monday, user_id)
 
     try:
         scores = (

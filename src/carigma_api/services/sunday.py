@@ -116,6 +116,25 @@ def _plural(n: int, one: str, many: str | None = None) -> str:
 # ── The record ─────────────────────────────────────────────────────────────
 
 
+def week_posts(db: Any, user_id: str, week_start: date) -> tuple[int, int]:
+    """(published, planned) for a week, counted the way the review counts.
+
+    The weekly email counted `content_loop` rows, which are the slots someone
+    has drafted, so a signed week of five posts with two drafted and one
+    published mailed "1/2 shipped" beside a review reading "1 of 5 planned
+    posts published" (UAT, 25 Oct). One fact, one number: both read the
+    schedule Posts showed. A week with no signed plan has no planned posts,
+    so it counts the slots the user worked on, as the email always did.
+    Raises if either source cannot be read.
+    """
+    history = SupabaseContractStore(db).history(user_id)
+    contract = next((c for c in history if c.week_start == week_start), None)
+    stored = SupabasePlanStore(db).load(user_id, week_start)
+    slots = schedule(week_start, contract=contract, stored=stored).slots
+    planned = [s for s in slots if not s.optional] or list(slots)
+    return sum(1 for s in planned if s.state is SlotState.PUBLISHED), len(planned)
+
+
 def _post_facts(slots: tuple[Slot, ...]) -> list[ReviewFact]:
     planned = [s for s in slots if not s.optional]
     published = [s for s in planned if s.state is SlotState.PUBLISHED]
@@ -465,4 +484,13 @@ def sunday(
     return report
 
 
-__all__ = ["IST", "SundayReport", "audience", "build_review", "closing_week", "planners", "sunday"]
+__all__ = [
+    "IST",
+    "SundayReport",
+    "audience",
+    "build_review",
+    "closing_week",
+    "planners",
+    "sunday",
+    "week_posts",
+]
