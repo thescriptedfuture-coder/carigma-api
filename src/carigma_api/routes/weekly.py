@@ -191,11 +191,26 @@ def get_contract(
         # The same copy the signature returned, on a reload. It used to exist
         # only in the POST response, so the page had to carry its own literal —
         # and that literal said "See you Monday" on a Thursday, forever.
-        payload["confirmation"] = signing_copy(contract, today=today)
+        payload["confirmation"] = signing_copy(
+            contract, today=today, reviewed=_reviewed(store, user.id, week_start)
+        )
     return payload
 
 
-def signing_copy(contract: WeeklyContract, *, today: date) -> dict[str, str]:
+def _reviewed(store: Any, user_id: str, week_start: date) -> bool:
+    """Whether Sunday's pass has written this week's review."""
+    try:
+        return store.load_review(user_id, week_start) is not None
+    except Exception:
+        # The confirmation is a line of copy. A failed read keeps the copy that
+        # showed before the review existed rather than failing the whole page.
+        logger.exception("could not read the review of %s for %s", week_start, user_id)
+        return False
+
+
+def signing_copy(
+    contract: WeeklyContract, *, today: date, reviewed: bool = False
+) -> dict[str, str]:
     """What a signature means, on the day it is given.
 
     **"See you Monday." was a literal**, on the server and again in the web
@@ -213,7 +228,20 @@ def signing_copy(contract: WeeklyContract, *, today: date) -> dict[str, str]:
             "message": "See you Monday.",
             "detail": "The signed plan is now the Thread's queue.",
         }
-    remaining = [i for i in contract.in_force_items if _DAY_INDEX.get(i.day, 6) >= today.weekday()]
+    remaining = [
+        i
+        for i in contract.in_force_items
+        if _DAY_INDEX.get(i.day, 6) >= today.weekday()
+        # The review item is done once the review is written. It counted as
+        # "next up" all Sunday: at 22:00 Progress read "Next up: Sun. Review,
+        # 18:00 — 1 left" over a review built four hours before (UAT, 25 Oct).
+        and not (reviewed and i.kind == "review")
+    ]
+    if not remaining and reviewed:
+        return {
+            "message": "This week is done, and its review is in.",
+            "detail": "Next week starts Monday.",
+        }
     if not remaining:
         # Signed after everything in it has passed. Saying "see you Monday"
         # here would at least be true, but the week is the one that just ran.
