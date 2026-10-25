@@ -167,6 +167,50 @@ def test_signing_a_week_already_running_never_sends_anyone_away(client: TestClie
     assert "2 left" in copy["detail"]
 
 
+def test_once_the_review_is_written_it_is_not_next_up(client: TestClient) -> None:
+    """Sunday 25 Oct, 22:00: Progress read "Next up: Sun. Review, 18:00 — 1
+    left on the plan" over a review the Sunday pass built at 18:00."""
+    from carigma_api.routes.weekly import signing_copy
+
+    monday = this_monday()
+    signed = WeeklyContract(
+        week_start=monday,
+        items=(
+            ContractItem("content", "THU", "One post slot", 10, 3),
+            ContractItem("review", "SUN", "Review, 18:00", 10, 0),
+        ),
+        state=ContractState.APPROVED,
+        accepted_kinds=("content", "review"),
+    )
+    sunday = monday + timedelta(days=6)
+
+    before = signing_copy(signed, today=sunday, reviewed=False)
+    after = signing_copy(signed, today=sunday, reviewed=True)
+
+    assert "Next up: Sun" in before["message"]
+    assert after["message"] == "This week is done, and its review is in."
+    assert "Next up" not in after["message"]
+
+
+def test_a_sunday_post_is_still_next_up_after_the_review(client: TestClient) -> None:
+    from carigma_api.routes.weekly import signing_copy
+
+    monday = this_monday()
+    signed = WeeklyContract(
+        week_start=monday,
+        items=(
+            ContractItem("content", "SUN", "One post slot", 10, 3),
+            ContractItem("review", "SUN", "Review, 18:00", 10, 0),
+        ),
+        state=ContractState.APPROVED,
+        accepted_kinds=("content", "review"),
+    )
+
+    copy = signing_copy(signed, today=monday + timedelta(days=6), reviewed=True)
+
+    assert copy["detail"] == "One post slot — 1 left on the plan."
+
+
 def test_signing_a_week_with_nothing_left_says_that_rather_than_a_next_day(
     client: TestClient,
 ) -> None:
@@ -447,6 +491,32 @@ def test_a_built_review_comes_back_with_its_facts(client: TestClient) -> None:
     assert [f["text"] for f in review["facts"]] == ["3 posts shipped"]
     assert review["streak"]["weeks"] == 4
     assert review["week_label"].startswith("Week of ")
+
+
+def test_the_page_stops_offering_a_review_that_has_been_written(client: TestClient) -> None:
+    """The route half of the 25 Oct finding: the confirmation reads whether
+    this week's review exists, not only what day it is."""
+    SupabaseContractStore(_DB).save(
+        USER_ID,
+        WeeklyContract(
+            week_start=this_monday(),
+            items=(ContractItem("review", "SUN", "Review, 18:00", 10, 0),),
+            state=ContractState.APPROVED,
+            accepted_kinds=("review",),
+            decided_at=datetime.now(UTC),
+        ),
+    )
+    unwritten = client.get("/weekly/contract", headers=auth(make_token())).json()
+    store().save_review(
+        USER_ID,
+        this_monday(),
+        weekly_routes.earned_review(facts=(a_fact(),), streak=Streak(weeks=1)),
+    )
+
+    written = client.get("/weekly/contract", headers=auth(make_token())).json()
+
+    assert "Next up: Sun" in unwritten["confirmation"]["message"]
+    assert written["confirmation"]["message"] == "This week is done, and its review is in."
 
 
 def test_a_quiet_week_is_a_review_with_no_facts_not_a_missing_review(
