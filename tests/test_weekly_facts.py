@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 
 from carigma_api.services import emails as mail
+from carigma_api.services.weekly import ContractItem, ContractState, WeeklyContract
+from carigma_api.services.weekly_store import SupabaseContractStore
 from tests.fake_supabase import FakeDB
 
 USER = "user-1"
@@ -58,18 +60,42 @@ def db() -> FakeDB:
     return FakeDB()
 
 
+DAYS = ("MON", "TUE", "WED", "THU", "FRI")
+
+
+def _slot(i: int, state: str, week: date | None = None) -> dict[str, Any]:
+    week = week or last_monday()
+    return {
+        "user_id": USER,
+        "id": i if week == last_monday() else 100 + i,
+        "week_start": week.isoformat(),
+        "day": DAYS[i],
+        "slot_date": (week + timedelta(days=i)).isoformat(),
+        "state": state,
+    }
+
+
+def sign_week(db: FakeDB, posts: int, week: date | None = None) -> None:
+    """The signed contract: `posts` content days, Monday on."""
+    items = tuple(ContractItem("content", d, "One post slot", 10, 10) for d in DAYS[:posts])
+    SupabaseContractStore(db).save(
+        USER,
+        WeeklyContract(
+            week_start=week or last_monday(),
+            items=items,
+            state=ContractState.APPROVED,
+            accepted_kinds=tuple(i.kind for i in items),
+            decided_at=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+        ),
+    )
+
+
 def seed_week(db: FakeDB, *, published: int, total: int) -> None:
+    """A signed week of `total` posts, every one drafted, `published` of them published."""
+    sign_week(db, total)
     db.seed(
         "content_loop",
-        *[
-            {
-                "user_id": USER,
-                "id": i,
-                "week_start": last_monday().isoformat(),
-                "state": "published" if i < published else "draft_ready",
-            }
-            for i in range(total)
-        ],
+        *[_slot(i, "published" if i < published else "draft_ready") for i in range(total)],
     )
 
 
@@ -100,18 +126,33 @@ def test_only_the_closing_week_counts(db: FakeDB) -> None:
     """A review of the week that CLOSED. Counting next week's slots would
     report work that has not happened yet as done."""
     seed_week(db, published=1, total=1)
-    db.seed(
-        "content_loop",
-        {
-            "user_id": USER,
-            "id": 99,
-            "week_start": (last_monday() + timedelta(weeks=1)).isoformat(),
-            "state": "published",
-        },
-    )
+    db.seed("content_loop", _slot(0, "published", last_monday() + timedelta(weeks=1)))
     facts = script._facts_for(db, USER, "weekly", today=SUNDAY)
 
     assert facts.committed == 1
+
+
+def test_the_count_is_the_signed_weeks_not_the_drafted_slots(db: FakeDB) -> None:
+    """Ravi's week of 19 Oct (UAT, 25 Oct): five posts signed, two drafted, one
+    published. The email said "1/2 shipped" and the review, stored minutes
+    before it, "1 of 5 planned posts published"."""
+    sign_week(db, 5)
+    db.seed("content_loop", _slot(0, "published"), _slot(1, "draft_ready"))
+
+    facts = script._facts_for(db, USER, "weekly", today=SUNDAY)
+
+    assert (facts.shipped, facts.committed) == (1, 5)
+    email = mail.build_weekly_review("ravi@example.com", facts)
+    assert email is not None
+    assert "1/5" in email.subject
+
+
+def test_a_week_with_no_signed_plan_counts_what_was_worked_on(db: FakeDB) -> None:
+    db.seed("content_loop", _slot(0, "published"), _slot(2, "draft_ready"))
+
+    facts = script._facts_for(db, USER, "weekly", today=SUNDAY)
+
+    assert (facts.shipped, facts.committed) == (1, 2)
 
 
 def test_a_score_move_is_reported_with_its_direction(db: FakeDB) -> None:
@@ -218,10 +259,7 @@ def test_on_its_sunday_the_review_reads_the_week_ending_that_day(db: FakeDB) -> 
     """It read the week BEFORE: on 18 Oct, 5–11 Oct. It found nothing and
     skipped, with Ravi's first published post in the week it should have read."""
     seed_week(db, published=1, total=1)  # 12–18 Oct
-    db.seed(
-        "content_loop",
-        {"user_id": USER, "id": 50, "week_start": "2026-10-05", "state": "draft_ready"},
-    )
+    db.seed("content_loop", _slot(0, "draft_ready", date(2026, 10, 5)))
 
     facts = script._facts_for(db, USER, "weekly", today=SUNDAY)
 
