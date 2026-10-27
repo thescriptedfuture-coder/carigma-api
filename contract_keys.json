@@ -977,6 +977,9 @@
     "message",
     "received"
   ],
+  "POST /feedback": [
+    "received"
+  ],
   "POST /jobs/scan": [
     "agent",
     "agent_label",

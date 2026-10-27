@@ -59,6 +59,10 @@ dependencies = [
     # `tests/test_dependencies.py` now walks every import and fails on any
     # that pyproject does not declare.
     "supabase>=2.9,<3",
+    # Imported directly for `ReturnMethod` (S15): a write to a table with no
+    # SELECT policy must not ask for the row back. `supabase` pins it exactly,
+    # so this range only has to contain that pin.
+    "postgrest>=0.18,<3",
     "anthropic>=1.0,<2",
     # Onboarding extraction. Same libraries V1 uses, deliberately: the parsing
     # is the IP, and a different PDF library extracts subtly different text,

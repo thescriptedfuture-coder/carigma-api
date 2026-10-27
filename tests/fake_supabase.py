@@ -19,6 +19,13 @@ see a history that never happened.
 table raise, which is how "one source is down" gets tested without taking the
 whole request with it.
 
+**A write-only table refuses an insert that asks for the row back.**
+`feedback` has an INSERT policy and no SELECT policy, by design, and Postgres
+checks an `INSERT … RETURNING` against SELECT too: refused with 42501. V1 asked
+for the row back on every attempt that carried a user id, so in four months not
+one note was stored with its sender (measured live, 27 Oct). The fake raises
+the same, so a route that forgets `returning="minimal"` fails here first.
+
 It is NOT a Postgres. No constraints, no RLS, no type coercion — a test that
 needs those needs the real database.
 """
@@ -28,6 +35,15 @@ from __future__ import annotations
 from typing import Any
 
 from tests.schema import live_primary_key, unique_indexes_of, unique_keys_of
+
+#: Tables a user may write and never read back (no SELECT policy).
+WRITE_ONLY = frozenset({"feedback"})
+
+
+class RlsRefused(Exception):
+    """What PostgREST raises for a write RLS refuses: code 42501."""
+
+    code = "42501"
 
 
 class Result:
@@ -92,8 +108,9 @@ class FakeTable:
         self._op = "select"
         return self
 
-    def insert(self, payload: Any) -> FakeTable:
+    def insert(self, payload: Any, **kw: Any) -> FakeTable:
         self._op, self._payload = "insert", payload
+        self._returning = str(getattr(kw.get("returning"), "value", kw.get("returning") or ""))
         return self
 
     def update(self, payload: dict[str, Any]) -> FakeTable:
@@ -232,10 +249,16 @@ class FakeTable:
         rows = self._db.tables.setdefault(self._name, [])
 
         if self._op == "insert":
+            if self._name in WRITE_ONLY and getattr(self, "_returning", "") != "minimal":
+                raise RlsRefused(
+                    f'new row violates row-level security policy for table "{self._name}"'
+                )
             new = self._payload if isinstance(self._payload, list) else [self._payload]
             for incoming in new:
                 self._refuse_duplicates(rows, incoming)
                 rows.append(dict(incoming))
+            if getattr(self, "_returning", "") == "minimal":
+                return Result([])
             return Result([dict(r) for r in new])
 
         if self._op == "upsert":
