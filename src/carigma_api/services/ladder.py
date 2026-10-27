@@ -141,15 +141,18 @@ def _interview(s: Signals) -> dict[str, Any]:
     return {
         "title": f"Interview {'today' if hours < 24 else 'in ' + str(hours // 24 + 1) + ' days'}",
         # Said "Prep while there is still time to use it" behind a button
-        # labelled "Open prep", and Interview Intelligence is not built — so the
-        # most time-bound card the product has promised the one thing it cannot
-        # do. It names the role and the date instead, which it knows.
+        # labelled "Open prep", while Interview Intelligence was not built. It
+        # names the role and the date, which it knows.
         "body": f"{s.interview_label}, {when:%a %d %b}.".strip(", "),
-        "primary": {
-            "label": "Open the application",
-            # The application itself when we know which, the board otherwise.
-            "route": f"/tracker/{s.interview_id}" if s.interview_id else "/tracker",
-        },
+        # S14 built prep, on the application, and this card still opened the
+        # top of the application as "Open the application". It opens the prep
+        # now, as V1's "Open your prep" did — the board when we cannot tell
+        # which application.
+        "primary": (
+            {"label": "Open your prep", "route": f"/tracker/{s.interview_id}#prep"}
+            if s.interview_id
+            else {"label": "Open the pipeline", "route": "/tracker"}
+        ),
         "when": when.isoformat(),
     }
 

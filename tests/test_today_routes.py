@@ -597,7 +597,7 @@ def test_the_interview_card_names_the_role_and_opens_that_application(wired) -> 
     assert card["key"] == "interview_soon"
     assert "CRED" in card["body"]
     assert "prep" not in card["body"].lower()
-    assert card["primary"] == {"label": "Open the application", "route": "/tracker/app-7"}
+    assert card["primary"] == {"label": "Open your prep", "route": "/tracker/app-7#prep"}
 
 
 def test_the_week_strip_follows_the_week_the_user_signed(wired) -> None:  # type: ignore[no-untyped-def]
