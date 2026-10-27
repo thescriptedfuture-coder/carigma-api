@@ -169,6 +169,10 @@
     "notes",
     "salary"
   ],
+  "GET /tracker/{}/prep": [
+    "built_at",
+    "prep"
+  ],
   "GET /weekly/contract": [
     "contract",
     "contract.decided_at",
@@ -266,6 +270,12 @@
     "link",
     "notes",
     "salary"
+  ],
+  "POST /tracker/{}/prep": [
+    "credits.balance_after",
+    "error",
+    "finished_at",
+    "result"
   ],
   "POST /weekly/contract/approve": [
     "contract.proposed_at"
