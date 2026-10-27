@@ -23,6 +23,17 @@
   },
   {
     "method": "POST",
+    "path": "/feedback",
+    "keys": [
+      "kind",
+      "message",
+      "rating",
+      "page"
+    ],
+    "where": "src/components/carigma/Feedback.tsx"
+  },
+  {
+    "method": "POST",
     "path": "/profile/updates",
     "keys": "unreadable",
     "where": "src/components/carigma/ProfileChange.tsx"
