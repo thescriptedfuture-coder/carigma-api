@@ -183,7 +183,10 @@ def test_no_entry_describes_a_table_nothing_writes() -> None:
 
 
 def test_every_user_written_table_has_a_seed_row() -> None:
-    missing = set(probe.WRITES_AS_USER) - set(probe.OWNER_SCOPED)
+    # A write-only table (`insert-blind`, S15) has no read to seed for: the
+    # probe's own loop writes it as the user and checks nothing comes back.
+    blind = {t for t, (method, _arg) in probe.WRITES_AS_USER.items() if method == "insert-blind"}
+    missing = set(probe.WRITES_AS_USER) - set(probe.OWNER_SCOPED) - blind
     assert missing == set(), f"no template row in OWNER_SCOPED for {sorted(missing)}"
 
 

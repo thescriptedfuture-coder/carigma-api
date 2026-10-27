@@ -39,6 +39,7 @@ import uuid
 from typing import Any
 
 import httpx
+from postgrest.types import ReturnMethod
 from supabase import create_client
 
 from carigma_api.config import Settings, get_settings
@@ -173,6 +174,9 @@ WRITES_AS_USER: dict[str, tuple[str, Any]] = {
     "jobs_provider_calls": ("insert", None),  # quota.RecordedProvider
     # V1's results row, one per user. analysis_store.AnalysisStore.save.
     "results": ("upsert", "user_id"),
+    # Write-only by design: INSERT allowed, no SELECT policy, so the row cannot
+    # be asked back — `routes/feedback.py` inserts with returning="minimal".
+    "feedback": ("insert-blind", None),
 }
 
 #: Postgres's code for "new row violates row-level security policy".
@@ -317,6 +321,10 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
             try:
                 if method == "insert":
                     attempts.append(client.table(tbl).insert(row).execute())
+                elif method == "insert-blind":
+                    # Nothing comes back by design; not raising IS the pass.
+                    client.table(tbl).insert(row, returning=ReturnMethod.minimal).execute()
+                    return "ok"
                 elif method == "upsert":
                     # Twice: the first may insert, the second MUST take the
                     # ON CONFLICT DO UPDATE path, which checks the existing
@@ -403,6 +411,29 @@ def main() -> int:  # noqa: C901 — a linear script reads better than split hal
                 f"{('no' if ok_leak else f'{len(leaked)} ROWS'):>12}  "
                 f"{wrote[:12]:>12}   {verdict}"
             )
+
+        # Write-only tables: the user may insert and never read back, so the
+        # owner-scoped checks above ("sees own") would call them LOCKED OUT.
+        # Here: A's blind insert must work, A must read nothing back, and the
+        # probe deletes its own rows — `feedback.user_id` is ON DELETE SET
+        # NULL, so deleting the probe users would leave them behind.
+        for table in (t for t, (m, _a) in WRITES_AS_USER.items() if m == "insert-blind"):
+            marker = f"rls-probe {uuid.uuid4().hex[:8]}"
+            wrote = write_as_owner(table, a, {"user_id": a_id, "message": marker})
+            writes_checked += 1
+            seen = read(table, a, a_id, "A", "read-back")
+            try:
+                svc.table(table).delete().eq("message", marker).execute()
+            except Exception as exc:
+                failures.append(f"{table}: could not delete the probe's row ({str(exc)[:70]})")
+            if wrote != "ok":
+                failures.append(f"{table}: A writing A's own row -> {wrote}")
+            if seen:
+                failures.append(
+                    f"{table}: READABLE — a write-only table returned {len(seen)} row(s)"
+                )
+            verdict = "ok" if wrote == "ok" and not seen else "FAIL"
+            print(f"{table:22} {'write-only':>10}  {'-':>12}  {wrote[:12]:>12}   {verdict}")
 
     finally:
         print("\nCleanup:")

@@ -19,6 +19,7 @@ from carigma_api.routes import admin as admin_routes
 from carigma_api.routes import agents as agents_routes
 from carigma_api.routes import auth as auth_routes
 from carigma_api.routes import credits as credits_routes
+from carigma_api.routes import feedback as feedback_routes
 from carigma_api.routes import health as health_routes
 from carigma_api.routes import jobs as jobs_routes
 from carigma_api.routes import market as market_routes
@@ -157,6 +158,7 @@ def create_app() -> FastAPI:
     app.include_router(today_routes.router)
     app.include_router(tracker_routes.router)
     app.include_router(prep_routes.router)
+    app.include_router(feedback_routes.router)
     app.include_router(referral_routes.router)
     app.include_router(onboarding_routes.router)
     app.include_router(unsubscribe_routes.router)
