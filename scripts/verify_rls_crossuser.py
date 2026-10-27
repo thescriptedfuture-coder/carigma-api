@@ -166,6 +166,8 @@ WRITES_AS_USER: dict[str, tuple[str, Any]] = {
     # a cross-user write is the Naukri class with someone's job search in it.
     "job_applications": ("insert", None),  # routes/tracker.py add/move/remove
     "application_events": ("insert", None),  # the timeline beside a stage move
+    # Interview prep (S14): one kit per application, upserted as the caller.
+    "interview_preps": ("upsert", "application_id"),  # routes/prep.py
     # Every provider call, recorded as the caller BEFORE it is made — the row
     # the JSearch cap counts. A refusal here stops the call, so this must work.
     "jobs_provider_calls": ("insert", None),  # quota.RecordedProvider
