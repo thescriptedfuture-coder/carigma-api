@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     smtp_user: str = Field(default="")
     smtp_pass: str = Field(default="")
     smtp_from: str = Field(default="Carigma <support@carigma.in>")
+    #: Where a feedback note is emailed once it is stored (S15). Needs SMTP_*
+    #: on the API service as well as on the crons; unset, notes are stored and
+    #: readable in Admin → Feedback, and nothing is emailed.
+    feedback_to: str = Field(default="support@carigma.in")
 
     # ── Who this deploy may email ──────────────────────────────────────────
     #

@@ -331,13 +331,52 @@ def list_feedback(
     """Every feedback submission and every "what did Carigma change for you?"
     answer. Social proof — surfaced, not buried."""
     db = _db(settings)
-    rows = _rows(db, "feedback", "*")
+    try:
+        rows = list(db.table("feedback").select("*").execute().data or [])
+    except Exception:
+        # Not "no feedback": an empty list here would read as a quiet beta.
+        logger.exception("admin read failed for feedback")
+        return {"items": [], "total": 0, "unreadable": True}
     emails = emails_by_user_id(db)
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
 
     return {
-        "items": [{**r, "email": emails.get(str(r.get("user_id")), "—")} for r in rows],
+        "items": [_feedback_item(r, emails) for r in rows],
         "total": len(rows),
+        "unreadable": False,
+    }
+
+
+#: What V1 and V2 write into `feedback.page` after the `|`, and V1's
+#: testimonial, which it stored as the whole of `page`.
+_FEEDBACK_KINDS = ("idea", "bug", "rating", "testimonial")
+
+
+def _feedback_item(row: dict[str, Any], emails: dict[str, str]) -> dict[str, Any]:
+    """One note as the admin page reads it (S15).
+
+    It sent the raw row, so the page would have had to know V1's encoding —
+    `[bug] text` in the message, `/today|bug` in the page — and it replaced
+    the row's own email with "—" whenever `user_id` was empty, which is every
+    one of V1's four notes (their emails are on the rows).
+    """
+    raw_page = str(row.get("page") or "")
+    path, _, tag = raw_page.rpartition("|") if "|" in raw_page else ("", "", raw_page)
+    message = str(row.get("message") or "")
+    if message.startswith("[") and "] " in message:
+        prefix, _, rest = message.partition("] ")
+        tag = tag or prefix[1:]
+        message = rest
+    kind = tag if tag in _FEEDBACK_KINDS else "other"
+    return {
+        "id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "kind": kind,
+        "message": message,
+        "page": path or None,
+        "rating": row.get("rating"),
+        "email": emails.get(str(row.get("user_id"))) or row.get("email") or None,
+        "linked": bool(row.get("user_id")),
     }
 
 
