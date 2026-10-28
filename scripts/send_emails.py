@@ -44,9 +44,16 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from carigma_api.config import Settings  # noqa: E402
-from carigma_api.services import deploy, market, reengagement, triggers  # noqa: E402
+from carigma_api.services import (  # noqa: E402
+    deploy,
+    market,
+    reengagement,
+    smtp,  # noqa: E402
+    triggers,
+)
 from carigma_api.services import emails as mail  # noqa: E402
 from carigma_api.services.repository import emails_by_user_id, service_client  # noqa: E402
+from carigma_api.services.smtp import IMPLICIT_TLS_PORTS  # noqa: E402
 from carigma_api.services.sunday import closing_week, week_posts  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -54,7 +61,6 @@ logger = logging.getLogger("send_emails")
 
 
 #: Ports that speak TLS from the first byte (implicit TLS / SMTPS).
-IMPLICIT_TLS_PORTS = frozenset({465})
 
 
 class SmtpMailer:
@@ -85,15 +91,9 @@ class SmtpMailer:
 
     def _connect(self) -> smtplib.SMTP:
         if self._conn is None:
-            if self.uses_implicit_tls:
-                conn: smtplib.SMTP = smtplib.SMTP_SSL(
-                    self._s.smtp_host, self._s.smtp_port, timeout=20
-                )
-            else:
-                conn = smtplib.SMTP(self._s.smtp_host, self._s.smtp_port, timeout=20)
-                conn.starttls()
-            conn.login(self._s.smtp_user, self._s.smtp_pass)
-            self._conn = conn
+            # The handshake lives in `services.smtp` since the API began
+            # sending too (S15): one copy of the 465/587 choice.
+            self._conn = smtp.connect(self._s)
         return self._conn
 
     def send(self, email: mail.Email) -> None:

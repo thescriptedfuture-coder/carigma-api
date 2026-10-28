@@ -2,6 +2,10 @@
   "GET /admin/credit-requests": [
     "items[].resolved_at"
   ],
+  "GET /admin/feedback": [
+    "items[].page",
+    "items[].rating"
+  ],
   "GET /admin/market": [
     "batches[].expires_at",
     "batches[].published_at",

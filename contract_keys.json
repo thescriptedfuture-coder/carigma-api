@@ -14,7 +14,16 @@
   ],
   "GET /admin/feedback": [
     "items",
-    "total"
+    "items[].created_at",
+    "items[].email",
+    "items[].id",
+    "items[].kind",
+    "items[].linked",
+    "items[].message",
+    "items[].page",
+    "items[].rating",
+    "total",
+    "unreadable"
   ],
   "GET /admin/market": [
     "batches",

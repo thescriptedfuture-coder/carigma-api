@@ -101,3 +101,108 @@ def test_asking_for_the_row_back_is_refused_as_production_refuses_it() -> None:
     fake = FakeDB()
     with pytest.raises(RlsRefused):
         fake.table("feedback").insert({"message": "x"}).execute()
+
+
+# ── Then emailed to support (UAT, 28 Oct) ──────────────────────────────────
+
+
+@pytest.fixture
+def notices(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+
+    def record(_settings: Any, row: dict[str, Any], **kw: Any) -> None:
+        sent.append({"row": row, **kw})
+
+    monkeypatch.setattr(routes.feedback_notice, "send", record)
+    return sent
+
+
+def test_a_stored_note_is_emailed_to_support(
+    client: TestClient, db: FakeDB, notices: list[dict[str, Any]]
+) -> None:
+    """Ravi looked for his three notes at support@carigma.in. They were stored,
+    and nothing could show them to him."""
+    _send(client, kind="bug", message="Save does nothing", page="/settings")
+
+    (notice,) = notices
+    assert notice["kind"] == "bug"
+    assert notice["text"] == "Save does nothing"
+    assert notice["row"]["user_id"] == USER_ID
+
+
+def test_a_note_that_was_not_stored_is_not_emailed(
+    client: TestClient, db: FakeDB, notices: list[dict[str, Any]]
+) -> None:
+    db.failing.add("feedback")
+
+    assert _send(client, kind="bug", message="Broken").status_code == 503
+    assert notices == []
+
+
+def test_the_email_says_who_where_and_when_and_reply_goes_to_the_sender() -> None:
+    from datetime import UTC, datetime
+
+    from carigma_api.services import feedback_notice
+
+    email = feedback_notice.notice(
+        {"email": "ravi@example.com", "page": "/today|rating", "rating": 5, "user_id": "u-1"},
+        kind="rating",
+        text="I missed my post and this helped.",
+        at=datetime(2026, 10, 27, 18, 43, tzinfo=UTC),
+        to="support@carigma.in",
+        sender="Carigma <support@carigma.in>",
+    )
+
+    assert email["To"] == "support@carigma.in"
+    assert email["Subject"] == "Feedback · Rating · /today"
+    assert email["Reply-To"] == "ravi@example.com"
+    body = email.get_content()
+    assert "Rating: 5 of 5" in body
+    assert "28 Oct 2026, 00:13 IST" in body
+    # Their words, verbatim: the tone law is for mail TO users, and a note
+    # saying "I missed my post" must not fail to send because of it.
+    assert "I missed my post and this helped." in body
+
+
+def test_with_no_smtp_on_this_service_the_note_is_kept_and_nothing_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from carigma_api.config import Settings
+    from carigma_api.services import feedback_notice, smtp
+
+    def refuse(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("no connection may be opened without SMTP settings")
+
+    monkeypatch.setattr(smtp, "connect", refuse)
+
+    feedback_notice.send(
+        Settings(smtp_host="", smtp_user="", smtp_pass=""),
+        {"page": "/today|bug"},
+        kind="bug",
+        text="x",
+        at=datetime.now(UTC),
+    )
+
+
+def test_a_failed_email_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """By now the note is stored; a failed alert must not become the sender's
+    error."""
+    from datetime import UTC, datetime
+
+    from carigma_api.config import Settings
+    from carigma_api.services import feedback_notice, smtp
+
+    def down(*_a: Any, **_k: Any) -> Any:
+        raise OSError("smtp.hostinger.com unreachable")
+
+    monkeypatch.setattr(smtp, "connect", down)
+
+    feedback_notice.send(
+        Settings(smtp_host="smtp.hostinger.com", smtp_user="support@carigma.in", smtp_pass="x"),
+        {"page": "/today|bug"},
+        kind="bug",
+        text="x",
+        at=datetime.now(UTC),
+    )

@@ -54,6 +54,26 @@ JWKS = {"keys": [_public_jwk(_PRIVATE_KEY, TEST_KID)]}
 
 
 @pytest.fixture(autouse=True)
+def _no_real_mail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may open a real SMTP connection.
+
+    `Settings()` reads `.env` for every field a test leaves out, and the local
+    `.env` holds the real Hostinger login. When the feedback route began
+    emailing support (S15), its first test run sent real mail to
+    support@carigma.in from the test suite (28 Oct). The connection is refused
+    at the library, so no path — the cron's mailer, the feedback notice, or
+    one not written yet — can reach the outside from a test.
+    """
+    import smtplib
+
+    def refuse(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("tests never open a real SMTP connection")
+
+    monkeypatch.setattr(smtplib, "SMTP", refuse)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _stub_jwks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Serve our JWKS instead of hitting the network.
 
@@ -117,6 +137,10 @@ def settings() -> Settings:
         anthropic_api_key="test-anthropic-key",
         admin_emails=ADMIN_EMAIL,
         cors_origins="http://localhost:5173",
+        # Explicit, or `.env`'s real mail login fills them in (see `_no_real_mail`).
+        smtp_host="",
+        smtp_user="",
+        smtp_pass="",
     )
 
 

@@ -24,20 +24,28 @@ last resort got through (measured live, 27 Oct). This inserts with
 
 The user id comes from the verified token, never the body: the INSERT policy
 is `with check (true)`, so the database would store whatever id it was handed.
+
+## Then emailed to support
+
+Stored first, emailed after the answer has gone (`services.feedback_notice`):
+Ravi looked for his notes at support@carigma.in (UAT, 28 Oct). An email that
+fails loses nothing — the note is already in Admin → Feedback.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from postgrest.types import ReturnMethod
 from pydantic import BaseModel, Field, field_validator
 
 from carigma_api.auth.dependencies import CurrentUser
 from carigma_api.config import Settings, get_settings
 from carigma_api.routes._guards import enforce_public_rate_limit
+from carigma_api.services import feedback_notice
 from carigma_api.services.repository import user_client
 
 logger = logging.getLogger(__name__)
@@ -70,6 +78,7 @@ class FeedbackRequest(BaseModel):
 def send_feedback(
     body: FeedbackRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: CurrentUser,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, Any]:
@@ -101,4 +110,14 @@ def send_feedback(
                 ),
             },
         ) from exc
+    # Only a stored note is emailed, and after the answer: the person who sent
+    # it waits for nothing, and a failed email cannot become their error.
+    background_tasks.add_task(
+        feedback_notice.send,
+        settings,
+        row,
+        kind=body.kind,
+        text=body.message,
+        at=datetime.now(UTC),
+    )
     return {"received": True}

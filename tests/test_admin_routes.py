@@ -406,6 +406,62 @@ def test_the_payment_flag_is_visible_in_system(client: TestClient, db: FakeTable
 # ── Resilience ─────────────────────────────────────────────────────────────
 
 
+def test_feedback_reads_as_notes_not_as_v1s_encoding(client: TestClient, db: FakeTable) -> None:
+    """S15. The raw row made the page decode `[bug] text` and `/today|bug`, and
+    it overwrote V1's stored email with "—" whenever there was no user id —
+    every one of V1's four notes."""
+    db._data["feedback"] = [
+        {
+            "id": 1,
+            "created_at": "2026-07-20T10:00:00Z",
+            "user_id": None,
+            "email": "early@example.com",
+            "message": "[bug] The score never moves",
+            "page": "score|bug",
+            "rating": None,
+        },
+        {
+            "id": 2,
+            "created_at": "2026-10-27T18:43:00Z",
+            "user_id": "u3",
+            "email": "",
+            "message": "[rating] This is really helpful",
+            "page": "/today|rating",
+            "rating": 5,
+        },
+        {
+            "id": 3,
+            "created_at": "2026-08-01T09:00:00Z",
+            "user_id": None,
+            "email": "offer@example.com",
+            "message": "Carigma got me the interview",
+            "page": "testimonial",
+            "rating": None,
+        },
+    ]
+
+    body = client.get("/admin/feedback", headers=admin_auth()).json()
+
+    assert body["unreadable"] is False
+    newest, oldest_first_testimonial, v1_bug = body["items"]
+    assert newest["kind"] == "rating" and newest["rating"] == 5
+    assert newest["message"] == "This is really helpful"
+    assert newest["page"] == "/today"
+    assert newest["linked"] is True
+    assert oldest_first_testimonial["kind"] == "testimonial"
+    assert oldest_first_testimonial["page"] is None
+    assert v1_bug == {
+        "id": 1,
+        "created_at": "2026-07-20T10:00:00Z",
+        "kind": "bug",
+        "message": "The score never moves",
+        "page": "score",
+        "rating": None,
+        "email": "early@example.com",
+        "linked": False,
+    }
+
+
 def test_one_unreadable_table_does_not_blank_the_whole_page(
     client: TestClient, db: FakeTable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -419,4 +475,7 @@ def test_one_unreadable_table_does_not_blank_the_whole_page(
     monkeypatch.setattr(admin_routes, "service_client", lambda settings: broken)
 
     assert client.get("/admin/overview", headers=admin_auth()).status_code == 200
-    assert client.get("/admin/feedback", headers=admin_auth()).json()["items"] == []
+    feedback = client.get("/admin/feedback", headers=admin_auth()).json()
+    assert feedback["items"] == []
+    # And said so: an empty list alone would read as a quiet beta.
+    assert feedback["unreadable"] is True
