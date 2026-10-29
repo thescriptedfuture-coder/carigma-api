@@ -294,9 +294,51 @@ def complete_onboarding(
         "target_roles": saved.get("targetRoles"),
         "cadence": saved.get("cadence"),
         "platforms": saved.get("platforms") or [],
-        "credits_granted": _grant_signup_credits(user.id, settings),
+        "credits_granted": (
+            None if _welcomed_by_v1(user.id, settings) else _grant_signup_credits(user.id, settings)
+        ),
         "referral": _activate_referral(user.id, settings),
     }
+
+
+#: V1's welcome grant, as V1 wrote it to `credit_ledger`.
+V1_WELCOME = {"kind": "grant", "reason": "Welcome credits"}
+
+
+def _welcomed_by_v1(user_id: str, settings: Settings) -> bool:
+    """Whether V1 already gave this account its welcome credits.
+
+    V2's once-only rule is a unique index on `kind = 'signup'`, and V1 wrote
+    its welcome as `kind = 'grant'` — so the index cannot see it, and a V1 user
+    who finishes V2's setup is welcomed a second time. Measured 29 Oct: two
+    accounts already were (both Ravi's), and two V1 users would be on their
+    first V2 setup.
+
+    A read before the grant, kept OUT of `_grant_signup_credits`, whose rule is
+    that it never reads first: that rule is about two V2 grants racing, which
+    the index settles. V1 grants nothing any more, so there is no race here.
+
+    The service client, like the grant beside it: a read RLS refused would
+    come back empty — "never welcomed" — and pay twice. On a failed read this
+    says no, so a new account is never denied its welcome by a blip; the
+    worst case is the double this exists to stop, for a V1 user, once.
+    """
+    try:
+        rows = (
+            service_client(settings)
+            .table("credit_ledger")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("kind", V1_WELCOME["kind"])
+            .eq("reason", V1_WELCOME["reason"])
+            .limit(1)
+            .execute()
+            .data
+        )
+    except Exception:
+        logger.exception("could not check V1's welcome grant for %s; granting V2's", user_id)
+        return False
+    return bool(rows)
 
 
 def _grant_signup_credits(user_id: str, settings: Settings) -> int | None:
