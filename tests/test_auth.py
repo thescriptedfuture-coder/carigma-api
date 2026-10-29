@@ -575,3 +575,24 @@ def test_outside_production_a_missing_key_is_only_a_warning(
             pass
 
     asyncio.run(start())
+
+
+# ── Who am I: the web's admin switch (29 Oct) ──────────────────────────────
+
+
+def test_me_tells_an_admin_they_are_one(client: TestClient) -> None:
+    """The web shows an admin the admin console and never the job-seeker
+    product (Ravi, 29 Oct: support@ was pushed through onboarding). It asks
+    here, so the answer is the API's allow-list, not a guess in the browser."""
+    res = client.get("/auth/me", headers=auth(make_token(email=ADMIN_EMAIL)))
+
+    assert res.status_code == 200
+    assert res.json()["is_admin"] is True
+    assert res.json()["email"] == ADMIN_EMAIL
+
+
+def test_me_tells_everyone_else_they_are_not(client: TestClient) -> None:
+    res = client.get("/auth/me", headers=auth(make_token()))
+
+    assert res.status_code == 200
+    assert res.json()["is_admin"] is False

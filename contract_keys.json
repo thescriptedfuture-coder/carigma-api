@@ -318,6 +318,12 @@
     "status",
     "user_id"
   ],
+  "GET /auth/me": [
+    "email",
+    "is_admin",
+    "role",
+    "user_id"
+  ],
   "GET /auth/service-probe": [
     "status"
   ],
