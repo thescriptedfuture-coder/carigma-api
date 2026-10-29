@@ -676,8 +676,34 @@ class FakeGrantClient:
         raise AssertionError("execute is called on the rpc result, not the client")
 
 
-def _with_grant(monkeypatch: pytest.MonkeyPatch, grant: FakeGrantClient) -> None:
+def _with_grant(
+    monkeypatch: pytest.MonkeyPatch, grant: FakeGrantClient, *, v1_welcomed: bool = False
+) -> None:
+    class _Ledger:
+        """`credit_ledger`, holding V1's welcome grant or not."""
+
+        def __init__(self) -> None:
+            self.filters: dict[str, Any] = {}
+
+        def select(self, *_a: Any) -> _Ledger:
+            return self
+
+        def eq(self, column: str, value: Any) -> _Ledger:
+            self.filters[column] = value
+            return self
+
+        def limit(self, _n: int) -> _Ledger:
+            return self
+
+        def execute(self) -> Any:
+            hit = v1_welcomed and self.filters.get("kind") == "grant"
+            return type("Res", (), {"data": [{"id": 1}] if hit else []})()
+
     class _Wrapper:
+        def table(self, name: str) -> _Ledger:
+            assert name == "credit_ledger", f"unexpected table {name}"
+            return _Ledger()
+
         def rpc(self, name: str, params: dict[str, Any]) -> Any:
             result = grant.rpc(name, params)
 
@@ -727,6 +753,23 @@ def test_completing_twice_grants_once(client: TestClient, monkeypatch: pytest.Mo
     assert first.json()["credits_granted"] == 100
     assert second.json()["credits_granted"] is None, "a second completion granted again"
     assert len(grant.granted) == 1
+
+
+def test_someone_v1_already_welcomed_is_not_welcomed_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V1 wrote its welcome as kind 'grant', which V2's once-only index on kind
+    'signup' cannot see. Two accounts were welcomed twice before this (29 Oct)."""
+    profiles = FakeProfiles(dict(EXTRACTED))
+    monkeypatch.setattr(routes, "_profiles", lambda request, settings: profiles)
+    grant = FakeGrantClient()
+    _with_grant(monkeypatch, grant, v1_welcomed=True)
+
+    res = client.post("/onboarding/complete", json={"target_roles": "Analyst"}, headers=token())
+
+    assert res.status_code == 200
+    assert res.json()["credits_granted"] is None
+    assert grant.calls == [], "V2's welcome was granted on top of V1's"
 
 
 def test_a_failed_grant_never_costs_someone_their_setup(
