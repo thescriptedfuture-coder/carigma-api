@@ -110,6 +110,9 @@ class Email:
     subject: str
     body: str
     email_type: EmailType
+    #: The signed link in the footer, for the `List-Unsubscribe` header too.
+    #: Set by `send` on marketing mail only; a receipt carries none.
+    unsubscribe_url: str | None = None
 
     def __post_init__(self) -> None:
         # The tone law, enforced before anything can leave. An inbox is the
@@ -446,7 +449,11 @@ def send(
                 detail="no signing key or app url",
             )
             return SendOutcome(SendStatus.NO_UNSUBSCRIBE_LINK, "No unsubscribe link — not sent.")
-        email = replace(email, body=email.body.rstrip() + "\n\n" + footer(footer_link))
+        email = replace(
+            email,
+            body=email.body.rstrip() + "\n\n" + footer(footer_link),
+            unsubscribe_url=footer_link,
+        )
 
     if not prefs.allows(email_type):
         log.record(

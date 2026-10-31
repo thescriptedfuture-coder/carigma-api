@@ -101,10 +101,13 @@ class SmtpMailer:
         message["From"] = self._s.smtp_from or mail.FROM_ADDRESS
         message["To"] = email.to
         message["Subject"] = email.subject
-        # A working unsubscribe is not optional, and one-click matters: an
-        # unsubscribe that requires a login is an unsubscribe that becomes a
-        # spam report.
-        message["List-Unsubscribe"] = f"<https://carigma.in/settings?unsubscribe={email.to}>"
+        # The mail app's own "Unsubscribe" button reads this header. It
+        # pointed at `carigma.in/settings?unsubscribe=<address>` — the
+        # marketing site, a 404, with the address in the URL (31 Oct). It is
+        # now the footer's signed link, which works signed out. No link, no
+        # header: a receipt is not marketing.
+        if email.unsubscribe_url:
+            message["List-Unsubscribe"] = f"<{email.unsubscribe_url}>"
         message.set_content(email.body)
         self._connect().send_message(message)
 

@@ -306,6 +306,8 @@ def test_every_marketing_email_carries_an_unsubscribe_link() -> None:
     # And the link in the footer actually resolves back to this user.
     token = body.split("/unsubscribe/")[1].split()[0]
     assert unsub.resolve(token, service_key=KEY) == USER
+    # The header gets the same link (31 Oct: it pointed at a 404).
+    assert sent[0].unsubscribe_url == f"https://app.example.com/unsubscribe/{token}"
 
 
 def test_marketing_mail_with_no_link_is_REFUSED_rather_than_sent() -> None:
@@ -404,6 +406,7 @@ def test_a_receipt_needs_no_footer() -> None:
 
     assert outcome.status is SendStatus.SENT
     assert "Stop these emails" not in sent[0].body
+    assert sent[0].unsubscribe_url is None
 
 
 def test_a_dry_run_writes_nothing_at_all_on_a_quiet_day() -> None:

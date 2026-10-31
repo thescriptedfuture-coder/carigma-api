@@ -451,6 +451,41 @@ def _mailer(port: int) -> Any:
     return SmtpMailer(Settings(smtp_host="smtp.hostinger.com", smtp_port=port))
 
 
+def _headers_sent(email: Email) -> Any:
+    """What the SMTP mailer would put on the wire, without a connection."""
+    from email.message import EmailMessage
+
+    mailer = _mailer(465)
+    out: list[EmailMessage] = []
+
+    class Conn:
+        def send_message(self, message: EmailMessage) -> None:
+            out.append(message)
+
+    mailer._conn = Conn()
+    mailer.send(email)
+    return out[0]
+
+
+def test_the_unsubscribe_header_is_the_signed_link_never_the_address() -> None:
+    """The header pointed at `carigma.in/settings?unsubscribe=<address>`: the
+    marketing site, which answers 404, with the address in the URL (31 Oct).
+    A mail app's Unsubscribe button that fails is a spam report."""
+    link = "https://app.carigma.in/unsubscribe/tok123"
+    message = _headers_sent(
+        Email("a@b.com", "Your week", "body", EmailType.WEEKLY_REVIEW, unsubscribe_url=link)
+    )
+
+    assert message["List-Unsubscribe"] == f"<{link}>"
+    assert "a@b.com" not in message["List-Unsubscribe"]
+
+
+def test_mail_without_a_link_gets_no_unsubscribe_header() -> None:
+    message = _headers_sent(Email("a@b.com", "Receipt", "body", EmailType.RECEIPT))
+
+    assert message["List-Unsubscribe"] is None
+
+
 def test_port_465_uses_implicit_tls() -> None:
     assert _mailer(465).uses_implicit_tls is True
 
