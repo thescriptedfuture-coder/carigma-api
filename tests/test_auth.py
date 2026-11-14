@@ -32,6 +32,13 @@ def test_health_needs_no_auth(client: TestClient) -> None:
     assert r.json()["status"] == "ok"
 
 
+def test_health_answers_head_for_uptime_monitors(client: TestClient) -> None:
+    """UptimeRobot's free plan sends HEAD only; a 405 reads as "down", and the
+    monitor exists to keep this free service awake (14 Nov)."""
+    r = client.head("/health")
+    assert r.status_code == 200
+
+
 def test_valid_es256_token_is_accepted(client: TestClient) -> None:
     r = client.post("/auth/session", headers=auth(make_token()))
     assert r.status_code == 200

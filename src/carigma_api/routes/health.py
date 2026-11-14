@@ -57,7 +57,10 @@ class HealthResponse(BaseModel):
     branch: str
 
 
-@router.get("/health", response_model=HealthResponse)
+# HEAD as well as GET: UptimeRobot's free plan can only send HEAD, and
+# FastAPI does not add it for a GET route the way Starlette does. The monitor
+# that keeps this free service awake read 405 as "down" (14 Nov).
+@router.api_route("/health", methods=["GET", "HEAD"], response_model=HealthResponse)
 async def health(settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
     """Liveness probe. Deliberately leaks no configuration detail.
 
