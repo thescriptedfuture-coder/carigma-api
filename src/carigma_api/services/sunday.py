@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -376,20 +377,25 @@ def planners(db: Any) -> list[str]:
     return sorted({str(r["user_id"]) for r in rows if isinstance(r, dict) and r.get("user_id")})
 
 
-def audience(db: Any, setting: str) -> list[str]:
+def audience(db: Any, setting: str, *, exclude: Collection[str] = ()) -> list[str]:
     """Whom this Sunday plans for: `planners`, or at cutover, `everyone`.
 
     `everyone` is the planners AND every onboarded profile — a planner whose
     profile row lost its flag is still a planner. Anything but the exact word
     is `planners`, like EMAIL_AUDIENCE: a typo must not write plans for
     people still using V1.
+
+    `exclude` is user ids that are never planned for, whatever the setting:
+    the admins (an admin is not a job seeker; support@ has an onboarded
+    profile from UAT). The cron passes them; see `send_emails._admins`.
     """
-    planned = planners(db)
+    left_out = set(exclude)
+    planned = [u for u in planners(db) if u not in left_out]
     if setting.strip().lower() != "everyone":
         return planned
     rows = db.table("profiles").select("user_id").eq("onboarded", True).execute().data or []
     onboarded = {str(r["user_id"]) for r in rows if isinstance(r, dict) and r.get("user_id")}
-    return sorted(set(planned) | onboarded)
+    return sorted((set(planned) | onboarded) - left_out)
 
 
 def sunday(
@@ -399,10 +405,12 @@ def sunday(
     dry_run: bool = False,
     only: str | None = None,
     who: str = "planners",
+    exclude: Collection[str] = (),
 ) -> SundayReport:
     """Review the closing week and propose the next, for `audience(db, who)`.
 
     `only` restricts the pass to one user id — the cron's `--only`.
+    `exclude` is user ids never touched (the admins) — see `audience`.
     """
     moment = now or datetime.now(UTC)
     week = closing_week(moment.date())
@@ -410,7 +418,7 @@ def sunday(
     store = SupabaseContractStore(db)
     report = SundayReport()
 
-    for user_id in audience(db, who):
+    for user_id in audience(db, who, exclude=exclude):
         if only and user_id != only:
             continue
         try:

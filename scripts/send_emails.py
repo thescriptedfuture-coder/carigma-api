@@ -254,6 +254,7 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
     mailer = SmtpMailer(settings)
     log = SupabaseSendLog(db)
     emails = emails_by_user_id(db)
+    admins = _admins(settings)
     signed_in = _last_sign_in(db)
 
     for row in _rows(db, "reengagement_sequences"):
@@ -275,6 +276,8 @@ def run_reengagement(*, dry_run: bool, only: str = "") -> mail.RunSummary:
             logger.warning("reengagement: no email for %s — skipped", sequence.user_id)
             continue
         if only and recipient.lower() != only.lower():
+            continue
+        if recipient.lower() in admins:
             continue
 
         outcome = mail.send(
@@ -389,7 +392,7 @@ def run(
     period = mail.daily_key(today) if kind == "daily" else mail.weekly_key(today)
     email_type = mail.EmailType.DAILY_BRIEF if kind == "daily" else mail.EmailType.WEEKLY_REVIEW
 
-    recipients = _recipients(db)
+    recipients = _recipients(db, admins=_admins(settings))
     if only:
         # Restrict to ONE address. Not a convenience — a safety rail. Widening
         # the lookback to exercise the positive path would otherwise mail real
@@ -434,8 +437,39 @@ def run(
     return summary
 
 
-def _recipients(db: Any) -> list[dict[str, Any]]:
-    """Profiles joined to their auth email.
+def _admins(settings: Any) -> frozenset[str]:
+    """The addresses that are never a job seeker's: `ADMIN_EMAILS`.
+
+    An admin is not a job seeker (29 Oct). support@ was pushed through setup
+    during UAT, so it has an onboarded profile, and every cron here would
+    treat it as a user: a daily brief, a Sunday review, a Sunday plan. Until
+    the switch nobody noticed, because every cron ran with
+    `--only ravisravi31@gmail.com` (found 16 Nov: since 15 Sep every run had
+    reached exactly one address). Taking that off is what makes "everyone"
+    mean everyone, and this is what keeps "everyone" from meaning the admin.
+
+    The list is the API's own allow-list, so it has to be on the cron too. A
+    cron without it says so on every run rather than mailing the admin
+    quietly.
+    """
+    admins = frozenset(a.lower() for a in settings.admin_email_list)
+    if not admins:
+        logger.warning(
+            "ADMIN_EMAILS is not set on this cron: an admin with a profile would be "
+            "mailed and planned for as a job seeker. Copy it from carigma-api."
+        )
+    return admins
+
+
+def _admin_ids(db: Any, admins: frozenset[str]) -> frozenset[str]:
+    """The user ids behind `admins`, for the Sunday pass, which works in ids."""
+    if not admins:
+        return frozenset()
+    return frozenset(u for u, e in emails_by_user_id(db).items() if e.lower() in admins)
+
+
+def _recipients(db: Any, *, admins: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Profiles joined to their auth email, admins left out (see `_admins`).
 
     `profiles` has NO email column and is keyed by `user_id`, not `id` — both
     of which this function originally got wrong, and both of which only
@@ -457,7 +491,7 @@ def _recipients(db: Any) -> list[dict[str, Any]]:
             "prefs": (r.get("preferences") or {}).get("email", {}),
         }
         for r in rows
-        if (email := emails.get(str(r.get("user_id"))))
+        if (email := emails.get(str(r.get("user_id")))) and email.lower() not in admins
     ]
 
 
@@ -658,7 +692,8 @@ def main() -> int:
         # not the one SMTP forces — because it writes rows, not email.
         from carigma_api.services.sunday import sunday
 
-        db = service_client(Settings())
+        settings = Settings()
+        db = service_client(settings)
         only_id = ""
         if args.only:
             only_id = next(
@@ -672,7 +707,8 @@ def main() -> int:
                 db,
                 dry_run=args.dry_run,
                 only=only_id or None,
-                who=Settings().sunday_audience,
+                who=settings.sunday_audience,
+                exclude=_admin_ids(db, _admins(settings)),
             )
             print(json.dumps(sunday_report.as_dict(), indent=2))
             sunday_failed = sunday_report.failed

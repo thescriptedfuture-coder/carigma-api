@@ -393,6 +393,27 @@ def test_the_exact_word_is_read_forgivingly_for_case_and_spaces(db: FakeDB) -> N
     assert audience(db, "  Everyone ") == sorted([USER, OTHER])
 
 
+def test_an_admin_is_never_planned_for_even_with_everyone(db: FakeDB) -> None:
+    """An admin is not a job seeker. support@ finished setup during UAT, so it
+    has an onboarded profile, and `everyone` would have proposed it a week of
+    posts (16 Nov)."""
+    _save(db, _contract(WEEK))
+    db.seed("profiles", {"user_id": "user-admin", "cadence": 3, "onboarded": True})
+
+    report = sunday(db, now=NOW, who="everyone", exclude={"user-admin"})
+
+    assert _row(db, NEXT, user="user-admin") is None
+    assert report.proposed == 2
+
+
+def test_an_admin_who_once_planned_is_left_out_as_well(db: FakeDB) -> None:
+    _save(db, _contract(WEEK))
+    _save(db, _contract(WEEK), user="user-admin")
+
+    assert audience(db, "planners", exclude={"user-admin"}) == [USER]
+    assert "user-admin" not in audience(db, "everyone", exclude={"user-admin"})
+
+
 def test_one_unanswered_week_still_gets_next_weeks_plan(db: FakeDB) -> None:
     _save(db, _contract(WEEK - timedelta(weeks=1)), _contract(WEEK, ContractState.PROPOSED))
 
