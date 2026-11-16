@@ -104,6 +104,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         # The lapsed digest is marketing mail, so it now carries an unsubscribe
         # footer — and is REFUSED without the pieces to build one.
         app_url = "https://app.example.com"
+        # An admin is not a job seeker (16 Nov): the runner leaves these out.
+        admin_email_list = ["support@example.com"]
 
     monkeypatch.setattr(send_emails, "Settings", _S)
     monkeypatch.setattr(send_emails, "service_client", lambda settings: object())
@@ -194,6 +196,19 @@ def test_a_due_lapsed_user_gets_the_market_digest(env: dict[str, Any]) -> None:
     assert sent.to == "u1@example.com"
     assert "Analytics hiring up 12%" in sent.body
     assert sent.email_type is mail.EmailType.MARKET_DIGEST
+
+
+def test_an_admin_is_never_sent_the_lapsed_users_digest(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin is not a job seeker. Case does not matter: the allow-list is
+    read lower-cased, the auth email may not be."""
+    monkeypatch.setattr(send_emails, "emails_by_user_id", lambda db: {"u1": "Support@Example.com"})
+
+    run()
+
+    assert env["mailer"].sent == []
+    assert env["updates"] == []
 
 
 def test_the_digest_is_marketing_so_an_unsubscribe_silences_it() -> None:
